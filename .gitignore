@@ -1,0 +1,23 @@
+# Secrets & credentials
+.env
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Streamlit
+.streamlit/
+
+# Cache & uploads
+cache/
+uploads/
+
+# OS
+.DS_Store
