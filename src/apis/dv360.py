@@ -16,7 +16,7 @@ OPÇÃO A — OAuth com sua conta Google (não precisa ser admin):
 
 OPÇÃO B — Service Account (precisa de admin no DV360):
   Configure no .env:
-     DV360_SERVICE_ACCOUNT_JSON=dv360-credentials.json
+     DV360_SERVICE_ACCOUNT_JSON_BASE64=<json_da_service_account_em_base64>
      DV360_PARTNER_ID=seu_partner_id
      DV360_ADVERTISER_IDS=id1,id2
 """
@@ -24,6 +24,7 @@ OPÇÃO B — Service Account (precisa de admin no DV360):
 import os
 import json
 import time
+import base64
 import requests
 from datetime import date
 from pathlib import Path
@@ -45,6 +46,57 @@ def _resolve(env_var):
     return str(p)
 
 _token_cache = {"token": None, "expires_at": 0}
+
+
+def _get_service_account_info():
+    """
+    Lê a credencial da service account via DV360_SERVICE_ACCOUNT_JSON_BASE64.
+
+    Formato esperado:
+      - Base64 do JSON da service account (recomendado).
+
+    Compatibilidade:
+      - Caminho para arquivo JSON (formato legado).
+      - JSON puro na variável.
+    """
+    raw = os.getenv("DV360_SERVICE_ACCOUNT_JSON_BASE64", "").strip()
+    # Compatibilidade com nome antigo
+    if not raw:
+        raw = os.getenv("DV360_SERVICE_ACCOUNT_JSON", "").strip()
+    if not raw:
+        return None
+
+    # Recomendado: valor em base64
+    try:
+        decoded = base64.b64decode(raw, validate=True).decode("utf-8")
+        parsed = json.loads(decoded)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    # Compat: JSON direto na variável
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    # Compat legado: caminho para JSON no disco
+    p = Path(raw)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    if p.exists():
+        try:
+            with open(p) as f:
+                parsed = json.load(f)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    return None
 
 
 def _get_access_token():
@@ -81,14 +133,14 @@ def _get_access_token():
         return creds.token
 
     # --- Opção B: Service Account ---
-    sa_path = _resolve("DV360_SERVICE_ACCOUNT_JSON")
-    if sa_path and os.path.exists(sa_path):
+    sa_info = _get_service_account_info()
+    if sa_info:
         from google.oauth2 import service_account
         from google.auth.transport.requests import Request
 
         scopes = ["https://www.googleapis.com/auth/display-video",
                   "https://www.googleapis.com/auth/doubleclickbidmanager"]
-        creds = service_account.Credentials.from_service_account_file(sa_path, scopes=scopes)
+        creds = service_account.Credentials.from_service_account_info(sa_info, scopes=scopes)
         creds.refresh(Request())
         _token_cache["token"] = creds.token
         _token_cache["expires_at"] = now + 3500
@@ -102,7 +154,7 @@ def _check_credentials():
         os.path.exists(_resolve("DV360_TOKEN_JSON")) and
         os.path.exists(_resolve("DV360_OAUTH_JSON"))
     )
-    has_sa = os.path.exists(_resolve("DV360_SERVICE_ACCOUNT_JSON"))
+    has_sa = _get_service_account_info() is not None
     has_partner = bool(os.getenv("DV360_PARTNER_ID", ""))
     return (has_oauth or has_sa) and has_partner
 
