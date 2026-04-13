@@ -39,39 +39,20 @@ O **Cost Dashboard** consolida custos de midia paga no periodo **month-to-date (
 
 ---
 
-## 3) Estrutura de Pastas
+## 3) Regras de Negocio (Core)
 
-```text
-cost-dashboard/
-├── backend/
-│   ├── main.py
-│   ├── dashboard_service.py
-│   ├── bigquery_store.py
-│   └── budget_store.py
-├── frontend/
-│   ├── src/app/page.tsx
-│   ├── src/app/campaign/[token]/page.tsx
-│   ├── src/app/sign-in/[[...sign-in]]/page.tsx
-│   ├── src/app/unauthorized/page.tsx
-│   ├── src/proxy.ts
-│   └── package.json
-├── src/
-│   ├── apis/
-│   │   ├── stackadapt.py
-│   │   ├── dv360.py
-│   │   ├── xandr.py
-│   │   ├── amazon_dsp.py
-│   │   ├── hivestack.py
-│   │   ├── nexd.py
-│   │   └── sheets.py
-│   └── utils/
-│       ├── currency.py
-│       └── date_utils.py
-├── run-back.sh
-├── run-front.sh
-├── deploy-backend-cloudrun.sh
-└── .env.example
-```
+Estas sao as regras que governam o comportamento funcional da plataforma:
+
+- **Periodo padrao do dashboard:** sempre MTD (do primeiro dia do mes ate hoje), salvo quando `start/end` sao enviados manualmente.
+- **Moeda de consolidacao:** todo valor e normalizado para BRL para comparabilidade entre fontes.
+- **Conversao cambial oficial:** USD -> BRL via PTAX Bacen; em indisponibilidade, fallback padrao.
+- **Regra de token:** a correlacao com Campaign Journey depende de token no nome da line (`ID-XXXXXX_...`).
+- **Campanhas sem token:** entram em alerta e nao entram no cruzamento com investido da planilha.
+- **Vigencia de campanha:** gastos de campanhas fora da janela vigente entram em alerta de risco.
+- **Nexd:** nao entra com custo de API; custo e estimado por CPM fixo de negocio (`0.0014` BRL por impressao).
+- **Budget por share:** alvo dinamico por plataforma e calculado sobre base SA + DV360 + Xandr com shares configuraveis.
+- **Resiliencia de dado:** em falha parcial de fonte, sistema devolve snapshot com o maximo de dados possivel.
+- **Governanca de refresh:** refresh manual e agendado convivem com cache/snapshot para evitar latencia e indisponibilidade.
 
 ---
 
@@ -217,7 +198,7 @@ cost-dashboard/
 
 ---
 
-## 7) APIs e Fontes Consultadas
+## 7) Todas as APIs e Fontes Consultadas
 
 ## 7.1 StackAdapt
 
@@ -404,6 +385,17 @@ Essa e a fonte que voce roda para gravar os dados HiveStack consumidos por esta 
 - Endpoint PTAX Bacen (Olinda OData)
 - Sem autenticacao
 - Busca cotacao do dia e retrocede ate 5 dias (fim de semana/feriado).
+
+## 7.9 APIs complementares do job de ingestao HiveStack
+
+Para abastecer a tabela `site-hypr.staging.hivestack_mediacost`, o job de ingestao tambem bate nas seguintes APIs/servicos:
+
+- Gmail API (busca e leitura do e-mail de relatorio, alem de atualizacao de labels/status).
+- URL de download do relatorio HiveStack (extraida do corpo do e-mail e consumida via HTTP GET).
+- BigQuery API (carga de dataframe, staging e `MERGE` de upsert).
+- Discord Webhook/API (notificacao de sucesso na etapa `finalize`).
+
+Com isso, o ciclo de dados HiveStack fica completo: e-mail -> download CSV -> tratamento -> BigQuery -> consumo no dashboard.
 
 ---
 
