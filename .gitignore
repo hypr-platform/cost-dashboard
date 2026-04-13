@@ -1,6 +1,9 @@
 # Secrets & credentials
 .env
 *.json
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
 
 # Python
 __pycache__/
