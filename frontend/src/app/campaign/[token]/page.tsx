@@ -1,7 +1,7 @@
 "use client";
 
 import html2canvas from "html2canvas";
-import { useClerk, useUser } from "@clerk/nextjs";
+import { UserButton, useClerk, useUser } from "@clerk/nextjs";
 import Image from "next/image";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -485,6 +485,9 @@ export default function CampaignDetailPage() {
         <button type="button" className="button buttonSmall campaignBackButton" onClick={() => router.push(backPath)}>
           <span aria-hidden="true">←</span> Voltar
         </button>
+        <div className="campaignTopBarUserButton">
+          <UserButton />
+        </div>
       </div>
       <section className="panel panelChart campaignHeroPanel">
         <div className="campaignDetailHeader">

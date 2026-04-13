@@ -46,15 +46,40 @@ export default async function SignInPage({
   }
 
   return (
-    <main className="container authContainer">
-      <section className="panel authPanel">
-        <p className="eyebrow">Acesso restrito</p>
-        <h1>Entrar no Cost Dashboard</h1>
-        <p className="muted">
-          Use sua conta Google do domínio <strong>hypr.mobi</strong>.
-        </p>
-        <div className="clerkWrap">
-          <SignIn path="/sign-in" routing="path" forceRedirectUrl={returnPath} />
+    <main className="authContainer authSignInContainer">
+      <div className="authSignInGlow" aria-hidden="true" />
+      <section className="authSignInShell">
+        <div className="clerkWrap authSignInClerkWrap">
+          <SignIn
+            path="/sign-in"
+            routing="path"
+            forceRedirectUrl={returnPath}
+            appearance={{
+              variables: {
+                colorBackground: "#0b1220",
+                colorNeutral: "#111827",
+                colorPrimary: "#3b82f6",
+                colorText: "#f8fafc",
+                colorTextSecondary: "#94a3b8",
+                colorInputBackground: "#0f172a",
+                colorInputText: "#f8fafc",
+                borderRadius: "12px",
+              },
+              elements: {
+                rootBox: "authClerkRootBox",
+                cardBox: "authClerkCard",
+                card: "authClerkCardInner",
+                headerTitle: "authClerkHeaderTitle",
+                headerSubtitle: "authClerkHeaderSubtitle",
+                footerActionText: "authClerkFooterText",
+                footerActionLink: "authClerkFooterLink",
+                socialButtonsBlockButton: "authClerkSocialButton",
+                socialButtonsBlockButtonText: "authClerkSocialButtonText",
+                formButtonPrimary: "authClerkPrimaryButton",
+                dividerText: "authClerkDividerText",
+              },
+            }}
+          />
         </div>
       </section>
     </main>

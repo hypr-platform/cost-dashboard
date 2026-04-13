@@ -1,10 +1,10 @@
 "use client";
 
-import { useClerk, useUser } from "@clerk/nextjs";
+import { UserButton, useClerk, useUser } from "@clerk/nextjs";
 import html2canvas from "html2canvas";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import useSWR from "swr";
 import {
   Bar,
@@ -908,7 +908,7 @@ function SessionLoading({ message }: { message: string }) {
   );
 }
 
-export default function Home() {
+function HomeContent() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -3628,6 +3628,9 @@ export default function Home() {
             </p>
           </div>
           <div className="headerActions">
+            <div className="headerUserButtonWrap">
+              <UserButton />
+            </div>
             <button className="button" onClick={handleRefresh} disabled={isValidating || isRefreshRunning}>
               <ReloadIcon spinning={isValidating || isRefreshRunning} />
               <span>{isValidating || isRefreshRunning ? "Atualizando na fonte..." : "Forçar atualização na fonte"}</span>
@@ -3782,5 +3785,13 @@ export default function Home() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={<SessionLoading message="Carregando dashboard..." />}>
+      <HomeContent />
+    </Suspense>
   );
 }
