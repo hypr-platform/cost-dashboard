@@ -18,19 +18,19 @@ Frontend em Next.js para visualizacao do dashboard de custos do mês corrente.
 
 ## Setup
 
-1) Instalar dependencias:
+1. Instalar dependencias:
 
 ```bash
 npm install
 ```
 
-2) Criar variaveis locais:
+2. Criar variaveis locais:
 
 ```bash
 cp .env.local.example .env.local
 ```
 
-3) Preencher `frontend/.env.local`:
+3. Preencher `frontend/.env.local`:
 
 ```env
 NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
@@ -49,7 +49,7 @@ No dashboard do Clerk:
 
 1. Em `Sign-in methods`, habilite somente Google.
 2. Desabilite email/password e outros providers.
-3. Configure restricao de dominio para `hypr.mobi` (recomendado).
+3. Configure restricao de dominio para `hypr.mobi` (recomendado)
 
 No app, o dominio tambem e validado e usuarios fora de `@hypr.mobi` sao desconectados.
 
