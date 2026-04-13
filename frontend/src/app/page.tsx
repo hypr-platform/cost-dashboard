@@ -301,7 +301,9 @@ const URL_PARAM_CAMPAIGNS = "campaigns";
 const URL_PARAM_CAMPAIGN_STATUS = "campaign_status";
 /** Filtro por padrão no nome da campanha (Survey / RMNf / AON). */
 const URL_PARAM_CAMPAIGN_TYPE = "tipo";
+const URL_PARAM_MONTH = "month";
 const CAMPAIGN_TYPE_OPTIONS = ["Survey", "RMNf", "AON"] as const;
+const MONTH_KEY_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 function campaignNameMatchesTypeOption(campanha: string, typeOption: string): boolean {
   const name = String(campanha ?? "").trim();
@@ -483,6 +485,50 @@ function parseCsvList(value: string | null): string[] {
 function stringifyCsvList(values: string[]): string | null {
   if (!values.length) return null;
   return values.map((value) => encodeURIComponent(value)).join(",");
+}
+
+function isValidMonthKey(value: string | null | undefined): value is string {
+  if (!value) return false;
+  return MONTH_KEY_REGEX.test(value.trim());
+}
+
+function getCurrentMonthKey(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  return `${now.getFullYear()}-${month}`;
+}
+
+function monthKeyToDateRange(monthKey: string): { start: string; end: string } {
+  const [yearRaw, monthRaw] = monthKey.split("-");
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const lastDay = new Date(year, month, 0).getDate();
+  return {
+    start: `${yearRaw}-${monthRaw}-01`,
+    end: `${yearRaw}-${monthRaw}-${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
+function buildRecentMonthKeys(count: number): string[] {
+  const now = new Date();
+  const keys: string[] = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    keys.push(`${date.getFullYear()}-${month}`);
+  }
+  return keys;
+}
+
+function formatMonthKeyLabel(monthKey: string): string {
+  const [yearRaw, monthRaw] = monthKey.split("-");
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return monthKey;
+  return new Date(year, month - 1, 1).toLocaleDateString("pt-BR", {
+    month: "long",
+    year: "numeric",
+  });
 }
 
 function csvEscape(value: string | number | null | undefined): string {
@@ -1199,6 +1245,10 @@ function HomeContent() {
       (CAMPAIGN_TYPE_OPTIONS as readonly string[]).includes(t)
     )
   );
+  const [selectedMonthKey, setSelectedMonthKey] = useState<string>(() => {
+    const paramMonth = searchParams.get(URL_PARAM_MONTH);
+    return isValidMonthKey(paramMonth) ? paramMonth : getCurrentMonthKey();
+  });
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
   const [isForceRefreshing, setIsForceRefreshing] = useState(false);
@@ -1213,10 +1263,20 @@ function HomeContent() {
     "pessoa";
   const isAllowedDomain = userEmail.endsWith("@hypr.mobi");
   const shouldFetchData = isUserLoaded && isSignedIn && isAllowedDomain;
+  const selectedMonthRange = useMemo(() => monthKeyToDateRange(selectedMonthKey), [selectedMonthKey]);
+  const availableMonthKeys = useMemo(() => {
+    const options = buildRecentMonthKeys(18);
+    if (options.includes(selectedMonthKey)) return options;
+    return [selectedMonthKey, ...options];
+  }, [selectedMonthKey]);
   const dashboardUrl = useMemo(() => {
     if (!shouldFetchData) return null;
-    return `${apiBase}/api/dashboard`;
-  }, [apiBase, shouldFetchData]);
+    const query = new URLSearchParams({
+      start: selectedMonthRange.start,
+      end: selectedMonthRange.end,
+    });
+    return `${apiBase}/api/dashboard?${query.toString()}`;
+  }, [apiBase, selectedMonthRange.end, selectedMonthRange.start, shouldFetchData]);
   const { data, error, isLoading, isValidating, mutate } = useSWR<DashboardResponse>(dashboardUrl, fetcher, {
     keepPreviousData: true,
     revalidateOnFocus: false,
@@ -1313,6 +1373,8 @@ function HomeContent() {
     const nextCampaignTypes = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE)).filter((t) =>
       (CAMPAIGN_TYPE_OPTIONS as readonly string[]).includes(t)
     );
+    const nextMonth = searchParams.get(URL_PARAM_MONTH);
+    const normalizedMonth = isValidMonthKey(nextMonth) ? nextMonth : getCurrentMonthKey();
 
     setStackAdaptSearch(searchParams.get(URL_PARAM_STACK_SEARCH) ?? "");
     setDspLinesOnlyWithoutToken(searchParams.get(URL_PARAM_STACK_NO_TOKEN_ONLY) === "1");
@@ -1338,6 +1400,7 @@ function HomeContent() {
       prev.join("|") === nextCampaignStatuses.join("|") ? prev : nextCampaignStatuses
     );
     setCampaignTypeFilter((prev) => (prev.join("|") === nextCampaignTypes.join("|") ? prev : nextCampaignTypes));
+    setSelectedMonthKey((prev) => (prev === normalizedMonth ? prev : normalizedMonth));
   }, [searchParams]);
 
   useEffect(() => {
@@ -1364,6 +1427,7 @@ function HomeContent() {
     setQueryValue(URL_PARAM_CAMPAIGNS, stringifyCsvList(campaignFilter));
     setQueryValue(URL_PARAM_CAMPAIGN_STATUS, stringifyCsvList(campaignStatusFilter));
     setQueryValue(URL_PARAM_CAMPAIGN_TYPE, stringifyCsvList(campaignTypeFilter));
+    setQueryValue(URL_PARAM_MONTH, selectedMonthKey);
 
     const currentQuery = searchParams.toString();
     const nextQuery = nextParams.toString();
@@ -1387,6 +1451,7 @@ function HomeContent() {
     pathname,
     router,
     searchParams,
+    selectedMonthKey,
     stackAdaptSearch,
     stackAdaptSort.direction,
     stackAdaptSort.key,
@@ -2108,7 +2173,7 @@ function HomeContent() {
   const dashboardErrorIsTimeout = dashboardErrorMessage.toLowerCase().includes("timeout");
   const periodRangeLabel = data
     ? `${formatDateBr(data.period.start)} → ${formatDateBr(data.period.end)}`
-    : "—";
+    : `${formatDateBr(selectedMonthRange.start)} → ${formatDateBr(selectedMonthRange.end)}`;
 
   const renderDashboardPage = () => {
     if (!data) return null;
@@ -4045,12 +4110,28 @@ function HomeContent() {
 
       <section className="content">
         <header className="header">
-          <div>
-            {resolvedActivePage === "Dashboard" ? (
-              <p className="welcomeMessage">Olá, {userDisplayName}</p>
-            ) : null}
-            <h1>{NAV_LABELS[resolvedActivePage]}</h1>
-            <p className="muted">{periodRangeLabel}</p>
+          <div className="headerMain">
+            <div>
+              {resolvedActivePage === "Dashboard" ? (
+                <p className="welcomeMessage">Olá, {userDisplayName}</p>
+              ) : null}
+              <h1>{NAV_LABELS[resolvedActivePage]}</h1>
+              <p className="muted">{periodRangeLabel}</p>
+            </div>
+            <label className="monthFilterControl">
+              <span className="monthFilterLabel">Mês de análise</span>
+              <select
+                value={selectedMonthKey}
+                onChange={(event) => setSelectedMonthKey(event.target.value)}
+                aria-label="Selecionar mês de análise"
+              >
+                {availableMonthKeys.map((monthKey) => (
+                  <option key={monthKey} value={monthKey}>
+                    {formatMonthKeyLabel(monthKey)}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="headerActions">
             <div className="headerUserButtonWrap">
