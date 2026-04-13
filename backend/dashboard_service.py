@@ -9,7 +9,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from backend import bigquery_store
-from backend.budget_store import get_general_target, get_targets_for_month
+from backend.budget_store import dynamic_platform_targets_brl, get_platform_budget_share_percent
 from src.apis import amazon_dsp, dv360, nexd, stackadapt, xandr
 from src.apis.sheets import extract_token_from_line, fetch_campaign_journey
 from src.utils.currency import get_usd_to_brl, to_brl
@@ -487,10 +487,21 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
         c["end"] = _iso(c.get("end"))
 
     month_key = _month_key_from_date(start)
-    budget_targets = get_targets_for_month(month_key)
-    general_target_brl = get_general_target(month_key)
-    general_progress_pct = (total_brl / general_target_brl * 100) if general_target_brl and general_target_brl > 0 else None
-    general_remaining_brl = (general_target_brl - total_brl) if general_target_brl is not None else None
+    share_percent = get_platform_budget_share_percent()
+    allocation_base_brl = 0.0
+    for _platform_name in share_percent:
+        _pdata = results.get(_platform_name, {})
+        if not isinstance(_pdata, dict) or _pdata.get("status") != "ok":
+            continue
+        allocation_base_brl += _to_brl_smart(
+            float(_pdata.get("spend", 0.0) or 0.0),
+            _pdata.get("currency", "USD"),
+            rate,
+        )
+    budget_targets = dynamic_platform_targets_brl(allocation_base_brl)
+    general_target_brl = None
+    general_progress_pct = None
+    general_remaining_brl = None
     budget_platforms: dict[str, Any] = {}
     for entry in spend_by_platform:
         platform_name = str(entry["platform"])
@@ -537,6 +548,7 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
         },
         "budget": {
             "month_key": month_key,
+            "share_percent": share_percent,
             "general": {
                 "target_brl": general_target_brl,
                 "spent_brl": total_brl,

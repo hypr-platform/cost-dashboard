@@ -58,7 +58,7 @@ const PLATFORM_COLORS: Record<string, string> = {
   DV360: "#22c55e",
   Xandr: "#ef4444",
   "Amazon DSP": "#f59e0b",
-  Nexd: "#f97316",
+  Nexd: "#89cff0",
 };
 
 const PLATFORM_LOGOS: Record<string, string> = {

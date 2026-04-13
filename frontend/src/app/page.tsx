@@ -4,7 +4,7 @@ import { UserButton, useClerk, useUser } from "@clerk/nextjs";
 import html2canvas from "html2canvas";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import useSWR from "swr";
 import {
   Bar,
@@ -26,12 +26,18 @@ type JourneyRow = {
   token: string;
   cliente: string;
   campanha: string;
+  account_management?: string;
   status: string;
   investido: number;
   total_plataformas: number;
   pct_investido: number;
-  [platform: string]: string | number;
+  [platform: string]: string | number | undefined;
 };
+
+function rowCsLabel(row: JourneyRow): string {
+  const s = String(row.account_management ?? "").trim();
+  return s || "Sem CS";
+}
 
 type PlatformPageRow = {
   line: string;
@@ -60,6 +66,8 @@ type AttentionSortDirection = "asc" | "desc";
 
 type BudgetData = {
   month_key: string;
+  /** Percentuais 0–100 por plataforma (StackAdapt, DV360, Xandr); vindo do backend / env. */
+  share_percent?: Partial<Record<string, number>>;
   general: {
     target_brl: number | null;
     spent_brl: number;
@@ -174,7 +182,8 @@ const PLATFORM_COLORS: Record<string, string> = {
   DV360: "#22c55e",
   Xandr: "#ef4444",
   "Amazon DSP": "#22c55e",
-  Nexd: "#f97316",
+  Nexd: "#89cff0",
+  Hivestack: "#e31c79",
   Total: "#ffffff",
 };
 const PLATFORM_LOGOS: Record<string, string> = {
@@ -184,6 +193,7 @@ const PLATFORM_LOGOS: Record<string, string> = {
   Amazon: "/amazon-logo.png",
   "Amazon DSP": "/amazon-logo.png",
   Nexd: "/nexd-logo.png",
+  Hivestack: "/hivestack-logo.png",
 };
 const ACCOUNT_MANAGER_AVATARS: Record<string, string> = {
   "João Buzolin": "/account-managers/joao-buzolin.png",
@@ -270,6 +280,12 @@ function getCampaignReferenceWhatsAppUrl(
 }
 
 const GENERAL_BUDGET_KEY = "__general__";
+/** Fallback se o payload não trouxer share_percent (ex.: cache antigo). Igual aos padrões do backend. */
+const DEFAULT_INVESTMENT_SHARE_PERCENT: Record<string, number> = {
+  StackAdapt: 30,
+  DV360: 50,
+  Xandr: 13,
+};
 const URL_PARAM_STACK_SEARCH = "sa_q";
 const URL_PARAM_STACK_NO_TOKEN_ONLY = "sa_no_token";
 const URL_PARAM_STACK_SORT = "sa_sort";
@@ -280,6 +296,32 @@ const URL_PARAM_OUT_SEARCH = "oop_q";
 const URL_PARAM_OUT_SORT = "oop_sort";
 const URL_PARAM_OUT_DSPS = "oop_dsps";
 const URL_PARAM_CLIENTS = "clients";
+const URL_PARAM_CS = "cs";
+const URL_PARAM_CAMPAIGNS = "campaigns";
+const URL_PARAM_CAMPAIGN_STATUS = "campaign_status";
+/** Filtro por padrão no nome da campanha (Survey / RMNf / AON). */
+const URL_PARAM_CAMPAIGN_TYPE = "tipo";
+const CAMPAIGN_TYPE_OPTIONS = ["Survey", "RMNf", "AON"] as const;
+
+function campaignNameMatchesTypeOption(campanha: string, typeOption: string): boolean {
+  const name = String(campanha ?? "").trim();
+  const upper = name.toUpperCase();
+  if (typeOption === "Survey") {
+    return upper.endsWith("SURVEY") || upper.endsWith("SURVERY");
+  }
+  if (typeOption === "RMNf") {
+    return upper.endsWith("RMNF");
+  }
+  if (typeOption === "AON") {
+    return upper.startsWith("AON");
+  }
+  return false;
+}
+
+function rowMatchesCampaignTypes(campanha: string, selectedTypes: string[]): boolean {
+  if (!selectedTypes.length) return true;
+  return selectedTypes.some((t) => campaignNameMatchesTypeOption(campanha, t));
+}
 const BRL_FORMATTER = new Intl.NumberFormat("pt-BR", {
   style: "currency",
   currency: "BRL",
@@ -300,6 +342,17 @@ type NavKey =
   | "DV360"
   | "Xandr"
   | "Amazon DSP";
+
+const NAV_LABELS: Record<NavKey, string> = {
+  Dashboard: "DeepDive Dsps",
+  "⚠️ Lines sem token": "⚠️ Lines sem token",
+  "🚨 Gasto fora do mês vigente": "🚨 Gasto fora do mês vigente",
+  Nexd: "Nexd",
+  StackAdapt: "StackAdapt",
+  DV360: "DV360",
+  Xandr: "Xandr",
+  "Amazon DSP": "Amazon DSP",
+};
 
 const PAGE_TO_SLUG: Record<Exclude<NavKey, "Dashboard">, string> = {
   "⚠️ Lines sem token": "lines-sem-token",
@@ -337,6 +390,24 @@ function hasCampaignToken(token: string | null | undefined) {
   const normalized = (token ?? "").trim();
   if (!normalized || normalized === "—" || normalized === "-") return false;
   return normalized.toLowerCase() !== "sem token";
+}
+
+function journeySnapshotForPlatformRow(
+  row: PlatformPageRow,
+  journeyByToken: Map<string, JourneyRow>
+): JourneyRow {
+  const t = String(row.token ?? "").trim();
+  const journey = t && hasCampaignToken(t) ? journeyByToken.get(t) : undefined;
+  return {
+    token: row.token,
+    cliente: row.cliente,
+    campanha: row.campanha,
+    account_management: row.account_management,
+    status: journey?.status ?? "",
+    investido: Number(journey?.investido ?? row.investido ?? 0),
+    total_plataformas: Number(journey?.total_plataformas ?? 0),
+    pct_investido: Number(journey?.pct_investido ?? 0),
+  } as JourneyRow;
 }
 
 const fetcher = async (url: string) => {
@@ -393,15 +464,6 @@ function formatDateBr(value: string | null | undefined) {
     return `${isoMatch[3]}/${isoMatch[2]}/${isoMatch[1]}`;
   }
   return value;
-}
-
-function sanitizeBudgetInput(value: string) {
-  const normalized = value.replace(",", ".");
-  const onlyNumbersAndDot = normalized.replace(/[^\d.]/g, "");
-  const [integerPart, ...rest] = onlyNumbersAndDot.split(".");
-  if (!rest.length) return integerPart;
-  const decimals = rest.join("").slice(0, 2);
-  return `${integerPart}.${decimals}`;
 }
 
 function parseCsvList(value: string | null): string[] {
@@ -635,18 +697,21 @@ function KpiCard({
   value,
   subtitle,
   badge,
+  badgeTone,
+  statusIndicator,
   dimmed,
   titleEmphasis,
   logoSrc,
   budget,
-  onOpenBudgetModal,
   variant,
   href,
 }: {
   title: string;
   value: string;
-  subtitle: string;
+  subtitle: ReactNode;
   badge?: string;
+  badgeTone?: "soon";
+  statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
   dimmed?: boolean;
   titleEmphasis?: boolean;
   logoSrc?: string;
@@ -655,8 +720,8 @@ function KpiCard({
     spent_brl: number;
     progress_pct: number | null;
     remaining_brl: number | null;
+    investment_share_pct?: number | null;
   };
-  onOpenBudgetModal?: () => void;
   variant?: "default" | "premium";
   href?: string;
 }) {
@@ -665,6 +730,7 @@ function KpiCard({
   const progressClamped = Math.max(0, Math.min(progress, 100));
   const isOverTarget = progress > 100;
   const hasBudgetTarget = budget?.target_brl !== null && budget?.target_brl !== undefined;
+  const investmentSharePct = budget?.investment_share_pct;
 
   const go = () => {
     if (href) router.push(href);
@@ -688,7 +754,12 @@ function KpiCard({
           : undefined
       }
     >
-      {badge ? <p className="cardBadge">{badge}</p> : null}
+      {badge ? (
+        <p className={`cardBadge ${badgeTone === "soon" ? "cardBadgeSoon" : ""}`}>
+          {badgeTone === "soon" ? <span className="cardBadgeSoonDot" aria-hidden="true" /> : null}
+          {badge}
+        </p>
+      ) : null}
       <div className="cardHeader">
         {logoSrc ? (
           <Image
@@ -698,48 +769,225 @@ function KpiCard({
             height={28}
             className={`cardLogo ${title === "Xandr" ? "cardLogoXandr" : ""} ${title.startsWith("Amazon") ? "cardLogoAmazon" : ""} ${
               title.toUpperCase() === "NEXD" ? "cardLogoNexd" : ""
-            }`}
+            } ${title === "Hivestack" ? "cardLogoHivestack" : ""}`}
           />
         ) : null}
         <p className={`cardTitle ${titleEmphasis ? "cardTitleEmphasis" : ""}`}>{title}</p>
-        {onOpenBudgetModal ? (
-          <button
-            className="cardTextButton"
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenBudgetModal();
-            }}
-          >
-            <span>Definir orçamento alvo</span>
-            <span className="cardTextButtonIcon" aria-hidden="true">
-              ↗
-            </span>
-          </button>
+        {statusIndicator ? (
+          <span className={`cardStatusIndicator cardStatusIndicator${statusIndicator.tone}`}>
+            <span className="cardStatusDot" aria-hidden="true" />
+            {statusIndicator.label}
+          </span>
         ) : null}
       </div>
       <p className="cardValue">{value}</p>
       <p className="cardSubtitle">{subtitle}</p>
-      {budget ? (
+      {budget && hasBudgetTarget ? (
         <div className="cardBudgetSlot">
-          {hasBudgetTarget ? (
-            <div className="cardBudget">
-              <div className="budgetProgressTrack budgetProgressTrackCard">
-                <div
-                  className={`budgetProgressFill ${isOverTarget ? "budgetProgressFillOver" : ""}`}
-                  style={{ width: `${progressClamped}%` }}
-                />
-              </div>
-              <p className={`cardBudgetText ${isOverTarget ? "alertErrorInline" : ""}`}>
-                {isOverTarget
-                  ? `Budget extrapolado em ${((budget.progress_pct ?? 0) - 100).toFixed(1)}% (${brl(
-                      Math.abs(budget.remaining_brl ?? 0)
-                    )})`
-                  : `${(budget.progress_pct ?? 0).toFixed(1)}% • Restante: ${brl(budget.remaining_brl ?? 0)}`}
-              </p>
+          <div className="cardBudget">
+            <p className="cardBudgetTargetLine">
+              <span className="cardBudgetTargetLabel">Alvo de Share de Investimento</span>
+              <span className="cardBudgetTargetValue">
+                {brl(budget.target_brl ?? 0)}
+                {investmentSharePct != null && Number.isFinite(investmentSharePct)
+                  ? ` (${Number(investmentSharePct).toLocaleString("pt-BR", { maximumFractionDigits: 2 })}%)`
+                  : ""}
+              </span>
+            </p>
+            <div className="budgetProgressTrack budgetProgressTrackCard">
+              <div
+                className={`budgetProgressFill ${isOverTarget ? "budgetProgressFillOver" : ""}`}
+                style={{ width: `${progressClamped}%` }}
+              />
             </div>
-          ) : null}
+            <p className={`cardBudgetText ${isOverTarget ? "alertErrorInline" : ""}`}>
+              {isOverTarget
+                ? `Budget extrapolado em ${((budget.progress_pct ?? 0) - 100).toFixed(1)}% (${brl(
+                    Math.abs(budget.remaining_brl ?? 0)
+                  )})`
+                : `${(budget.progress_pct ?? 0).toFixed(1)}% • Restante: ${brl(budget.remaining_brl ?? 0)}`}
+            </p>
+          </div>
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function MultiSelectFilter({
+  id,
+  label,
+  options,
+  value,
+  onChange,
+  placeholder = "Todos",
+  showAvatar = false,
+  disabledOptions,
+}: {
+  id: string;
+  label: string;
+  options: string[];
+  value: string[];
+  onChange: (next: string[]) => void;
+  placeholder?: string;
+  showAvatar?: boolean;
+  disabledOptions?: ReadonlySet<string>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedOptions = options.filter((opt) => value.includes(opt));
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleOptions = useMemo(() => {
+    if (!normalizedQuery) return options;
+    return options.filter((opt) => opt.toLowerCase().includes(normalizedQuery));
+  }, [normalizedQuery, options]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  useEffect(() => {
+    if (!open) {
+      setQuery("");
+      return;
+    }
+    const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, [open]);
+
+  const summary =
+    value.length === 0 ? placeholder : value.length === 1 ? value[0] : `${value.length} selecionados`;
+
+  const isOptionDisabled = (opt: string) => Boolean(disabledOptions?.has(opt) && !value.includes(opt));
+
+  const toggle = (opt: string) => {
+    if (isOptionDisabled(opt)) return;
+    if (value.includes(opt)) onChange(value.filter((x) => x !== opt));
+    else onChange([...value, opt]);
+  };
+  const removeSelected = (opt: string) => onChange(value.filter((x) => x !== opt));
+  const clearAll = () => onChange([]);
+
+  const initialsFor = (name: string) =>
+    name
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part[0]?.toUpperCase() ?? "")
+      .join("");
+
+  return (
+    <div className="filterField" ref={rootRef}>
+      <label htmlFor={`${id}-trigger`} className="filterFieldLabel">
+        {label}
+      </label>
+      <button
+        type="button"
+        id={`${id}-trigger`}
+        className="multiSelectTrigger"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        disabled={!options.length}
+        onClick={() => options.length && setOpen((o) => !o)}
+      >
+        <span className="multiSelectTriggerMain">
+          {showAvatar && selectedOptions.length > 0 ? (
+            <span className="multiSelectSelectedAvatars" aria-hidden>
+              {selectedOptions.slice(0, 3).map((opt) => {
+                const avatar = getAccountManagerAvatar(opt);
+                return avatar ? (
+                  <Image key={opt} src={avatar} alt="" width={20} height={20} className="multiSelectAvatarThumb" />
+                ) : (
+                  <span key={opt} className="multiSelectAvatarFallbackThumb">
+                    {initialsFor(opt)}
+                  </span>
+                );
+              })}
+            </span>
+          ) : null}
+          <span className="multiSelectTriggerLabel">{!options.length ? "Sem opções" : summary}</span>
+        </span>
+        <span className="multiSelectChevron" aria-hidden>
+          {"\u25BC"}
+        </span>
+      </button>
+      {selectedOptions.length ? (
+        <div className="multiSelectChipsRow">
+          <div className="multiSelectChips" aria-label={`Filtros selecionados para ${label}`}>
+            {selectedOptions.map((opt) => (
+              <button
+                key={`${id}-chip-${opt}`}
+                type="button"
+                className="multiSelectChip"
+                onClick={() => removeSelected(opt)}
+                aria-label={`Remover ${opt}`}
+              >
+                <span>{opt}</span>
+                <span className="multiSelectChipX" aria-hidden>
+                  ×
+                </span>
+              </button>
+            ))}
+          </div>
+          <button type="button" className="multiSelectClearAllButton" onClick={clearAll}>
+            Limpar tudo
+          </button>
+        </div>
+      ) : null}
+      {open && options.length ? (
+        <ul className="multiSelectList" role="listbox" aria-multiselectable="true">
+          <li className="multiSelectSearchRow">
+            <input
+              ref={searchInputRef}
+              type="text"
+              className="multiSelectSearchInput"
+              placeholder="Buscar..."
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            {selectedOptions.length ? (
+              <button type="button" className="multiSelectClearInlineButton" onClick={clearAll}>
+                Limpar tudo
+              </button>
+            ) : null}
+          </li>
+          {visibleOptions.length ? visibleOptions.map((opt) => {
+            const selected = value.includes(opt);
+            const disabled = isOptionDisabled(opt);
+            return (
+            <li key={opt} role="option" aria-selected={selected} aria-disabled={disabled || undefined}>
+              <label className={`multiSelectOption ${disabled ? "multiSelectOptionDisabled" : ""}`}>
+                <input type="checkbox" checked={selected} disabled={disabled} onChange={() => toggle(opt)} />
+                {showAvatar
+                  ? getAccountManagerAvatar(opt)
+                    ? (
+                      <Image
+                        src={getAccountManagerAvatar(opt)!}
+                        alt=""
+                        width={24}
+                        height={24}
+                        className="multiSelectOptionAvatar"
+                      />
+                    )
+                    : (
+                      <span className="multiSelectOptionAvatarFallback">{initialsFor(opt)}</span>
+                    )
+                  : null}
+                <span>{opt}</span>
+              </label>
+            </li>
+          );}) : (
+            <li className="multiSelectEmptyState">Nenhum resultado encontrado.</li>
+          )}
+        </ul>
       ) : null}
     </div>
   );
@@ -941,18 +1189,21 @@ function HomeContent() {
     direction: AttentionSortDirection;
   }>(() => parseOutOfPeriodSortParam(searchParams.get(URL_PARAM_OUT_SORT)));
   const [clientFilter, setClientFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CLIENTS)));
+  const [csFilter, setCsFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CS)));
+  const [campaignFilter, setCampaignFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CAMPAIGNS)));
+  const [campaignStatusFilter, setCampaignStatusFilter] = useState<string[]>(
+    () => parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_STATUS))
+  );
+  const [campaignTypeFilter, setCampaignTypeFilter] = useState<string[]>(() =>
+    parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE)).filter((t) =>
+      (CAMPAIGN_TYPE_OPTIONS as readonly string[]).includes(t)
+    )
+  );
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
-  const [budgetInputs, setBudgetInputs] = useState<Record<string, string>>({});
-  const [savingBudgetByPlatform, setSavingBudgetByPlatform] = useState<Record<string, boolean>>({});
-  const [budgetError, setBudgetError] = useState<string | null>(null);
-  const [budgetModalPlatform, setBudgetModalPlatform] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
   const [isForceRefreshing, setIsForceRefreshing] = useState(false);
   const [refreshRunStartedAt, setRefreshRunStartedAt] = useState<number | null>(null);
   const [refreshElapsedSeconds, setRefreshElapsedSeconds] = useState(0);
-  const modalCardRef = useRef<HTMLElement | null>(null);
-  const modalInputRef = useRef<HTMLInputElement | null>(null);
-  const previousFocusedElementRef = useRef<HTMLElement | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
   const userEmail = user?.primaryEmailAddress?.emailAddress?.toLowerCase() ?? "";
   const userDisplayName =
@@ -1030,7 +1281,6 @@ function HomeContent() {
     return null;
   }, [data?._meta?.snapshot_at, lastUpdatedAt]);
   const isRefreshRunning = Boolean(refreshStatus?.running) || isForceRefreshing;
-  const isSavingCurrentBudget = budgetModalPlatform ? Boolean(savingBudgetByPlatform[budgetModalPlatform]) : false;
   const previousRefreshRunningRef = useRef(false);
   const spendByPlatformChartRef = useRef<HTMLDivElement | null>(null);
   const distributionChartRef = useRef<HTMLDivElement | null>(null);
@@ -1057,6 +1307,12 @@ function HomeContent() {
     const nextNoTokenDsps = parseCsvList(searchParams.get(URL_PARAM_NO_TOKEN_DSPS));
     const nextOutDsps = parseCsvList(searchParams.get(URL_PARAM_OUT_DSPS));
     const nextClients = parseCsvList(searchParams.get(URL_PARAM_CLIENTS));
+    const nextCs = parseCsvList(searchParams.get(URL_PARAM_CS));
+    const nextCampaigns = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGNS));
+    const nextCampaignStatuses = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_STATUS));
+    const nextCampaignTypes = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE)).filter((t) =>
+      (CAMPAIGN_TYPE_OPTIONS as readonly string[]).includes(t)
+    );
 
     setStackAdaptSearch(searchParams.get(URL_PARAM_STACK_SEARCH) ?? "");
     setDspLinesOnlyWithoutToken(searchParams.get(URL_PARAM_STACK_NO_TOKEN_ONLY) === "1");
@@ -1076,6 +1332,12 @@ function HomeContent() {
     );
     setAttentionOutOfPeriodDspFilters((prev) => (prev.join("|") === nextOutDsps.join("|") ? prev : nextOutDsps));
     setClientFilter((prev) => (prev.join("|") === nextClients.join("|") ? prev : nextClients));
+    setCsFilter((prev) => (prev.join("|") === nextCs.join("|") ? prev : nextCs));
+    setCampaignFilter((prev) => (prev.join("|") === nextCampaigns.join("|") ? prev : nextCampaigns));
+    setCampaignStatusFilter((prev) =>
+      prev.join("|") === nextCampaignStatuses.join("|") ? prev : nextCampaignStatuses
+    );
+    setCampaignTypeFilter((prev) => (prev.join("|") === nextCampaignTypes.join("|") ? prev : nextCampaignTypes));
   }, [searchParams]);
 
   useEffect(() => {
@@ -1098,6 +1360,10 @@ function HomeContent() {
     setQueryValue(URL_PARAM_OUT_SORT, `${attentionOutOfPeriodSort.key}:${attentionOutOfPeriodSort.direction}`);
     setQueryValue(URL_PARAM_OUT_DSPS, stringifyCsvList(attentionOutOfPeriodDspFilters));
     setQueryValue(URL_PARAM_CLIENTS, stringifyCsvList(clientFilter));
+    setQueryValue(URL_PARAM_CS, stringifyCsvList(csFilter));
+    setQueryValue(URL_PARAM_CAMPAIGNS, stringifyCsvList(campaignFilter));
+    setQueryValue(URL_PARAM_CAMPAIGN_STATUS, stringifyCsvList(campaignStatusFilter));
+    setQueryValue(URL_PARAM_CAMPAIGN_TYPE, stringifyCsvList(campaignTypeFilter));
 
     const currentQuery = searchParams.toString();
     const nextQuery = nextParams.toString();
@@ -1112,7 +1378,11 @@ function HomeContent() {
     attentionOutOfPeriodSearch,
     attentionOutOfPeriodSort.direction,
     attentionOutOfPeriodSort.key,
+    campaignFilter,
+    campaignStatusFilter,
+    campaignTypeFilter,
     clientFilter,
+    csFilter,
     dspLinesOnlyWithoutToken,
     pathname,
     router,
@@ -1122,61 +1392,89 @@ function HomeContent() {
     stackAdaptSort.key,
   ]);
 
-  useEffect(() => {
-    if (!budgetModalPlatform) return;
-    previousFocusedElementRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const animationFrame = window.requestAnimationFrame(() => {
-      modalInputRef.current?.focus();
-    });
-
-    const handleModalKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        if (!isSavingCurrentBudget) {
-          setBudgetModalPlatform(null);
-        }
-        return;
+  const journeyRows = useMemo(() => data?.dashboard.campaign_journey_rows ?? [], [data?.dashboard.campaign_journey_rows]);
+  const journeyByToken = useMemo(() => {
+    const m = new Map<string, JourneyRow>();
+    for (const r of journeyRows) {
+      const t = String(r.token ?? "").trim();
+      if (t) m.set(t, r);
+    }
+    return m;
+  }, [journeyRows]);
+  const hasDashboardFilters =
+    clientFilter.length > 0 ||
+    csFilter.length > 0 ||
+    campaignFilter.length > 0 ||
+    campaignStatusFilter.length > 0 ||
+    campaignTypeFilter.length > 0;
+  const rowMatchesDashboardFilters = useCallback(
+    (
+      row: JourneyRow,
+      filters: {
+        clients: string[];
+        cs: string[];
+        campaigns: string[];
+        statuses: string[];
+        campaignTypes: string[];
       }
-      if (event.key !== "Tab") return;
-      const modal = modalCardRef.current;
-      if (!modal) return;
+    ) => {
+      if (filters.clients.length && !filters.clients.includes(row.cliente)) return false;
+      if (filters.cs.length && !filters.cs.includes(rowCsLabel(row))) return false;
+      if (filters.campaigns.length && !filters.campaigns.includes(row.campanha)) return false;
+      if (filters.statuses.length && !filters.statuses.includes(row.status)) return false;
+      if (!rowMatchesCampaignTypes(row.campanha, filters.campaignTypes)) return false;
+      return true;
+    },
+    []
+  );
+  const dashboardFilteredRows = useMemo(() => {
+    if (!hasDashboardFilters) return journeyRows;
+    return journeyRows.filter((row) =>
+      rowMatchesDashboardFilters(row, {
+        clients: clientFilter,
+        cs: csFilter,
+        campaigns: campaignFilter,
+        statuses: campaignStatusFilter,
+        campaignTypes: campaignTypeFilter,
+      })
+    );
+  }, [
+    campaignFilter,
+    campaignStatusFilter,
+    campaignTypeFilter,
+    clientFilter,
+    csFilter,
+    hasDashboardFilters,
+    journeyRows,
+    rowMatchesDashboardFilters,
+  ]);
 
-      const focusable = modal.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-      );
-      if (!focusable.length) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-
-      if (event.shiftKey) {
-        if (active === first || !modal.contains(active)) {
-          event.preventDefault();
-          last.focus();
-        }
-      } else if (active === last) {
-        event.preventDefault();
-        first.focus();
+  const filteredSpendByPlatform = useMemo(() => {
+    if (!dashboardFilteredRows.length || !hasDashboardFilters || !data) return null;
+    const platforms = data.dashboard.active_platforms;
+    const sums: Record<string, number> = Object.fromEntries(platforms.map((p) => [p, 0]));
+    for (const row of dashboardFilteredRows) {
+      for (const p of platforms) {
+        sums[p] += Number(row[p] ?? 0);
       }
-    };
-
-    document.addEventListener("keydown", handleModalKeyDown);
-    return () => {
-      window.cancelAnimationFrame(animationFrame);
-      document.removeEventListener("keydown", handleModalKeyDown);
-      previousFocusedElementRef.current?.focus();
-      previousFocusedElementRef.current = null;
-    };
-  }, [budgetModalPlatform, isSavingCurrentBudget]);
+    }
+    return sums;
+  }, [dashboardFilteredRows, data, hasDashboardFilters]);
 
   const spendData = useMemo(() => data?.dashboard.spend_by_platform ?? [], [data]);
-  const chartData = useMemo(
-    () =>
-      [...spendData]
-        .sort((a, b) => b.spend_brl - a.spend_brl)
-        .map((item) => ({ ...item, color: PLATFORM_COLORS[item.platform] ?? "#6366f1" })),
-    [spendData]
-  );
+  const chartData = useMemo(() => {
+    const base = [...spendData].sort((a, b) => b.spend_brl - a.spend_brl);
+    if (!hasDashboardFilters || !filteredSpendByPlatform) {
+      return base.map((item) => ({ ...item, color: PLATFORM_COLORS[item.platform] ?? "#6366f1" }));
+    }
+    return base
+      .map((item) => ({
+        ...item,
+        spend_brl: filteredSpendByPlatform[item.platform] ?? 0,
+        color: PLATFORM_COLORS[item.platform] ?? "#6366f1",
+      }))
+      .filter((item) => item.spend_brl > 0);
+  }, [filteredSpendByPlatform, hasDashboardFilters, spendData]);
   const barChartData = useMemo(() => [...chartData].reverse(), [chartData]);
   const periodTotalSpend = useMemo(() => chartData.reduce((sum, row) => sum + row.spend_brl, 0), [chartData]);
   const dominantChartShare = useMemo(() => {
@@ -1236,18 +1534,133 @@ function HomeContent() {
 
   const resolvedActivePage: NavKey = requestedPage;
 
-  const campaignRows = useMemo(() => {
-    const rows = data?.dashboard.campaign_journey_rows ?? [];
-    if (!clientFilter.length) return rows;
-    return rows.filter((row) => clientFilter.includes(row.cliente));
-  }, [clientFilter, data]);
+  const campaignRows = useMemo(() => dashboardFilteredRows, [dashboardFilteredRows]);
 
-  const clients = useMemo(() => {
-    const rows = data?.dashboard.campaign_journey_rows ?? [];
-    return [...new Set(rows.map((row) => row.cliente).filter(Boolean))].sort((a, b) =>
+  const csFilterOptions = useMemo(() => {
+    return [...new Set(journeyRows.map(rowCsLabel))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [journeyRows]);
+  const campaignFilterOptions = useMemo(() => {
+    return [...new Set(journeyRows.map((row) => String(row.campanha ?? "").trim()).filter(Boolean))].sort((a, b) =>
       a.localeCompare(b, "pt-BR")
     );
-  }, [data]);
+  }, [journeyRows]);
+  const campaignStatusOptions = useMemo(() => {
+    return [...new Set(journeyRows.map((row) => String(row.status ?? "").trim()).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, "pt-BR")
+    );
+  }, [journeyRows]);
+
+  const clients = useMemo(() => {
+    return [...new Set(journeyRows.map((row) => row.cliente).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, "pt-BR")
+    );
+  }, [journeyRows]);
+  const disabledClientOptions = useMemo(
+    () =>
+      new Set(
+        clients.filter(
+          (client) =>
+            !journeyRows.some((row) =>
+              rowMatchesDashboardFilters(row, {
+                clients: [client],
+                cs: csFilter,
+                campaigns: campaignFilter,
+                statuses: campaignStatusFilter,
+                campaignTypes: campaignTypeFilter,
+              })
+            )
+        )
+      ),
+    [campaignFilter, campaignStatusFilter, campaignTypeFilter, clients, csFilter, journeyRows, rowMatchesDashboardFilters]
+  );
+  const disabledCsOptions = useMemo(
+    () =>
+      new Set(
+        csFilterOptions.filter(
+          (cs) =>
+            !journeyRows.some((row) =>
+              rowMatchesDashboardFilters(row, {
+                clients: clientFilter,
+                cs: [cs],
+                campaigns: campaignFilter,
+                statuses: campaignStatusFilter,
+                campaignTypes: campaignTypeFilter,
+              })
+            )
+        )
+      ),
+    [campaignFilter, campaignStatusFilter, campaignTypeFilter, clientFilter, csFilterOptions, journeyRows, rowMatchesDashboardFilters]
+  );
+  const disabledCampaignOptions = useMemo(
+    () =>
+      new Set(
+        campaignFilterOptions.filter(
+          (campaign) =>
+            !journeyRows.some((row) =>
+              rowMatchesDashboardFilters(row, {
+                clients: clientFilter,
+                cs: csFilter,
+                campaigns: [campaign],
+                statuses: campaignStatusFilter,
+                campaignTypes: campaignTypeFilter,
+              })
+            )
+        )
+      ),
+    [
+      campaignFilterOptions,
+      campaignStatusFilter,
+      campaignTypeFilter,
+      clientFilter,
+      csFilter,
+      journeyRows,
+      rowMatchesDashboardFilters,
+    ]
+  );
+  const disabledCampaignStatusOptions = useMemo(
+    () =>
+      new Set(
+        campaignStatusOptions.filter(
+          (status) =>
+            !journeyRows.some((row) =>
+              rowMatchesDashboardFilters(row, {
+                clients: clientFilter,
+                cs: csFilter,
+                campaigns: campaignFilter,
+                statuses: [status],
+                campaignTypes: campaignTypeFilter,
+              })
+            )
+        )
+      ),
+    [
+      campaignFilter,
+      campaignStatusOptions,
+      campaignTypeFilter,
+      clientFilter,
+      csFilter,
+      journeyRows,
+      rowMatchesDashboardFilters,
+    ]
+  );
+  const disabledCampaignTypeOptions = useMemo(
+    () =>
+      new Set(
+        [...CAMPAIGN_TYPE_OPTIONS].filter(
+          (tipo) =>
+            !journeyRows.some((row) =>
+              rowMatchesDashboardFilters(row, {
+                clients: clientFilter,
+                cs: csFilter,
+                campaigns: campaignFilter,
+                statuses: campaignStatusFilter,
+                campaignTypes: [tipo],
+              })
+            )
+        )
+      ),
+    [campaignFilter, campaignStatusFilter, clientFilter, csFilter, journeyRows, rowMatchesDashboardFilters]
+  );
 
   const handleRefresh = async () => {
     if (!dashboardUrl) return;
@@ -1326,28 +1739,6 @@ function HomeContent() {
     router.replace("/");
   }, [routeMatch.known, router]);
 
-  useEffect(() => {
-    const platforms = data?.budget.platforms;
-    const general = data?.budget.general;
-    if (!platforms || !general) return;
-    setBudgetInputs((prev) => {
-      const next = { ...prev };
-      if (typeof general.target_brl === "number") {
-        next[GENERAL_BUDGET_KEY] = general.target_brl.toFixed(2);
-      } else if (!next[GENERAL_BUDGET_KEY]) {
-        next[GENERAL_BUDGET_KEY] = "";
-      }
-      for (const [platform, platformBudget] of Object.entries(platforms)) {
-        if (typeof platformBudget.target_brl === "number") {
-          next[platform] = platformBudget.target_brl.toFixed(2);
-        } else if (!next[platform]) {
-          next[platform] = "";
-        }
-      }
-      return next;
-    });
-  }, [data?.budget.general, data?.budget.platforms]);
-
   const getBudgetForPlatform = (platform: string, spent: number) => {
     const entry =
       platform === GENERAL_BUDGET_KEY ? data?.budget.general : (data?.budget.platforms?.[platform] ?? null);
@@ -1355,16 +1746,18 @@ function HomeContent() {
     const spentValue = entry?.spent_brl ?? spent;
     const progress = target && target > 0 ? (spentValue / target) * 100 : null;
     const remaining = target !== null ? target - spentValue : null;
+    const fromApi = platform !== GENERAL_BUDGET_KEY ? data?.budget.share_percent?.[platform] : undefined;
+    const investment_share_pct =
+      platform === GENERAL_BUDGET_KEY
+        ? null
+        : (fromApi ?? DEFAULT_INVESTMENT_SHARE_PERCENT[platform] ?? null);
     return {
       target_brl: target,
       spent_brl: spentValue,
       progress_pct: progress,
       remaining_brl: remaining,
+      investment_share_pct,
     };
-  };
-
-  const setBudgetInputForPlatform = (platform: string, value: string) => {
-    setBudgetInputs((prev) => ({ ...prev, [platform]: sanitizeBudgetInput(value) }));
   };
 
   const copyToClipboard = async (value: string, label: string) => {
@@ -1375,205 +1768,6 @@ function HomeContent() {
       showToast(`${label} copiado.`);
     } catch {
       showToast(`Nao foi possivel copiar ${label.toLowerCase()}.`, "error");
-    }
-  };
-
-  const fetchBudgetTargets = async (
-    monthKey: string
-  ): Promise<{ general_target_brl: number | null; targets_brl: Record<string, number> } | null> => {
-    const targetsResponse = await fetch(`${apiBase}/api/budget-target?month=${encodeURIComponent(monthKey)}`);
-    if (!targetsResponse.ok) return null;
-    const targetsPayload = (await targetsResponse.json()) as {
-      general_target_brl?: number | null;
-      targets_brl?: Record<string, number>;
-    };
-    return {
-      general_target_brl:
-        typeof targetsPayload.general_target_brl === "number" ? targetsPayload.general_target_brl : null,
-      targets_brl: targetsPayload.targets_brl ?? {},
-    };
-  };
-
-  const handleSaveBudget = async (platform: string) => {
-    if (!data) return false;
-    const raw = (budgetInputs[platform] ?? "").trim();
-    const parsed = Number(raw);
-    if (!raw.length || !Number.isFinite(parsed) || parsed < 0) {
-      setBudgetError(`Valor inválido para ${platform}.`);
-      return false;
-    }
-
-    setBudgetError(null);
-    setSavingBudgetByPlatform((prev) => ({ ...prev, [platform]: true }));
-    try {
-      const response = await fetch(`${apiBase}/api/budget-target`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          month: data.budget.month_key,
-          platform: platform === GENERAL_BUDGET_KEY ? null : platform,
-          target_brl: parsed,
-        }),
-      });
-      if (!response.ok) {
-        throw new Error("Falha ao salvar budget target.");
-      }
-
-      let refreshedTargets: { general_target_brl: number | null; targets_brl: Record<string, number> } | null = null;
-      try {
-        refreshedTargets = await fetchBudgetTargets(data.budget.month_key);
-      } catch {
-        // Fallback: se o refresh leve falhar, atualizamos ao menos a plataforma salva localmente.
-      }
-
-      await mutate((current) => {
-        if (!current) return current;
-        const nextPlatforms = { ...current.budget.platforms };
-        const previousGeneral = current.budget.general;
-        const nextGeneralTarget = refreshedTargets
-          ? refreshedTargets.general_target_brl
-          : platform === GENERAL_BUDGET_KEY
-            ? parsed
-            : (previousGeneral?.target_brl ?? null);
-        const nextGeneralSpent = previousGeneral?.spent_brl ?? current.total_brl;
-        const nextGeneralProgress =
-          typeof nextGeneralTarget === "number" && nextGeneralTarget > 0
-            ? (nextGeneralSpent / nextGeneralTarget) * 100
-            : null;
-        const nextGeneralRemaining = typeof nextGeneralTarget === "number" ? nextGeneralTarget - nextGeneralSpent : null;
-        const platformNames = new Set<string>([
-          ...Object.keys(nextPlatforms),
-          ...(refreshedTargets ? Object.keys(refreshedTargets.targets_brl) : platform !== GENERAL_BUDGET_KEY ? [platform] : []),
-        ]);
-
-        for (const platformName of platformNames) {
-          const previous = nextPlatforms[platformName];
-          const targetValue = refreshedTargets
-            ? (refreshedTargets.targets_brl[platformName] ?? null)
-            : platformName === platform
-              ? parsed
-              : (previous?.target_brl ?? null);
-          const spentValue = previous?.spent_brl ?? 0;
-          const progressValue =
-            typeof targetValue === "number" && targetValue > 0 ? (spentValue / targetValue) * 100 : null;
-          const remainingValue = typeof targetValue === "number" ? targetValue - spentValue : null;
-
-          nextPlatforms[platformName] = {
-            target_brl: targetValue,
-            spent_brl: spentValue,
-            progress_pct: progressValue,
-            remaining_brl: remainingValue,
-          };
-        }
-
-        return {
-          ...current,
-          budget: {
-            ...current.budget,
-            general: {
-              target_brl: nextGeneralTarget,
-              spent_brl: nextGeneralSpent,
-              progress_pct: nextGeneralProgress,
-              remaining_brl: nextGeneralRemaining,
-            },
-            platforms: nextPlatforms,
-          },
-        };
-      }, false);
-      return true;
-    } catch {
-      setBudgetError("Não foi possível salvar o budget target.");
-      return false;
-    } finally {
-      setSavingBudgetByPlatform((prev) => ({ ...prev, [platform]: false }));
-    }
-  };
-
-  const handleClearBudget = async (platform: string) => {
-    if (!data) return false;
-    setBudgetError(null);
-    setSavingBudgetByPlatform((prev) => ({ ...prev, [platform]: true }));
-    try {
-      const response = await fetch(
-        `${apiBase}/api/budget-target?month=${encodeURIComponent(data.budget.month_key)}${
-          platform === GENERAL_BUDGET_KEY ? "" : `&platform=${encodeURIComponent(platform)}`
-        }`,
-        {
-          method: "DELETE",
-        }
-      );
-      if (!response.ok) {
-        throw new Error("Falha ao limpar budget target.");
-      }
-
-      let refreshedTargets: { general_target_brl: number | null; targets_brl: Record<string, number> } | null = null;
-      try {
-        refreshedTargets = await fetchBudgetTargets(data.budget.month_key);
-      } catch {
-        // Fallback: se o refresh leve falhar, atualizamos ao menos a plataforma removida localmente.
-      }
-
-      await mutate((current) => {
-        if (!current) return current;
-        const nextPlatforms = { ...current.budget.platforms };
-        const previousGeneral = current.budget.general;
-        const nextGeneralTarget = refreshedTargets
-          ? refreshedTargets.general_target_brl
-          : platform === GENERAL_BUDGET_KEY
-            ? null
-            : (previousGeneral?.target_brl ?? null);
-        const nextGeneralSpent = previousGeneral?.spent_brl ?? current.total_brl;
-        const nextGeneralProgress =
-          typeof nextGeneralTarget === "number" && nextGeneralTarget > 0
-            ? (nextGeneralSpent / nextGeneralTarget) * 100
-            : null;
-        const nextGeneralRemaining = typeof nextGeneralTarget === "number" ? nextGeneralTarget - nextGeneralSpent : null;
-        const platformNames = new Set<string>([
-          ...Object.keys(nextPlatforms),
-          ...(refreshedTargets ? Object.keys(refreshedTargets.targets_brl) : platform !== GENERAL_BUDGET_KEY ? [platform] : []),
-        ]);
-
-        for (const platformName of platformNames) {
-          const previous = nextPlatforms[platformName];
-          const targetValue = refreshedTargets
-            ? (refreshedTargets.targets_brl[platformName] ?? null)
-            : platformName === platform
-              ? null
-              : (previous?.target_brl ?? null);
-          const spentValue = previous?.spent_brl ?? 0;
-          const progressValue =
-            typeof targetValue === "number" && targetValue > 0 ? (spentValue / targetValue) * 100 : null;
-          const remainingValue = typeof targetValue === "number" ? targetValue - spentValue : null;
-
-          nextPlatforms[platformName] = {
-            target_brl: targetValue,
-            spent_brl: spentValue,
-            progress_pct: progressValue,
-            remaining_brl: remainingValue,
-          };
-        }
-
-        return {
-          ...current,
-          budget: {
-            ...current.budget,
-            general: {
-              target_brl: nextGeneralTarget,
-              spent_brl: nextGeneralSpent,
-              progress_pct: nextGeneralProgress,
-              remaining_brl: nextGeneralRemaining,
-            },
-            platforms: nextPlatforms,
-          },
-        };
-      }, false);
-      setBudgetInputs((prev) => ({ ...prev, [platform]: "" }));
-      return true;
-    } catch {
-      setBudgetError("Não foi possível limpar o budget target.");
-      return false;
-    } finally {
-      setSavingBudgetByPlatform((prev) => ({ ...prev, [platform]: false }));
     }
   };
 
@@ -1688,8 +1882,35 @@ function HomeContent() {
     return data.platform_pages[resolvedActivePage]?.rows ?? [];
   }, [data, resolvedActivePage]);
 
+  const platformRowMatchesDashboardFilters = useCallback(
+    (row: PlatformPageRow) => {
+      const pseudo = journeySnapshotForPlatformRow(row, journeyByToken);
+      return rowMatchesDashboardFilters(pseudo, {
+        clients: clientFilter,
+        cs: csFilter,
+        campaigns: campaignFilter,
+        statuses: campaignStatusFilter,
+        campaignTypes: campaignTypeFilter,
+      });
+    },
+    [
+      journeyByToken,
+      clientFilter,
+      csFilter,
+      campaignFilter,
+      campaignStatusFilter,
+      campaignTypeFilter,
+      rowMatchesDashboardFilters,
+    ]
+  );
+
+  const filteredDetailedPlatformRows = useMemo(() => {
+    if (!hasDashboardFilters) return detailedPlatformRows;
+    return detailedPlatformRows.filter(platformRowMatchesDashboardFilters);
+  }, [detailedPlatformRows, hasDashboardFilters, platformRowMatchesDashboardFilters]);
+
   const detailedPlatformDerived = useMemo(() => {
-    const rows = detailedPlatformRows;
+    const rows = filteredDetailedPlatformRows;
     const rowsWithToken = rows.filter((row) => hasCampaignToken(row.token)).length;
     const rowsWithoutToken = Math.max(0, rows.length - rowsWithToken);
     const activeCampaignsCount = new Set(
@@ -1750,7 +1971,7 @@ function HomeContent() {
       return stackAdaptSort.direction === "asc" ? compare : -compare;
     });
     return { rowsWithToken, rowsWithoutToken, activeCampaignsCount, sortedRows, filteredTotalGasto };
-  }, [detailedPlatformRows, stackAdaptSearch, stackAdaptSort, dspLinesOnlyWithoutToken]);
+  }, [filteredDetailedPlatformRows, stackAdaptSearch, stackAdaptSort, dspLinesOnlyWithoutToken]);
 
   const noTokenRows = useMemo(() => data?.attention.no_token_rows ?? [], [data?.attention.no_token_rows]);
   const noTokenSearchNormalized = attentionNoTokenSearch.trim().toLowerCase();
@@ -1881,36 +2102,16 @@ function HomeContent() {
   const showInitialDashboardSkeleton = shouldFetchData && !data && !error && isLoading;
   if (showInitialDashboardSkeleton) return <DashboardSkeleton />;
 
-  if (error || !data) {
-    const errorMessage =
-      error instanceof Error ? error.message : "Nao foi possivel sincronizar os dados no momento.";
-    const isTimeoutError = errorMessage.toLowerCase().includes("timeout");
-    return (
-      <main className="errorStateShell">
-        <section className="errorStateCard">
-          <p className="errorStateEyebrow">Ops! Algo saiu do esperado</p>
-          <h1 className="errorStateTitle">Nao conseguimos carregar o dashboard agora.</h1>
-          <p className="errorStateMessage">{errorMessage}</p>
-          <p className="errorStateHint">
-            {isTimeoutError
-              ? "A atualizacao completa pode levar ate 2 minutos quando busca dados novos nas plataformas."
-              : "Pode ser uma instabilidade temporaria. Tente novamente para restabelecer a conexao."}
-          </p>
-          <div className="errorStateActions">
-            <button className="button" onClick={() => mutate()} disabled={isValidating}>
-              <ReloadIcon spinning={isValidating} />
-              <span>{isValidating ? "Tentando novamente..." : "Tentar novamente"}</span>
-            </button>
-            <button className="button buttonGhost" onClick={handleRefresh} disabled={isValidating || isRefreshRunning}>
-              Recarregar dados completos
-            </button>
-          </div>
-        </section>
-      </main>
-    );
-  }
+  const dashboardLoadFailed = Boolean(error || !data);
+  const dashboardErrorMessage =
+    error instanceof Error ? error.message : "Nao foi possivel sincronizar os dados no momento.";
+  const dashboardErrorIsTimeout = dashboardErrorMessage.toLowerCase().includes("timeout");
+  const periodRangeLabel = data
+    ? `${formatDateBr(data.period.start)} → ${formatDateBr(data.period.end)}`
+    : "—";
 
   const renderDashboardPage = () => {
+    if (!data) return null;
     const handleExportCampaignJourney = () => {
       const headers = [
         "Token",
@@ -1940,8 +2141,10 @@ function HomeContent() {
     const firstRowDspCards: Array<{
       title: string;
       value: string;
-      subtitle: string;
+      subtitle: ReactNode;
       badge?: string;
+      badgeTone?: "soon";
+      statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
       dimmed?: boolean;
       titleEmphasis?: boolean;
       logoSrc?: string;
@@ -1952,8 +2155,10 @@ function HomeContent() {
     const secondRowDspCards: Array<{
       title: string;
       value: string;
-      subtitle: string;
+      subtitle: ReactNode;
       badge?: string;
+      badgeTone?: "soon";
+      statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
       dimmed?: boolean;
       titleEmphasis?: boolean;
       logoSrc?: string;
@@ -1961,18 +2166,27 @@ function HomeContent() {
       spendBrl?: number;
       href?: string;
     }> = [];
+    const dashboardFilterOn = hasDashboardFilters;
+    const dspFiltered = filteredSpendByPlatform;
+
     for (const name of ["StackAdapt", "DV360", "Xandr"] as const) {
       const result = data.platform_results[name];
       if (!result) continue;
       if (result.status === "ok") {
+        const pageSpend = data.platform_pages[name]?.spend_brl ?? 0;
+        const cardSpend = dashboardFilterOn ? (dspFiltered?.[name] ?? 0) : pageSpend;
         firstRowDspCards.push({
           title: name,
-          value: brl(data.platform_pages[name]?.spend_brl ?? 0),
-          subtitle: `USD ${(result.spend ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`,
+          value: brl(cardSpend),
+          subtitle: dashboardFilterOn
+            ? cardSpend > 0
+              ? "Volume atribuível aos filtros"
+              : "Sem gasto com os filtros"
+            : `USD ${(result.spend ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`,
           titleEmphasis: true,
           logoSrc: PLATFORM_LOGOS[name],
           platformKey: name,
-          spendBrl: data.platform_pages[name]?.spend_brl ?? 0,
+          spendBrl: cardSpend,
           href: routeForPage(name),
         });
       } else if (result.status === "error") {
@@ -1993,6 +2207,7 @@ function HomeContent() {
       value: brl(0),
       subtitle: "USD 0.00",
       badge: "Em breve",
+      badgeTone: "soon",
       titleEmphasis: true,
       logoSrc: PLATFORM_LOGOS.Amazon,
       platformKey: "Amazon",
@@ -2030,12 +2245,34 @@ function HomeContent() {
         value: brl(0),
         subtitle: "Sem dados",
         badge: "Em breve",
+        badgeTone: "soon",
         titleEmphasis: true,
         logoSrc: PLATFORM_LOGOS.Nexd,
         platformKey: "Nexd",
         spendBrl: 0,
       });
     }
+
+    secondRowDspCards.push({
+      title: "Hivestack",
+      value: brl(0),
+      subtitle: "USD 0.00",
+      badge: "Em breve",
+      badgeTone: "soon",
+      titleEmphasis: true,
+      logoSrc: PLATFORM_LOGOS.Hivestack,
+      spendBrl: 0,
+    });
+
+    const investedTotal = dashboardFilteredRows.reduce((sum, row) => sum + Number(row.investido ?? 0), 0);
+
+    const dspFilteredConsolidated = dashboardFilterOn
+      ? data.dashboard.active_platforms.reduce((sum, p) => sum + (dspFiltered?.[p] ?? 0), 0)
+      : data.total_brl;
+    const IDEAL_TECH_COST_PCT = 12.5;
+    const techCostPct = investedTotal > 0 ? (dspFilteredConsolidated / investedTotal) * 100 : null;
+    const techCostLabel = techCostPct === null ? "—" : `${techCostPct.toFixed(2).replace(".", ",")}%`;
+    const isTechCostWithinIdeal = techCostPct !== null && techCostPct <= IDEAL_TECH_COST_PCT;
 
     const consolidatedCard: {
       title: string;
@@ -2047,23 +2284,130 @@ function HomeContent() {
       variant: "premium";
     } = {
       title: "Consolidado",
-      value: brl(data.total_brl),
-      subtitle: `USD 1 = R$ ${data.exchange_rate_usd_brl.toFixed(4)}`,
+      value: brl(dashboardFilterOn ? dspFilteredConsolidated : data.total_brl),
+      subtitle: dashboardFilterOn
+        ? "Soma das DSPs nos filtros selecionados · Nexd, Hivestack e Amazon não entram neste total"
+        : `USD 1 = R$ ${data.exchange_rate_usd_brl.toFixed(4)}`,
       titleEmphasis: true,
       platformKey: GENERAL_BUDGET_KEY,
-      spendBrl: data.total_brl,
+      spendBrl: dashboardFilterOn ? dspFilteredConsolidated : data.total_brl,
       variant: "premium",
     };
 
+    secondRowDspCards.push({
+      title: "Investido",
+      value: brl(investedTotal),
+      subtitle: dashboardFilterOn
+        ? "Total investido das campanhas nos filtros selecionados"
+        : "Total investido das campanhas ativas no período",
+      titleEmphasis: true,
+    });
+
+    secondRowDspCards.push({
+      title: "Tech Cost",
+      value: techCostLabel,
+      statusIndicator: {
+        label: techCostPct === null ? "Sem base" : isTechCostWithinIdeal ? "Ideal" : "Acima",
+        tone: techCostPct === null ? "neutral" : isTechCostWithinIdeal ? "success" : "danger",
+      },
+      subtitle:
+        techCostPct === null
+          ? "Sem investido para calcular"
+          : (
+              <>
+                <span>
+                  Custo (<strong>{brl(dspFilteredConsolidated)}</strong>) sobre investido (
+                  <strong>{brl(investedTotal)}</strong>).
+                </span>
+                <span className="cardTechCostHint">Ideal: abaixo de {IDEAL_TECH_COST_PCT.toFixed(1).replace(".", ",")}%.</span>
+              </>
+            ),
+      titleEmphasis: true,
+    });
+
     return (
       <>
+        <section className="panel panelSub filterPanelCard">
+          <h3>Filtros do dashboard</h3>
+          <p className="muted filterPanelHint">
+            Os filtros recalculam cards e gráficos de DSP. Nexd segue o total mensal (sem rateio por
+            token); o&nbsp;consolidado filtrado soma apenas DSPs.
+          </p>
+          <div className="filterToolbar">
+            <MultiSelectFilter
+              id="filter-client"
+              label="Cliente"
+              options={clients}
+              value={clientFilter}
+              onChange={setClientFilter}
+              placeholder="Todos os clientes"
+              disabledOptions={disabledClientOptions}
+            />
+            <MultiSelectFilter
+              id="filter-cs"
+              label="CS (Account Management)"
+              options={csFilterOptions}
+              value={csFilter}
+              onChange={setCsFilter}
+              placeholder="Todos os CS"
+              showAvatar
+              disabledOptions={disabledCsOptions}
+            />
+            <MultiSelectFilter
+              id="filter-campaign-type"
+              label="Tipo"
+              options={[...CAMPAIGN_TYPE_OPTIONS]}
+              value={campaignTypeFilter}
+              onChange={setCampaignTypeFilter}
+              placeholder="Todos os tipos"
+              disabledOptions={disabledCampaignTypeOptions}
+            />
+            <MultiSelectFilter
+              id="filter-campaign"
+              label="Campanha"
+              options={campaignFilterOptions}
+              value={campaignFilter}
+              onChange={setCampaignFilter}
+              placeholder="Todas as campanhas"
+              disabledOptions={disabledCampaignOptions}
+            />
+            <MultiSelectFilter
+              id="filter-campaign-status"
+              label="Status da campanha"
+              options={campaignStatusOptions}
+              value={campaignStatusFilter}
+              onChange={setCampaignStatusFilter}
+              placeholder="Todos os status"
+              disabledOptions={disabledCampaignStatusOptions}
+            />
+            {hasDashboardFilters ? (
+              <button
+                type="button"
+                className="button buttonGhost buttonSmall filterClearButton"
+                onClick={() => {
+                  setClientFilter([]);
+                  setCsFilter([]);
+                  setCampaignTypeFilter([]);
+                  setCampaignFilter([]);
+                  setCampaignStatusFilter([]);
+                }}
+              >
+                Limpar filtros
+              </button>
+            ) : null}
+          </div>
+        </section>
+
         <section className="gridCards homeDspRow">
           {firstRowDspCards.map((card) => (
             <KpiCard
               key={`${card.title}-${card.badge ?? "nobadge"}`}
               {...card}
-              budget={card.platformKey ? getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0) : undefined}
-              onOpenBudgetModal={card.platformKey ? () => setBudgetModalPlatform(card.platformKey!) : undefined}
+              budget={
+                dashboardFilterOn || !card.platformKey
+                  ? undefined
+                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0)
+              }
             />
           ))}
         </section>
@@ -2072,20 +2416,20 @@ function HomeContent() {
             <KpiCard
               key={`${card.title}-${card.badge ?? "nobadge"}`}
               {...card}
-              budget={card.platformKey ? getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0) : undefined}
-              onOpenBudgetModal={card.platformKey ? () => setBudgetModalPlatform(card.platformKey!) : undefined}
+              budget={
+                dashboardFilterOn || !card.platformKey
+                  ? undefined
+                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0)
+              }
             />
           ))}
           <KpiCard
             key={`${consolidatedCard.title}-${consolidatedCard.variant ?? "default"}`}
             {...consolidatedCard}
             budget={
-              consolidatedCard.platformKey
-                ? getBudgetForPlatform(consolidatedCard.platformKey, consolidatedCard.spendBrl ?? 0)
-                : undefined
-            }
-            onOpenBudgetModal={
-              consolidatedCard.platformKey ? () => setBudgetModalPlatform(consolidatedCard.platformKey!) : undefined
+              dashboardFilterOn || !consolidatedCard.platformKey
+                ? undefined
+                : getBudgetForPlatform(consolidatedCard.platformKey, consolidatedCard.spendBrl ?? 0)
             }
           />
         </section>
@@ -2133,7 +2477,6 @@ function HomeContent() {
             <p className="cardSubtitle">Total impactado: {brl(data.attention.out_of_period_total_brl)}</p>
           </div>
         </section>
-        {budgetError ? <p className="alertError">{budgetError}</p> : null}
 
         <section className="gridTwo">
           <div className="panel panelChart">
@@ -2168,6 +2511,9 @@ function HomeContent() {
                 </button>
               </div>
             </div>
+            {!chartData.length ? (
+              <p className="alertInfo">Nenhum gasto em DSP com os filtros selecionados.</p>
+            ) : (
             <div
               className="chartWrap"
               ref={spendByPlatformChartRef}
@@ -2202,6 +2548,7 @@ function HomeContent() {
                 </BarChart>
               </ResponsiveContainer>
             </div>
+            )}
           </div>
 
           <div className="panel panelChart">
@@ -2236,6 +2583,9 @@ function HomeContent() {
                 </button>
               </div>
             </div>
+            {!chartData.length ? (
+              <p className="alertInfo">Nenhum gasto em DSP com os filtros selecionados.</p>
+            ) : (
             <div
               className="chartWrap"
               ref={distributionChartRef}
@@ -2297,6 +2647,7 @@ function HomeContent() {
                 </ResponsiveContainer>
               )}
             </div>
+            )}
           </div>
         </section>
 
@@ -2510,6 +2861,7 @@ function HomeContent() {
   const renderPlatformPage = (
     platformName: Exclude<NavKey, "Dashboard" | "⚠️ Lines sem token" | "🚨 Gasto fora do mês vigente">
   ) => {
+    if (!data) return null;
     const page = data.platform_pages[platformName];
     if (!page) return <p className="alertInfo">Sem dados desta plataforma no período.</p>;
     if (platformName === "Nexd") {
@@ -2700,7 +3052,7 @@ function HomeContent() {
     const rows = page.rows ?? [];
     const isDetailedLinePlatform = ["StackAdapt", "DV360", "Xandr"].includes(platformName);
     if (isDetailedLinePlatform) {
-      const rowsForPlatform = platformName === resolvedActivePage ? detailedPlatformRows : rows;
+      const rowsForPlatform = platformName === resolvedActivePage ? filteredDetailedPlatformRows : rows;
       const {
         rowsWithToken,
         rowsWithoutToken,
@@ -2708,6 +3060,8 @@ function HomeContent() {
         sortedRows,
         filteredTotalGasto,
       } = detailedPlatformDerived;
+      const lineDetailFiltersActive =
+        hasDashboardFilters || stackAdaptSearch.trim() !== "" || dspLinesOnlyWithoutToken;
       const budget = getBudgetForPlatform(platformName, page.spend_brl);
       const handleExportDetailedLines = () => {
         const headers = [
@@ -2737,19 +3091,92 @@ function HomeContent() {
 
       return (
         <>
+          <section className="panel panelSub filterPanelCard">
+            <h3>Filtros do dashboard</h3>
+            <p className="muted filterPanelHint">
+              Os mesmos filtros da home (Cliente, CS, Tipo, Campanha e Status). Eles refinam os cards, os
+              contadores e a tabela desta DSP; a busca e o chip &quot;só sem token&quot; continuam valendo
+              por cima.
+            </p>
+            <div className="filterToolbar">
+              <MultiSelectFilter
+                id={`dsp-filter-client-${platformName}`}
+                label="Cliente"
+                options={clients}
+                value={clientFilter}
+                onChange={setClientFilter}
+                placeholder="Todos os clientes"
+                disabledOptions={disabledClientOptions}
+              />
+              <MultiSelectFilter
+                id={`dsp-filter-cs-${platformName}`}
+                label="CS (Account Management)"
+                options={csFilterOptions}
+                value={csFilter}
+                onChange={setCsFilter}
+                placeholder="Todos os CS"
+                showAvatar
+                disabledOptions={disabledCsOptions}
+              />
+              <MultiSelectFilter
+                id={`dsp-filter-campaign-type-${platformName}`}
+                label="Tipo"
+                options={[...CAMPAIGN_TYPE_OPTIONS]}
+                value={campaignTypeFilter}
+                onChange={setCampaignTypeFilter}
+                placeholder="Todos os tipos"
+                disabledOptions={disabledCampaignTypeOptions}
+              />
+              <MultiSelectFilter
+                id={`dsp-filter-campaign-${platformName}`}
+                label="Campanha"
+                options={campaignFilterOptions}
+                value={campaignFilter}
+                onChange={setCampaignFilter}
+                placeholder="Todas as campanhas"
+                disabledOptions={disabledCampaignOptions}
+              />
+              <MultiSelectFilter
+                id={`dsp-filter-campaign-status-${platformName}`}
+                label="Status da campanha"
+                options={campaignStatusOptions}
+                value={campaignStatusFilter}
+                onChange={setCampaignStatusFilter}
+                placeholder="Todos os status"
+                disabledOptions={disabledCampaignStatusOptions}
+              />
+              {hasDashboardFilters ? (
+                <button
+                  type="button"
+                  className="button buttonGhost buttonSmall filterClearButton"
+                  onClick={() => {
+                    setClientFilter([]);
+                    setCsFilter([]);
+                    setCampaignTypeFilter([]);
+                    setCampaignFilter([]);
+                    setCampaignStatusFilter([]);
+                  }}
+                >
+                  Limpar filtros
+                </button>
+              ) : null}
+            </div>
+          </section>
+
           <section className="gridCards">
             <KpiCard
               title={platformName}
-              value={brl(page.spend_brl)}
+              value={brl(lineDetailFiltersActive ? filteredTotalGasto : page.spend_brl)}
               subtitle={
-                page.currency === "USD"
-                  ? `USD ${(page.spend_usd ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
-                  : "Consolidado no período"
+                lineDetailFiltersActive
+                  ? "Subtotal em BRL das lines exibidas na tabela (após filtros e busca)."
+                  : page.currency === "USD"
+                    ? `USD ${(page.spend_usd ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+                    : "Consolidado no período"
               }
               titleEmphasis
               logoSrc={PLATFORM_LOGOS[platformName]}
               budget={budget}
-              onOpenBudgetModal={() => setBudgetModalPlatform(platformName)}
             />
             <div className="card platformStatCard">
               <p className="cardTitle">Lines ativas</p>
@@ -3119,6 +3546,7 @@ function HomeContent() {
   };
 
   const renderNoTokenAttentionPage = () => {
+    if (!data) return null;
     const sortedNoTokenRows = noTokenDerived.sortedRows;
     const filteredNoTokenTotal = noTokenDerived.filteredTotal;
     const handleExportNoToken = () => {
@@ -3307,6 +3735,7 @@ function HomeContent() {
   };
 
   const renderOutOfPeriodAttentionPage = () => {
+    if (!data) return null;
     const outRows = outOfPeriodRows;
     const sortedOutRows = outOfPeriodDerived.sortedRows;
     const filteredOutRowsTotal = outOfPeriodDerived.filteredTotal;
@@ -3599,9 +4028,7 @@ function HomeContent() {
       <aside className="sidebar">
         <div>
           <p className="sidebarTitle">Painel de Custos</p>
-          <p className="sidebarSubtitle">
-            {formatDateBr(data.period.start)} → {formatDateBr(data.period.end)}
-          </p>
+          <p className="sidebarSubtitle">{periodRangeLabel}</p>
         </div>
         <nav className="sidebarNav">
           {navOptions.map((option) => (
@@ -3610,7 +4037,7 @@ function HomeContent() {
               className={`navButton ${resolvedActivePage === option ? "navButtonActive" : ""}`}
               onClick={() => router.push(appendQueryToRoute(routeForPage(option)))}
             >
-              {option}
+              {NAV_LABELS[option]}
             </button>
           ))}
         </nav>
@@ -3622,10 +4049,8 @@ function HomeContent() {
             {resolvedActivePage === "Dashboard" ? (
               <p className="welcomeMessage">Olá, {userDisplayName}</p>
             ) : null}
-            <h1>{resolvedActivePage}</h1>
-            <p className="muted">
-              {formatDateBr(data.period.start)} → {formatDateBr(data.period.end)}
-            </p>
+            <h1>{NAV_LABELS[resolvedActivePage]}</h1>
+            <p className="muted">{periodRangeLabel}</p>
           </div>
           <div className="headerActions">
             <div className="headerUserButtonWrap">
@@ -3650,135 +4075,45 @@ function HomeContent() {
           </div>
         </header>
 
-        {resolvedActivePage === "Dashboard" ? renderDashboardPage() : null}
-        {resolvedActivePage === "⚠️ Lines sem token" ? renderNoTokenAttentionPage() : null}
-        {resolvedActivePage === "🚨 Gasto fora do mês vigente" ? renderOutOfPeriodAttentionPage() : null}
-        {resolvedActivePage !== "Dashboard" &&
-        resolvedActivePage !== "⚠️ Lines sem token" &&
-        resolvedActivePage !== "🚨 Gasto fora do mês vigente"
-          ? renderPlatformPage(resolvedActivePage)
-          : null}
+        {dashboardLoadFailed ? (
+          <div className="contentErrorWrap">
+            <section className="errorStateCard">
+              <p className="errorStateEyebrow">Ops! Algo saiu do esperado</p>
+              <h1 className="errorStateTitle">Nao conseguimos carregar o dashboard agora.</h1>
+              <p className="errorStateMessage">{dashboardErrorMessage}</p>
+              <p className="errorStateHint">
+                {dashboardErrorIsTimeout
+                  ? "A atualizacao completa pode levar ate 2 minutos quando busca dados novos nas plataformas."
+                  : "Pode ser uma instabilidade temporaria. Tente novamente para restabelecer a conexao."}
+              </p>
+              <div className="errorStateActions">
+                <button className="button" onClick={() => mutate()} disabled={isValidating}>
+                  <ReloadIcon spinning={isValidating} />
+                  <span>{isValidating ? "Tentando novamente..." : "Tentar novamente"}</span>
+                </button>
+                <button className="button buttonGhost" onClick={handleRefresh} disabled={isValidating || isRefreshRunning}>
+                  Recarregar dados completos
+                </button>
+              </div>
+            </section>
+          </div>
+        ) : (
+          <>
+            {resolvedActivePage === "Dashboard" ? renderDashboardPage() : null}
+            {resolvedActivePage === "\u26A0\uFE0F Lines sem token" ? renderNoTokenAttentionPage() : null}
+            {resolvedActivePage === "\u{1F6A8} Gasto fora do m\u{EA}s vigente"
+              ? renderOutOfPeriodAttentionPage()
+              : null}
+            {resolvedActivePage !== "Dashboard" &&
+            resolvedActivePage !== "\u26A0\uFE0F Lines sem token" &&
+            resolvedActivePage !== "\u{1F6A8} Gasto fora do m\u{EA}s vigente"
+              ? renderPlatformPage(resolvedActivePage)
+              : null}
+          </>
+        )}
+
       </section>
 
-      {budgetModalPlatform ? (
-        <div
-          className="modalOverlay"
-          role="presentation"
-          onClick={() => {
-            if (isSavingCurrentBudget) return;
-            setBudgetModalPlatform(null);
-          }}
-        >
-          <section
-            className="modalCard"
-            ref={modalCardRef}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="budget-modal-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="modalHeading">
-              {PLATFORM_LOGOS[budgetModalPlatform] ? (
-                <Image
-                  src={PLATFORM_LOGOS[budgetModalPlatform]}
-                  alt={`${budgetModalPlatform} logo`}
-                  width={36}
-                  height={36}
-                  className={`modalLogo ${budgetModalPlatform === "Xandr" ? "cardLogoXandr" : ""} ${
-                    budgetModalPlatform.startsWith("Amazon") ? "cardLogoAmazon" : ""
-                  }`}
-                />
-              ) : null}
-              <div>
-                <h2 id="budget-modal-title">Definir orçamento alvo</h2>
-                <p className="modalSubtitle">
-                  {budgetModalPlatform === GENERAL_BUDGET_KEY
-                    ? "Escopo: Consolidado geral"
-                    : `Plataforma: ${budgetModalPlatform}`}
-                </p>
-              </div>
-            </div>
-            <label className="modalField">
-              <span>Orçamento alvo do mês (BRL)</span>
-              <div className="modalInputWrap">
-                <span className="modalInputPrefix">R$</span>
-                <input
-                  ref={modalInputRef}
-                  className="modalInput"
-                  type="text"
-                  inputMode="decimal"
-                  pattern="[0-9]*[.]?[0-9]*"
-                  placeholder="7000.00"
-                  value={budgetInputs[budgetModalPlatform] ?? ""}
-                  onChange={(e) => setBudgetInputForPlatform(budgetModalPlatform, e.target.value)}
-                />
-              </div>
-            </label>
-            <div className="modalActions">
-              <button
-                className="button modalButtonDanger"
-                type="button"
-                onClick={async () => {
-                  const platform = budgetModalPlatform;
-                  if (!platform) return;
-
-                  const cleared = await handleClearBudget(platform);
-                  if (cleared) {
-                    setBudgetModalPlatform(null);
-                    showToast("Orçamento alvo limpo com sucesso.");
-                  } else {
-                    showToast("Não foi possível limpar o orçamento alvo.", "error");
-                  }
-                }}
-                disabled={isSavingCurrentBudget}
-              >
-                Limpar
-              </button>
-              <button
-                className="button modalButtonGhost"
-                type="button"
-                onClick={() => setBudgetModalPlatform(null)}
-                disabled={isSavingCurrentBudget}
-              >
-                Cancelar
-              </button>
-              <button
-                className="button modalButtonPrimary"
-                type="button"
-                onClick={async () => {
-                  const platform = budgetModalPlatform;
-                  if (!platform) return;
-
-                  const raw = (budgetInputs[platform] ?? "").trim();
-                  const parsed = Number(raw);
-                  if (!raw.length || !Number.isFinite(parsed) || parsed < 0) {
-                    setBudgetError(`Valor inválido para ${platform}.`);
-                    return;
-                  }
-
-                  const saved = await handleSaveBudget(platform);
-                  if (saved) {
-                    setBudgetModalPlatform(null);
-                    showToast("Orçamento alvo salvo com sucesso.");
-                  } else {
-                    showToast("Não foi possível salvar o orçamento alvo.", "error");
-                  }
-                }}
-                disabled={isSavingCurrentBudget}
-              >
-                {isSavingCurrentBudget ? (
-                  <>
-                    <span className="buttonSpinner" aria-hidden="true" />
-                    <span>Salvando...</span>
-                  </>
-                ) : (
-                  "Salvar"
-                )}
-              </button>
-            </div>
-          </section>
-        </div>
-      ) : null}
       {toast ? (
         <div className={`toast ${toast.kind === "success" ? "toastSuccess" : "toastError"}`} role="status" aria-live="polite">
           {toast.message}

@@ -7,25 +7,14 @@ from typing import Any
 from fastapi import FastAPI, Query
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from backend.budget_store import (
-    delete_general_target,
-    delete_target,
-    get_general_target,
-    get_target,
-    get_targets_for_month,
-    init_budget_store,
-    upsert_general_target,
-    upsert_target,
-)
+from backend.budget_store import init_budget_store
 from backend.dashboard_service import (
     get_cached_dashboard_data,
     get_dashboard_data,
     get_refresh_metrics,
     get_refresh_status,
-    invalidate_dashboard_cache,
     start_background_workers,
     stop_background_workers,
     trigger_refresh_async,
@@ -86,57 +75,25 @@ def _normalize_token(value: str | None) -> str:
     return (value or "").strip().upper()
 
 
-class BudgetTargetPayload(BaseModel):
-    month: str
-    platform: str | None = None
-    target_brl: float
-
-
 @app.get("/api/budget-target")
 def budget_target(
     month: str = Query(..., description="Formato YYYY-MM"),
     platform: str | None = Query(default=None),
 ):
+    """Alvos por plataforma são calculados no /api/dashboard a partir do gasto SA+DV360+Xandr."""
     month_key = _validate_month_key(month)
     platform_name = (platform or "").strip()
     if platform_name:
         return {
             "month_key": month_key,
             "platform": platform_name,
-            "target_brl": get_target(month_key, platform_name),
+            "target_brl": None,
         }
     return {
         "month_key": month_key,
-        "general_target_brl": get_general_target(month_key),
-        "targets_brl": get_targets_for_month(month_key),
+        "general_target_brl": None,
+        "targets_brl": {},
     }
-
-
-@app.put("/api/budget-target")
-def set_budget_target(payload: BudgetTargetPayload):
-    month_key = _validate_month_key(payload.month)
-    platform_name = (payload.platform or "").strip()
-    target_brl = payload.target_brl
-    if target_brl < 0 or target_brl != target_brl or target_brl in (float("inf"), float("-inf")):
-        raise HTTPException(status_code=422, detail="`target_brl` deve ser um número finito maior ou igual a 0.")
-    if platform_name:
-        upsert_target(month_key, platform_name, float(target_brl))
-    else:
-        upsert_general_target(month_key, float(target_brl))
-    invalidate_dashboard_cache()
-    return {"ok": True, "month_key": month_key, "platform": platform_name or None, "target_brl": float(target_brl)}
-
-
-@app.delete("/api/budget-target")
-def clear_budget_target(
-    month: str = Query(..., description="Formato YYYY-MM"),
-    platform: str | None = Query(default=None),
-):
-    month_key = _validate_month_key(month)
-    platform_name = (platform or "").strip()
-    removed = delete_target(month_key, platform_name) if platform_name else delete_general_target(month_key)
-    invalidate_dashboard_cache()
-    return {"ok": True, "month_key": month_key, "platform": platform_name or None, "removed": removed}
 
 
 @app.get("/api/dashboard")
