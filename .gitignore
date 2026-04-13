@@ -21,3 +21,11 @@ uploads/
 
 # OS
 .DS_Store
+
+# Next.js frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+
+# Cloud Run deployment secrets
+cloudrun.backend.env.yaml

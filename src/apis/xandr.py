@@ -20,6 +20,8 @@ from datetime import date
 
 
 BASE_URL = "https://api.appnexus.com"
+REPORT_POLL_TIMEOUT_SECONDS = 90
+REPORT_POLL_INTERVAL_SECONDS = 2
 
 _token_cache: dict = {"token": None, "expires_at": 0}
 
@@ -86,11 +88,28 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
             report_id = r.json().get("response", {}).get("report_id")
             if not report_id:
                 return None, r.json().get("response", {}).get("error", "Report ID não retornado")
-            for _ in range(15):
-                time.sleep(2)
+
+            status = ""
+            deadline = time.time() + REPORT_POLL_TIMEOUT_SECONDS
+            while time.time() < deadline:
                 sr = requests.get(f"{BASE_URL}/report?id={report_id}", headers=headers, timeout=30)
-                if sr.json().get("response", {}).get("execution_status") == "ready":
+                sr.raise_for_status()
+                response_payload = sr.json().get("response", {})
+                status = str(response_payload.get("execution_status", "")).lower()
+                if status == "ready":
                     break
+                if status in {"failed", "failure", "error"}:
+                    error_message = response_payload.get("error", "Report status marcado como failed")
+                    return None, f"Relatório Xandr falhou: {error_message}"
+                time.sleep(REPORT_POLL_INTERVAL_SECONDS)
+
+            if status != "ready":
+                status_msg = status or "desconhecido"
+                return None, (
+                    f"Timeout no relatório Xandr após {REPORT_POLL_TIMEOUT_SECONDS}s "
+                    f"(último status: {status_msg})"
+                )
+
             dl = requests.get(f"{BASE_URL}/report-download?id={report_id}", headers=headers, timeout=60)
             dl.raise_for_status()
             return pd.read_csv(io.StringIO(dl.text)), None
@@ -103,7 +122,7 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
 
         spend_col = next((c for c in df.columns if "spend" in c.lower()), None)
         if spend_col:
-            df[spend_col] = pd.to_numeric(df[spend_col], errors="coerce").fillna(0)
+            df.loc[:, spend_col] = pd.to_numeric(df[spend_col], errors="coerce").fillna(0)
 
         total = float(df[spend_col].sum()) if spend_col else 0.0
 

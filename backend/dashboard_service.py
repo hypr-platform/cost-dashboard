@@ -1,0 +1,813 @@
+import calendar as _cal
+import logging
+import os
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
+from datetime import date, datetime, timezone
+from typing import Any
+
+from backend import bigquery_store
+from backend.budget_store import get_general_target, get_targets_for_month
+from src.apis import amazon_dsp, dv360, nexd, stackadapt, xandr
+from src.apis.sheets import extract_token_from_line, fetch_campaign_journey
+from src.utils.currency import get_usd_to_brl, to_brl
+from src.utils.date_utils import fmt, get_mtd_dates
+
+NEXD_CPM_BRL = 0.0014
+DEFAULT_USD_BRL_RATE = 5.15
+DEFAULT_INTEGRATION_TIMEOUT_SECONDS = 45.0
+DEFAULT_DV360_TIMEOUT_SECONDS = 240.0
+DEFAULT_CACHE_TTL_SECONDS = 300.0
+DEFAULT_WORKER_FAST_INTERVAL_SECONDS = 600.0
+DEFAULT_WORKER_DV360_INTERVAL_SECONDS = 1800.0
+PLATFORMS = {
+    "StackAdapt": stackadapt,
+    "DV360": dv360,
+    "Xandr": xandr,
+    "Amazon DSP": amazon_dsp,
+}
+
+
+_cache: dict[str, Any] = {
+    "start": None,
+    "end": None,
+    "data": None,
+    "cached_at": None,
+    "snapshot_at": None,
+    "source": "live",
+}
+_cache_lock = threading.RLock()
+_refresh_lock = threading.Lock()
+_worker_state_lock = threading.RLock()
+_worker_started = False
+_worker_stop_event = threading.Event()
+_refresh_status: dict[str, Any] = {
+    "running": False,
+    "run_id": None,
+    "trigger": None,
+    "started_at": None,
+    "finished_at": None,
+    "status": "idle",
+    "error": None,
+}
+
+logger = logging.getLogger(__name__)
+
+
+def _to_brl_smart(spend: float, currency: str, rate: float) -> float:
+    return spend if currency == "BRL" else spend * rate
+
+
+def _is_campaign_active(campaign: dict[str, Any], today: date) -> bool:
+    s_c = campaign.get("start")
+    e_c = campaign.get("end")
+    return (s_c is None or s_c <= today) and (e_c is None or e_c >= today)
+
+
+def _iso(d: date | None) -> str | None:
+    return d.isoformat() if d else None
+
+
+def _month_key_from_date(value: date) -> str:
+    return value.strftime("%Y-%m")
+
+
+def _integration_timeout_seconds() -> float:
+    raw_value = os.getenv("DASHBOARD_INTEGRATION_TIMEOUT_SECONDS", "").strip()
+    if not raw_value:
+        return DEFAULT_INTEGRATION_TIMEOUT_SECONDS
+    try:
+        parsed = float(raw_value)
+        if parsed > 0:
+            return parsed
+    except ValueError:
+        pass
+    return DEFAULT_INTEGRATION_TIMEOUT_SECONDS
+
+
+def _cache_ttl_seconds() -> float:
+    raw_value = os.getenv("DASHBOARD_CACHE_TTL_SECONDS", "").strip()
+    if not raw_value:
+        return DEFAULT_CACHE_TTL_SECONDS
+    try:
+        parsed = float(raw_value)
+        if parsed > 0:
+            return parsed
+    except ValueError:
+        pass
+    return DEFAULT_CACHE_TTL_SECONDS
+
+
+def _cache_is_fresh(cached_at: Any) -> bool:
+    if not isinstance(cached_at, (int, float)):
+        return False
+    return (time.time() - float(cached_at)) <= _cache_ttl_seconds()
+
+
+def _fast_worker_interval_seconds() -> float:
+    raw_value = os.getenv("DASHBOARD_FAST_WORKER_INTERVAL_SECONDS", "").strip()
+    if not raw_value:
+        return DEFAULT_WORKER_FAST_INTERVAL_SECONDS
+    try:
+        parsed = float(raw_value)
+        if parsed >= 60:
+            return parsed
+    except ValueError:
+        pass
+    return DEFAULT_WORKER_FAST_INTERVAL_SECONDS
+
+
+def _dv360_worker_interval_seconds() -> float:
+    raw_value = os.getenv("DASHBOARD_DV360_WORKER_INTERVAL_SECONDS", "").strip()
+    if not raw_value:
+        return DEFAULT_WORKER_DV360_INTERVAL_SECONDS
+    try:
+        parsed = float(raw_value)
+        if parsed >= 120:
+            return parsed
+    except ValueError:
+        pass
+    return DEFAULT_WORKER_DV360_INTERVAL_SECONDS
+
+
+def _dv360_timeout_seconds() -> float:
+    raw_value = os.getenv("DASHBOARD_DV360_TIMEOUT_SECONDS", "").strip()
+    if not raw_value:
+        return DEFAULT_DV360_TIMEOUT_SECONDS
+    try:
+        parsed = float(raw_value)
+        if parsed > 0:
+            return parsed
+    except ValueError:
+        pass
+    return DEFAULT_DV360_TIMEOUT_SECONDS
+
+
+def _platform_timeout_seconds(platform_name: str) -> float:
+    if platform_name == "DV360":
+        return _dv360_timeout_seconds()
+    return _integration_timeout_seconds()
+
+
+def _period_range(start: date | None, end: date | None) -> tuple[date, date]:
+    default_start, default_end = get_mtd_dates()
+    resolved_start = start or default_start
+    resolved_end = end or default_end
+    if resolved_start > resolved_end:
+        raise ValueError("`start` deve ser menor ou igual a `end`.")
+    return resolved_start, resolved_end
+
+
+def _refresh_metadata(payload: dict[str, Any], snapshot_at: str, source: str) -> dict[str, Any]:
+    out = dict(payload)
+    meta = out.get("_meta")
+    if not isinstance(meta, dict):
+        meta = {}
+    meta["snapshot_at"] = snapshot_at
+    meta["source"] = source
+    meta["cache_ttl_seconds"] = _cache_ttl_seconds()
+    out["_meta"] = meta
+    return out
+
+
+def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    timeout_seconds = _integration_timeout_seconds()
+    max_workers = len(PLATFORMS) + 3
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        platform_futures = {
+            name: executor.submit(module.fetch_mtd_cost, start, end)
+            for name, module in PLATFORMS.items()
+        }
+        rate_future = executor.submit(get_usd_to_brl)
+        journey_future = executor.submit(fetch_campaign_journey)
+        nexd_future = executor.submit(nexd.fetch_mtd_impressions, start, end)
+
+        results: dict[str, dict[str, Any]] = {}
+        future_to_platform = {future: name for name, future in platform_futures.items()}
+        platform_timeout_ceiling = max(_platform_timeout_seconds(name) for name in PLATFORMS)
+        done_platforms, pending_platforms = wait(
+            set(platform_futures.values()),
+            timeout=platform_timeout_ceiling,
+        )
+        for future in done_platforms:
+            platform_name = future_to_platform[future]
+            try:
+                platform_data = future.result()
+                if not isinstance(platform_data, dict):
+                    raise ValueError("payload inválido da integração")
+                results[platform_name] = platform_data
+            except Exception as exc:
+                results[platform_name] = {
+                    "status": "error",
+                    "message": str(exc),
+                    "spend": 0.0,
+                    "currency": "USD",
+                    "lines": [],
+                    "daily": [],
+                }
+        for future in pending_platforms:
+            future.cancel()
+            platform_name = future_to_platform[future]
+            platform_timeout = _platform_timeout_seconds(platform_name)
+            results[platform_name] = {
+                "status": "error",
+                "message": f"Timeout da integração ({platform_timeout:.0f}s).",
+                "spend": 0.0,
+                "currency": "USD",
+                "lines": [],
+                "daily": [],
+            }
+
+        if isinstance(previous_payload, dict):
+            previous_results = previous_payload.get("platform_results", {})
+            if isinstance(previous_results, dict):
+                # Evita "lines zeradas" da DV360 quando timeout/falha momentânea.
+                current_dv360 = results.get("DV360", {})
+                previous_dv360 = previous_results.get("DV360", {})
+                if (
+                    isinstance(current_dv360, dict)
+                    and current_dv360.get("status") != "ok"
+                    and isinstance(previous_dv360, dict)
+                    and previous_dv360.get("status") == "ok"
+                ):
+                    fallback = dict(previous_dv360)
+                    fallback["message"] = "DV360 indisponível no refresh atual; exibindo último snapshot válido."
+                    results["DV360"] = fallback
+
+        try:
+            rate = float(rate_future.result(timeout=timeout_seconds))
+        except FutureTimeoutError:
+            rate_future.cancel()
+            rate = DEFAULT_USD_BRL_RATE
+        except Exception:
+            rate = DEFAULT_USD_BRL_RATE
+
+        try:
+            journey = journey_future.result(timeout=timeout_seconds)
+            if not isinstance(journey, dict):
+                raise ValueError("payload inválido de campaign journey")
+        except FutureTimeoutError:
+            journey_future.cancel()
+            journey = {
+                "data": [],
+                "status": "error",
+                "message": f"Timeout ao carregar campaign journey ({timeout_seconds:.0f}s).",
+            }
+        except Exception as exc:
+            journey = {"data": [], "status": "error", "message": str(exc)}
+
+        try:
+            nexd_data = nexd_future.result(timeout=timeout_seconds)
+            if not isinstance(nexd_data, dict):
+                raise ValueError("payload inválido da integração Nexd")
+        except FutureTimeoutError:
+            nexd_future.cancel()
+            nexd_data = {
+                "impressions": 0,
+                "cap": getattr(nexd, "MONTHLY_CAP", 10_000_000),
+                "status": "error",
+                "message": f"Timeout da integração ({timeout_seconds:.0f}s).",
+                "campaigns": [],
+                "layouts": [],
+            }
+        except Exception as exc:
+            nexd_data = {
+                "impressions": 0,
+                "cap": getattr(nexd, "MONTHLY_CAP", 10_000_000),
+                "status": "error",
+                "message": str(exc),
+                "campaigns": [],
+                "layouts": [],
+            }
+
+    all_campaigns = {c["token"]: c for c in journey.get("data", [])}
+    platform_spend_by_token: dict[str, dict[str, float]] = {}
+
+    for platform_name, platform_data in results.items():
+        if platform_data.get("status") != "ok":
+            continue
+        platform_spend_by_token[platform_name] = {}
+        for line in platform_data.get("lines", []):
+            token = extract_token_from_line(line.get("name", ""))
+            if not token:
+                continue
+            spend_brl = _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate)
+            platform_spend_by_token[platform_name][token] = platform_spend_by_token[platform_name].get(token, 0.0) + spend_brl
+
+    active_platforms = list(platform_spend_by_token.keys())
+    nexd_cost_brl = nexd_data["impressions"] * NEXD_CPM_BRL if nexd_data.get("status") == "ok" else 0.0
+    total_brl = sum(
+        _to_brl_smart(v.get("spend", 0.0), v.get("currency", "USD"), rate)
+        for v in results.values()
+        if v.get("status") == "ok"
+    ) + nexd_cost_brl
+
+    spend_by_platform: list[dict[str, Any]] = []
+    for name, data in results.items():
+        if data.get("status") == "ok" and data.get("spend", 0.0) > 0:
+            spend_by_platform.append(
+                {
+                    "platform": name,
+                    "spend_brl": _to_brl_smart(data["spend"], data.get("currency", "USD"), rate),
+                }
+            )
+    if nexd_data.get("status") == "ok":
+        spend_by_platform.append({"platform": "Nexd", "spend_brl": nexd_cost_brl})
+
+    daily_platforms = {
+        k: v.get("daily", [])
+        for k, v in results.items()
+        if v.get("status") == "ok" and v.get("daily")
+    }
+    daily_maps = {
+        platform_name: {
+            str(entry.get("date", "")): _to_brl_smart(
+                float(entry.get("spend", 0.0) or 0.0),
+                results[platform_name].get("currency", "USD"),
+                rate,
+            )
+            for entry in series
+            if entry.get("date")
+        }
+        for platform_name, series in daily_platforms.items()
+    }
+    all_dates = sorted({d["date"] for series in daily_platforms.values() for d in series})
+    daily_rows: list[dict[str, Any]] = []
+    for day in all_dates:
+        row = {"date": day, "total": 0.0}
+        for platform_name, date_map in daily_maps.items():
+            value = date_map.get(day, 0.0)
+            row[platform_name] = value
+            row["total"] += value
+        daily_rows.append(row)
+
+    tokens_with_spend = set()
+    for platform_name in active_platforms:
+        tokens_with_spend.update(platform_spend_by_token.get(platform_name, {}).keys())
+
+    today = date.today()
+    campaign_rows = []
+    for token in tokens_with_spend:
+        campaign = all_campaigns.get(token)
+        if not campaign:
+            continue
+        row = {
+            "token": token,
+            "cliente": campaign.get("cliente", ""),
+            "campanha": campaign.get("campanha", ""),
+            "account_management": campaign.get("account_management", ""),
+            "status": "Ativa" if _is_campaign_active(campaign, today) else "Encerrada",
+            "investido": campaign.get("investido", 0.0),
+        }
+        total_platforms = 0.0
+        for platform_name in active_platforms:
+            spend = platform_spend_by_token.get(platform_name, {}).get(token, 0.0)
+            row[platform_name] = spend
+            total_platforms += spend
+        if total_platforms == 0:
+            continue
+        investido = campaign.get("investido", 0.0) or 0.0
+        row["total_plataformas"] = total_platforms
+        row["pct_investido"] = (total_platforms / investido * 100) if investido > 0 else 0.0
+        campaign_rows.append(row)
+
+    campaign_rows.sort(key=lambda x: x["total_plataformas"], reverse=True)
+
+    platform_pages: dict[str, Any] = {}
+    for platform_name, platform_data in results.items():
+        if platform_data.get("status") != "ok":
+            continue
+
+        rows = []
+        for line in platform_data.get("lines", []):
+            token = extract_token_from_line(line.get("name", ""))
+            campaign = all_campaigns.get(token) if token else None
+            spend_brl = _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate)
+            investido = campaign.get("investido") if campaign else None
+            pct_invest = (spend_brl / investido * 100) if investido and investido > 0 else None
+            rows.append(
+                {
+                    "line": line.get("name", ""),
+                    "token": token or "—",
+                    "cliente": campaign.get("cliente", "—") if campaign else "—",
+                    "campanha": campaign.get("campanha", "—") if campaign else "—",
+                    "account_management": campaign.get("account_management", "—") if campaign else "—",
+                    "gasto": spend_brl,
+                    "investido": investido,
+                    "pct_invest": pct_invest,
+                }
+            )
+        rows.sort(key=lambda x: x["gasto"], reverse=True)
+
+        platform_pages[platform_name] = {
+            "spend_brl": _to_brl_smart(platform_data.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
+            "spend_usd": platform_data.get("spend", 0.0),
+            "currency": platform_data.get("currency", "USD"),
+            "rows": rows,
+            "daily": daily_platforms.get(platform_name, []),
+        }
+
+    if nexd_data.get("status") == "ok":
+        impressions = nexd_data.get("impressions", 0)
+        cap = nexd_data.get("cap", 1) or 1
+        platform_pages["Nexd"] = {
+            "spend_brl": nexd_cost_brl,
+            "impressions": impressions,
+            "cap": cap,
+            "pct_cap": impressions / cap * 100,
+            "campaigns": nexd_data.get("campaigns", []),
+            "layouts": nexd_data.get("layouts", []),
+        }
+
+    no_token_rows = []
+    for platform_name, platform_data in results.items():
+        if platform_data.get("status") != "ok":
+            continue
+        for line in platform_data.get("lines", []):
+            if extract_token_from_line(line.get("name", "")):
+                continue
+            no_token_rows.append(
+                {
+                    "platform": platform_name,
+                    "line": line.get("name", ""),
+                    "gasto": _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
+                }
+            )
+    no_token_rows.sort(key=lambda x: x["gasto"], reverse=True)
+
+    _last_day = _cal.monthrange(start.year, start.month)[1]
+    month_end = start.replace(day=_last_day)
+    out_rows = []
+    for platform_name, platform_data in results.items():
+        if platform_data.get("status") != "ok":
+            continue
+        for line in platform_data.get("lines", []):
+            token = extract_token_from_line(line.get("name", ""))
+            if not token:
+                continue
+            campaign = all_campaigns.get(token)
+            if not campaign:
+                continue
+            s_c = campaign.get("start")
+            e_c = campaign.get("end")
+            if (s_c and s_c > month_end) or (e_c and e_c < start):
+                out_rows.append(
+                    {
+                        "platform": platform_name,
+                        "token": token,
+                        "line": line.get("name", ""),
+                        "cliente": campaign.get("cliente", ""),
+                        "campanha": campaign.get("campanha", ""),
+                        "account_management": campaign.get("account_management", ""),
+                        "vigencia_start": _iso(s_c),
+                        "vigencia_end": _iso(e_c),
+                        "gasto": _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
+                    }
+                )
+    out_rows.sort(key=lambda x: x["gasto"], reverse=True)
+
+    for c in journey.get("data", []):
+        c["start"] = _iso(c.get("start"))
+        c["end"] = _iso(c.get("end"))
+
+    month_key = _month_key_from_date(start)
+    budget_targets = get_targets_for_month(month_key)
+    general_target_brl = get_general_target(month_key)
+    general_progress_pct = (total_brl / general_target_brl * 100) if general_target_brl and general_target_brl > 0 else None
+    general_remaining_brl = (general_target_brl - total_brl) if general_target_brl is not None else None
+    budget_platforms: dict[str, Any] = {}
+    for entry in spend_by_platform:
+        platform_name = str(entry["platform"])
+        spent_brl = float(entry["spend_brl"])
+        target_brl = budget_targets.get(platform_name)
+        progress_pct = (spent_brl / target_brl * 100) if target_brl and target_brl > 0 else None
+        remaining_brl = (target_brl - spent_brl) if target_brl is not None else None
+        budget_platforms[platform_name] = {
+            "target_brl": target_brl,
+            "spent_brl": spent_brl,
+            "progress_pct": progress_pct,
+            "remaining_brl": remaining_brl,
+        }
+    for platform_name, target_brl in budget_targets.items():
+        if platform_name in budget_platforms:
+            continue
+        budget_platforms[platform_name] = {
+            "target_brl": target_brl,
+            "spent_brl": 0.0,
+            "progress_pct": 0.0 if target_brl > 0 else None,
+            "remaining_brl": target_brl,
+        }
+
+    return {
+        "period": {"start": fmt(start), "end": fmt(end)},
+        "exchange_rate_usd_brl": rate,
+        "total_brl": total_brl,
+        "journey_status": journey.get("status", "unknown"),
+        "journey_message": journey.get("message"),
+        "platform_results": results,
+        "nexd": nexd_data,
+        "dashboard": {
+            "spend_by_platform": spend_by_platform,
+            "daily": daily_rows,
+            "campaign_journey_rows": campaign_rows,
+            "active_platforms": active_platforms,
+        },
+        "platform_pages": platform_pages,
+        "attention": {
+            "no_token_rows": no_token_rows,
+            "no_token_total_brl": sum(r["gasto"] for r in no_token_rows),
+            "out_of_period_rows": out_rows,
+            "out_of_period_total_brl": sum(r["gasto"] for r in out_rows),
+        },
+        "budget": {
+            "month_key": month_key,
+            "general": {
+                "target_brl": general_target_brl,
+                "spent_brl": total_brl,
+                "progress_pct": general_progress_pct,
+                "remaining_brl": general_remaining_brl,
+            },
+            "platforms": budget_platforms,
+        },
+    }
+
+
+def _update_cache(
+    start: date,
+    end: date,
+    payload: dict[str, Any],
+    *,
+    source: str,
+    snapshot_at: str,
+) -> None:
+    with _cache_lock:
+        _cache["start"] = start
+        _cache["end"] = end
+        _cache["data"] = payload
+        _cache["cached_at"] = time.time()
+        _cache["source"] = source
+        _cache["snapshot_at"] = snapshot_at
+
+
+def _refresh_status_update(**updates: Any) -> None:
+    with _worker_state_lock:
+        _refresh_status.update(updates)
+
+
+def get_refresh_status() -> dict[str, Any]:
+    with _worker_state_lock:
+        return dict(_refresh_status)
+
+
+def get_refresh_metrics() -> dict[str, Any]:
+    if bigquery_store.is_enabled():
+        try:
+            metrics = bigquery_store.read_refresh_metrics(window_hours=24, trigger="manual_api")
+            if metrics is not None:
+                return metrics
+        except Exception:
+            logger.exception("Falha ao buscar métricas de refresh no BigQuery.")
+    return {
+        "window_hours": 24,
+        "trigger": "manual_api",
+        "sample_size": 0,
+        "avg_duration_seconds": None,
+        "p50_duration_seconds": None,
+        "p95_duration_seconds": None,
+    }
+
+
+def _load_from_bigquery(start: date, end: date) -> dict[str, Any] | None:
+    if not bigquery_store.is_enabled():
+        return None
+    try:
+        latest = bigquery_store.load_latest_snapshot(start, end)
+    except Exception:
+        logger.exception("Falha ao consultar snapshot no BigQuery.")
+        return None
+    if not latest:
+        return None
+    payload, snapshot_at = latest
+    payload_with_meta = _refresh_metadata(payload, snapshot_at=snapshot_at, source="bigquery")
+    _update_cache(start, end, payload_with_meta, source="bigquery", snapshot_at=snapshot_at)
+    return payload_with_meta
+
+
+def _refresh_dashboard(start: date, end: date, trigger: str) -> dict[str, Any]:
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
+    _refresh_status_update(
+        running=True,
+        run_id=run_id,
+        trigger=trigger,
+        started_at=started_at.isoformat(),
+        finished_at=None,
+        status="running",
+        error=None,
+    )
+
+    if bigquery_store.is_enabled():
+        try:
+            bigquery_store.write_refresh_run(
+                run_id=run_id,
+                trigger=trigger,
+                period_start=start,
+                period_end=end,
+                started_at=started_at,
+                status="running",
+            )
+        except Exception:
+            logger.exception("Falha ao registrar início do run no BigQuery.")
+
+    with _refresh_lock:
+        try:
+            previous_payload = None
+            with _cache_lock:
+                if _cache["start"] == start and _cache["end"] == end and isinstance(_cache.get("data"), dict):
+                    previous_payload = dict(_cache["data"])
+            if previous_payload is None:
+                bq_snapshot = _load_from_bigquery(start, end)
+                if isinstance(bq_snapshot, dict):
+                    previous_payload = dict(bq_snapshot)
+
+            payload = _build_payload(start, end, previous_payload=previous_payload)
+            snapshot_at = datetime.now(timezone.utc).isoformat()
+            payload = _refresh_metadata(payload, snapshot_at=snapshot_at, source="live")
+            _update_cache(start, end, payload, source="live", snapshot_at=snapshot_at)
+
+            if bigquery_store.is_enabled():
+                try:
+                    written_snapshot_at = bigquery_store.write_snapshot(start, end, payload, source=trigger)
+                    payload = _refresh_metadata(payload, snapshot_at=written_snapshot_at, source="bigquery")
+                    _update_cache(start, end, payload, source="bigquery", snapshot_at=written_snapshot_at)
+                except Exception:
+                    logger.exception("Falha ao gravar snapshot no BigQuery.")
+
+            finished_at = datetime.now(timezone.utc)
+            _refresh_status_update(
+                running=False,
+                finished_at=finished_at.isoformat(),
+                status="success",
+                error=None,
+            )
+            if bigquery_store.is_enabled():
+                try:
+                    bigquery_store.write_refresh_run(
+                        run_id=run_id,
+                        trigger=trigger,
+                        period_start=start,
+                        period_end=end,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        status="success",
+                    )
+                except Exception:
+                    logger.exception("Falha ao registrar sucesso do run no BigQuery.")
+            return payload
+        except Exception as exc:
+            finished_at = datetime.now(timezone.utc)
+            _refresh_status_update(
+                running=False,
+                finished_at=finished_at.isoformat(),
+                status="error",
+                error=str(exc),
+            )
+            if bigquery_store.is_enabled():
+                try:
+                    bigquery_store.write_refresh_run(
+                        run_id=run_id,
+                        trigger=trigger,
+                        period_start=start,
+                        period_end=end,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        status="error",
+                        error_message=str(exc),
+                    )
+                except Exception:
+                    logger.exception("Falha ao registrar erro do run no BigQuery.")
+            raise
+
+
+def get_dashboard_data(
+    start: date | None = None,
+    end: date | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    resolved_start, resolved_end = _period_range(start, end)
+    if force_refresh:
+        return _refresh_dashboard(resolved_start, resolved_end, trigger="force_refresh")
+
+    with _cache_lock:
+        if (
+            _cache["start"] == resolved_start
+            and _cache["end"] == resolved_end
+            and _cache["data"] is not None
+            and _cache_is_fresh(_cache.get("cached_at"))
+        ):
+            return dict(_cache["data"])
+
+    bq_payload = _load_from_bigquery(resolved_start, resolved_end)
+    if bq_payload is not None:
+        return bq_payload
+
+    return _refresh_dashboard(resolved_start, resolved_end, trigger="cache_miss")
+
+
+def trigger_refresh_async(start: date | None = None, end: date | None = None, trigger: str = "manual") -> dict[str, Any]:
+    resolved_start, resolved_end = _period_range(start, end)
+    status = get_refresh_status()
+    if status.get("running"):
+        return {
+            "queued": False,
+            "running": True,
+            "message": "Refresh já em execução.",
+            "status": status,
+        }
+
+    def _run() -> None:
+        try:
+            _refresh_dashboard(resolved_start, resolved_end, trigger=trigger)
+        except Exception:
+            logger.exception("Falha no refresh assíncrono.")
+
+    thread = threading.Thread(target=_run, daemon=True, name=f"dashboard-refresh-{trigger}")
+    thread.start()
+    return {
+        "queued": True,
+        "running": True,
+        "message": "Refresh disparado.",
+        "period": {"start": resolved_start.isoformat(), "end": resolved_end.isoformat()},
+    }
+
+
+def _worker_loop(trigger_name: str, interval_seconds: float) -> None:
+    while not _worker_stop_event.wait(timeout=2):
+        now = time.time()
+        with _worker_state_lock:
+            last_key = f"last_run_{trigger_name}"
+            last_run = _refresh_status.get(last_key)
+        if isinstance(last_run, (int, float)) and now - float(last_run) < interval_seconds:
+            continue
+        try:
+            start, end = get_mtd_dates()
+            _refresh_dashboard(start, end, trigger=trigger_name)
+        except Exception:
+            logger.exception("Falha no worker `%s`.", trigger_name)
+        finally:
+            with _worker_state_lock:
+                _refresh_status[last_key] = time.time()
+
+
+def start_background_workers() -> None:
+    global _worker_started
+    with _worker_state_lock:
+        if _worker_started:
+            return
+        _worker_started = True
+    if bigquery_store.is_enabled():
+        try:
+            bigquery_store.ensure_infra()
+        except Exception:
+            logger.exception("Falha ao preparar infraestrutura no BigQuery.")
+    _worker_stop_event.clear()
+    fast_thread = threading.Thread(
+        target=_worker_loop,
+        args=("scheduled_fast", _fast_worker_interval_seconds()),
+        daemon=True,
+        name="dashboard-worker-fast",
+    )
+    dv360_thread = threading.Thread(
+        target=_worker_loop,
+        args=("scheduled_dv360", _dv360_worker_interval_seconds()),
+        daemon=True,
+        name="dashboard-worker-dv360",
+    )
+    fast_thread.start()
+    dv360_thread.start()
+
+
+def stop_background_workers() -> None:
+    _worker_stop_event.set()
+    with _worker_state_lock:
+        _refresh_status["running"] = False
+
+
+def get_cached_dashboard_data() -> dict[str, Any] | None:
+    with _cache_lock:
+        cached = _cache.get("data")
+    if isinstance(cached, dict):
+        return dict(cached)
+    return None
+
+
+def invalidate_dashboard_cache() -> None:
+    with _cache_lock:
+        _cache["start"] = None
+        _cache["end"] = None
+        _cache["data"] = None
+        _cache["cached_at"] = None
+        _cache["snapshot_at"] = None
+        _cache["source"] = "live"

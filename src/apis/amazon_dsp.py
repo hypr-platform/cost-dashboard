@@ -34,6 +34,8 @@ REGIONS = {
 }
 
 TOKEN_URL = "https://api.amazon.com/auth/o2/token"
+REPORT_POLL_TIMEOUT_SECONDS = 90
+REPORT_POLL_INTERVAL_SECONDS = 3
 
 _token_cache: dict = {"token": None, "expires_at": 0}
 
@@ -119,14 +121,46 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
         if not report_id:
             return {"spend": 0.0, "currency": "USD", "status": "error", "lines": [], "cost_types": [], "message": "Report ID não retornado"}
 
-        # Polling até ficar pronto
-        for _ in range(15):
+        # Polling até ficar pronto (com estados explícitos)
+        status_data: dict = {}
+        report_status = ""
+        deadline = time.time() + REPORT_POLL_TIMEOUT_SECONDS
+        while time.time() < deadline:
             status_resp = requests.get(f"{base_url}/dsp/reports/{report_id}", headers=headers, timeout=30)
             status_resp.raise_for_status()
             status_data = status_resp.json()
-            if status_data.get("status") == "SUCCESS":
+            report_status = str(status_data.get("status", "")).upper()
+            if report_status == "SUCCESS":
                 break
-            time.sleep(3)
+            if report_status in {"FAILURE", "FAILED", "CANCELLED"}:
+                failure_message = (
+                    status_data.get("statusDetails")
+                    or status_data.get("message")
+                    or "Relatório Amazon DSP falhou."
+                )
+                return {
+                    "spend": 0.0,
+                    "currency": "USD",
+                    "status": "error",
+                    "lines": [],
+                    "cost_types": [],
+                    "message": f"{report_status}: {failure_message}",
+                }
+            time.sleep(REPORT_POLL_INTERVAL_SECONDS)
+
+        if report_status != "SUCCESS":
+            status_msg = report_status or "DESCONHECIDO"
+            return {
+                "spend": 0.0,
+                "currency": "USD",
+                "status": "error",
+                "lines": [],
+                "cost_types": [],
+                "message": (
+                    f"Timeout no relatório Amazon DSP após {REPORT_POLL_TIMEOUT_SECONDS}s "
+                    f"(último status: {status_msg})."
+                ),
+            }
 
         dl_url = status_data.get("location")
         if not dl_url:

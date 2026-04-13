@@ -1,10 +1,27 @@
 # Cost Dashboard
 
-Dashboard MTD (month-to-date) de midia paga em Streamlit. O projeto consolida custos de multiplas plataformas, converte para BRL e cruza os gastos com a planilha de Campaign Journey por token.
+Dashboard de mês corrente (month-to-date) de midia paga com frontend em Next.js e backend em Python (FastAPI). O projeto consolida custos de multiplas plataformas, converte para BRL e cruza os gastos com a planilha de Campaign Journey por token.
+
+## Arquitetura atual (produzida neste repo)
+
+- Frontend: `frontend/` (Next.js + SWR + Clerk)
+- Backend: `backend/` (FastAPI + workers internos paralelos)
+- Fonte da verdade: APIs das DSPs (DV360, Xandr, Amazon DSP, StackAdapt, Nexd)
+- Serving layer: snapshots no BigQuery (`cost_dashboard_rt`)
+- Budget targets: persistidos no BigQuery (tabela historica `budget_targets_history`)
+- Cache local: memoria do backend com TTL de 5 minutos
+
+Fluxo:
+
+1. Workers do backend rodam periodicamente e coletam dados em paralelo.
+2. Payload consolidado e persistido no BigQuery.
+3. Frontend consome `/api/dashboard` (snapshot rapido).
+4. Usuario pode clicar em **Forcar atualizacao na fonte** para refresh imediato.
+5. A UI exibe o horario real do snapshot mostrado.
 
 ## O que este projeto faz
 
-- Consolida gasto MTD de `StackAdapt`, `DV360`, `Xandr` e `Amazon DSP`.
+- Consolida gasto do mês corrente de `StackAdapt`, `DV360`, `Xandr` e `Amazon DSP`.
 - Calcula custo estimado de `Nexd` por impressoes (CPM fixo).
 - Converte custos em USD para BRL usando PTAX (Banco Central).
 - Cruza lines/campanhas com a planilha de Campaign Journey via token de 6 caracteres.
@@ -21,7 +38,7 @@ Dashboard MTD (month-to-date) de midia paga em Streamlit. O projeto consolida cu
 - Endpoint: `https://api.stackadapt.com/graphql`
 - Auth: `STACKADAPT_API_KEY` (Bearer)
 - Dados usados:
-  - custo total MTD
+  - custo total do mês corrente
   - custo por line/campaign
   - serie diaria
 
@@ -35,7 +52,7 @@ Dashboard MTD (month-to-date) de midia paga em Streamlit. O projeto consolida cu
   - OAuth (`dv360-token.json` + `oauth-credentials.json`) ou
   - Service Account (`DV360_SERVICE_ACCOUNT_JSON_BASE64`)
 - Dados usados:
-  - custo total MTD
+  - custo total do mês corrente
   - custo por line item
   - custo por tipo
   - serie diaria
@@ -60,7 +77,7 @@ Dashboard MTD (month-to-date) de midia paga em Streamlit. O projeto consolida cu
   - `AMAZON_CLIENT_SECRET`
   - `AMAZON_REFRESH_TOKEN`
 - Dados usados:
-  - custo total MTD por report (CAMPAIGN / totalCost)
+  - custo total do mês corrente por report (CAMPAIGN / totalCost)
 
 ### 5) Nexd
 
@@ -68,7 +85,7 @@ Dashboard MTD (month-to-date) de midia paga em Streamlit. O projeto consolida cu
 - Endpoint base: `https://api.nexd.com`
 - Auth: `NEXD_API_KEY` (Bearer)
 - Dados usados:
-  - impressoes MTD por campanha
+  - impressoes do mês corrente por campanha
   - impressoes por formato/layout
 - Observacao:
   - Nexd nao retorna custo diretamente neste projeto.
@@ -95,37 +112,34 @@ Dashboard MTD (month-to-date) de midia paga em Streamlit. O projeto consolida cu
 
 ## Arquitetura (resumo)
 
-- `app.py`: interface Streamlit, consolidacao, visualizacoes e regras de alerta.
+- `frontend/`: interface Next.js (cards, graficos e tabelas).
+- `backend/main.py`: API FastAPI com endpoint `GET /api/dashboard`.
+- `backend/dashboard_service.py`: consolidacao de dados e regras de negocio do dashboard.
 - `src/apis/*.py`: clientes de API por plataforma.
 - `src/apis/sheets.py`: leitura da planilha Campaign Journey e extracao de token.
 - `src/utils/currency.py`: taxa PTAX e conversao USD -> BRL.
-- `src/utils/date_utils.py`: utilitarios de datas MTD.
+- `src/utils/date_utils.py`: utilitarios de datas do mês corrente.
 - `generate_token.py`: gera token OAuth para Google APIs (DV360/Sheets).
 
 ## Estrutura de pastas
 
 ```text
 cost-dashboard/
-├── app.py
+├── frontend/                  # Next.js app (UI)
+├── backend/
+│   ├── main.py               # FastAPI app
+│   └── dashboard_service.py  # consolidacao dos dados
+├── src/
+│   ├── apis/                 # integracoes com plataformas
+│   └── utils/                # utilitarios
 ├── generate_token.py
 ├── requirements.txt
-├── .env.example
-└── src/
-    ├── apis/
-    │   ├── amazon_dsp.py
-    │   ├── dv360.py
-    │   ├── nexd.py
-    │   ├── sheets.py
-    │   ├── stackadapt.py
-    │   └── xandr.py
-    └── utils/
-        ├── currency.py
-        └── date_utils.py
+└── .env.example
 ```
 
 ## Fluxo de dados do app
 
-1. Define periodo MTD (inicio do mes ate hoje).
+1. Define periodo do mês corrente (inicio do mes ate hoje).
 2. Consulta plataformas de midia e coleta custo/linhas/daily.
 3. Consulta PTAX e converte USD para BRL.
 4. Consulta planilha Campaign Journey.
@@ -147,22 +161,7 @@ cost-dashboard/
 
 ## Como rodar (passo a passo)
 
-### Opcao rapida (script)
-
-Comando unico para preparar e subir o projeto:
-
-```bash
-./start.sh
-```
-
-O script:
-
-- cria `.venv` se ainda nao existir
-- ativa o ambiente virtual
-- instala dependencias do `requirements.txt`
-- inicia o Streamlit (`streamlit run app.py`)
-
-Para parar, pressione `Ctrl + C` no terminal onde o script estiver rodando.
+### Execucao manual (2 terminais)
 
 ### 1) Entrar na pasta do projeto
 
@@ -170,20 +169,38 @@ Para parar, pressione `Ctrl + C` no terminal onde o script estiver rodando.
 cd "/Users/mateus-hypr/Projects/cost-dashboard"
 ```
 
-### 2) Criar e ativar ambiente virtual
+### 2) Backend (FastAPI)
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Se o ambiente estiver ativo, voce vera `(.venv)` no inicio da linha do terminal.
+### 3) Frontend (Next.js)
 
-### 3) Instalar dependencias
+Em outro terminal:
 
 ```bash
-pip install -r requirements.txt
+cd "/Users/mateus-hypr/Projects/cost-dashboard/frontend"
+npm install
+cp .env.local.example .env.local
+npm run dev
 ```
+
+No arquivo `frontend/.env.local`, configure tambem as chaves do Clerk:
+
+```env
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_xxx
+CLERK_SECRET_KEY=sk_test_xxx
+```
+
+No painel do Clerk:
+
+1. Habilite apenas o provider **Google** em Sign-in methods.
+2. Desabilite email/password e outros providers.
+3. (Recomendado) Configure restricao de dominio para `hypr.mobi`.
 
 ### 4) Configurar variaveis de ambiente
 
@@ -235,6 +252,12 @@ base64 -i "secrets/dv360-service-account.json" | tr -d '\n'
 
 Cole a saida na variavel `DV360_SERVICE_ACCOUNT_JSON_BASE64`.
 
+Backend/frontend:
+
+```env
+FRONTEND_ORIGIN=http://localhost:3000
+```
+
 ### 5) (Opcional, recomendado para DV360 OAuth) Gerar token uma vez
 
 1. Coloque `oauth-credentials.json` na raiz do projeto.
@@ -246,17 +269,50 @@ python generate_token.py
 
 O script abre o navegador para autenticacao e salva `dv360-token.json`.
 
-### 6) Rodar o dashboard
+### 6) Abrir a aplicacao
 
-```bash
-streamlit run app.py
-```
-
-A aplicacao normalmente abre em `http://localhost:8501`.
+- Frontend: `http://localhost:3000`
+- Backend API: `http://localhost:8000` (`/health` e `/api/dashboard`)
 
 ### 7) Parar a aplicacao
 
 No terminal do Streamlit, pressione `Ctrl + C`.
+
+## Deploy do backend no Cloud Run
+
+Este repositorio inclui um script para deploy do backend FastAPI no Cloud Run com 1 instancia fixa (sem cold start):
+
+- `min-instances=1`
+- `max-instances=1`
+
+### 1) Criar arquivo de variaveis do Cloud Run
+
+Copie os valores do `.env` para `cloudrun.backend.env.yaml`.
+
+Observacoes:
+
+- O arquivo `cloudrun.backend.env.yaml` esta no `.gitignore`.
+- Nao commite segredos.
+
+### 2) Rodar o deploy
+
+```bash
+PROJECT_ID=site-hypr SERVICE_NAME=cost-dashboard-api REGION=southamerica-east1 ./deploy-backend-cloudrun.sh
+```
+
+Se quiser usar os defaults do script (`SERVICE_NAME=cost-dashboard-api` e `REGION=southamerica-east1`), rode:
+
+```bash
+PROJECT_ID=site-hypr ./deploy-backend-cloudrun.sh
+```
+
+### 3) Validar o backend publicado
+
+Depois do deploy, teste:
+
+```bash
+curl https://SUA_URL_DO_CLOUD_RUN/health
+```
 
 ## Variaveis de ambiente (referencia)
 
@@ -280,17 +336,17 @@ No terminal do Streamlit, pressione `Ctrl + C`.
 
 ## Paginas da interface
 
-- `Dashboard`: consolidado MTD, distribuicao por plataforma, serie diaria e tabela de Campaign Journey.
-- `StackAdapt` / `DV360` / `Xandr` / `Amazon DSP`: detalhamento por line com token, cliente, campanha e % investido.
-- `Nexd`: impressoes, uso do cap mensal, ranking por campanha e por formato.
-- `Atencao`: lines sem token e gasto em campanhas fora de vigencia.
+- `Dashboard`: consolidado do mês corrente, distribuicao por plataforma, cards de alertas e tabela de Campaign Journey.
+- Os dados detalhados por plataforma e alertas de atencao sao expostos no payload da API (`/api/dashboard`) para evolucao de novas telas no frontend.
 
 ## Solucao de problemas rapida
 
 - **`ModuleNotFoundError`**: confirme se `.venv` esta ativo e rode `pip install -r requirements.txt`.
 - **Erro de credenciais/API**: revise `.env`, permissoes e caminhos dos JSONs.
 - **DV360/Sheets sem dados**: gere/renove token com `python generate_token.py`.
-- **Porta ocupada**: use `streamlit run app.py --server.port 8502`.
+- **Porta ocupada**:
+  - Frontend: `npm run dev -- --port 3001`
+  - Backend: `uvicorn backend.main:app --reload --port 8001`
 - **Ambiente inconsistente**: recrie o `.venv` e reinstale dependencias.
 
 ## Observacoes de seguranca

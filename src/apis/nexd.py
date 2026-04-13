@@ -24,7 +24,7 @@ def _get_headers() -> dict:
 
 def fetch_mtd_impressions(start: date, end: date) -> dict:
     """
-    Retorna total de impressões MTD, detalhamento por campanha e por formato/layout.
+    Retorna total de impressões do mês corrente, detalhamento por campanha e por formato/layout.
 
     Returns:
     {

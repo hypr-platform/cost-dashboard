@@ -7,29 +7,36 @@ Autenticação: Bearer token via STACKADAPT_API_KEY no .env
 import os
 from collections import defaultdict
 from datetime import date, timedelta
+from typing import Any, Optional
 
 import requests
 
 GQL_URL = "https://api.stackadapt.com/graphql"
 
-CAMPAIGN_DELIVERY_QUERY = """
-{
+# `records` é paginado; sem first/after a API devolve só a primeira página e totalStats fica maior que a soma das linhas.
+RECORDS_PAGE_SIZE = 100
+
+
+def _campaign_delivery_query(start_str: str, end_str: str) -> str:
+    return f"""
+query StackAdaptCampaignDelivery($after: String) {{
   campaignDelivery(
     dataType: TABLE
     granularity: TOTAL
-    date: { from: "%s", to: "%s" }
-  ) {
-    ... on CampaignDeliveryOutcome {
-      totalStats { cost tpCpmCost tpCpcCost }
-      records {
-        nodes {
-          campaign { id name }
-          metrics { cost tpCpmCost tpCpcCost impressionsBigint }
-        }
-      }
-    }
-  }
-}
+    date: {{ from: "{start_str}", to: "{end_str}" }}
+  ) {{
+    ... on CampaignDeliveryOutcome {{
+      totalStats {{ cost tpCpmCost tpCpcCost }}
+      records(first: {RECORDS_PAGE_SIZE}, after: $after) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
+          campaign {{ id name }}
+          metrics {{ cost tpCpmCost tpCpcCost impressionsBigint }}
+        }}
+      }}
+    }}
+  }}
+}}
 """
 
 DAILY_QUERY = """
@@ -52,12 +59,15 @@ DAILY_QUERY = """
 """
 
 
-def _gql(query: str, token: str) -> dict:
+def _gql(query: str, token: str, *, variables: Optional[dict[str, Any]] = None) -> dict:
+    payload: dict[str, Any] = {"query": query}
+    if variables is not None:
+        payload["variables"] = variables
     r = requests.post(
         GQL_URL,
-        json={"query": query},
+        json=payload,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        timeout=30,
+        timeout=120,
     )
     r.raise_for_status()
     data = r.json()
@@ -79,9 +89,35 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
         start_str = start.strftime("%Y-%m-%d")
         end_str   = (end + timedelta(days=1)).strftime("%Y-%m-%d")  # API 'to' é exclusivo
 
-        # Campaign-level spend (para lines + tokens)
-        camp_data = _gql(CAMPAIGN_DELIVERY_QUERY % (start_str, end_str), token)
-        outcome   = camp_data.get("campaignDelivery", {})
+        # Campaign-level spend (para lines + tokens) — paginar records até cobrir todas as campanhas
+        q = _campaign_delivery_query(start_str, end_str)
+        cursor: Optional[str] = None
+        outcome: dict = {}
+        lines = []
+        while True:
+            camp_data = _gql(q, token, variables={"after": cursor})
+            outcome = camp_data.get("campaignDelivery", {}) or {}
+            rec = outcome.get("records") or {}
+            for node in rec.get("nodes", []) or []:
+                camp = node.get("campaign", {})
+                name = camp.get("name", "")
+                m = node.get("metrics", {})
+                spend = (
+                    float(m.get("cost", 0) or 0)
+                    + float(m.get("tpCpmCost", 0) or 0)
+                    + float(m.get("tpCpcCost", 0) or 0)
+                )
+                if spend > 0:
+                    lines.append({"name": name, "spend": spend})
+
+            page_info = rec.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                break
+
+        lines.sort(key=lambda x: -x["spend"])
 
         total_stats = outcome.get("totalStats", {})
         total = (
@@ -89,21 +125,6 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
             + float(total_stats.get("tpCpmCost", 0) or 0)
             + float(total_stats.get("tpCpcCost", 0) or 0)
         )
-
-        lines = []
-        for node in outcome.get("records", {}).get("nodes", []):
-            camp  = node.get("campaign", {})
-            name  = camp.get("name", "")
-            m     = node.get("metrics", {})
-            spend = (
-                float(m.get("cost", 0) or 0)
-                + float(m.get("tpCpmCost", 0) or 0)
-                + float(m.get("tpCpcCost", 0) or 0)
-            )
-            if spend > 0:
-                lines.append({"name": name, "spend": spend})
-
-        lines.sort(key=lambda x: -x["spend"])
 
         # Daily totals (por campaign group)
         daily = []

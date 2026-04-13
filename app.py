@@ -94,8 +94,8 @@ section[data-testid="stSidebar"] > div{padding:0!important}
 NEXD_CPM_BRL = 0.0014
 PLATFORM_COLORS = {
     "StackAdapt": "#3b82f6",
-    "DV360":      "#8b5cf6",
-    "Xandr":      "#f59e0b",
+    "DV360":      "#22c55e",
+    "Xandr":      "#ef4444",
     "Amazon DSP": "#22c55e",
     "Nexd":       "#f97316",
 }
@@ -214,7 +214,7 @@ with st.sidebar:
     st.markdown(f"""
 <div style="padding:1.25rem 1rem 0.75rem 1rem;border-bottom:1px solid #1f2937">
   <p style="font-size:0.95rem;font-weight:700;color:#f9fafb;margin:0 0 0.15rem 0">Cost Dashboard</p>
-  <p style="font-size:0.7rem;color:#4b5563;margin:0">MTD · {fmt(start)} → {fmt(end)}</p>
+  <p style="font-size:0.7rem;color:#4b5563;margin:0">Mês Corrente · {fmt(start)} → {fmt(end)}</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -233,7 +233,7 @@ with st.sidebar:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Page header ───────────────────────────────────────────────────────────────
-st.markdown(f'<p class="sec-label">Mídia Paga</p><p class="sec-title">{active_page}</p><p class="sec-sub">Month-to-Date · {fmt(start)} → {fmt(end)}</p>', unsafe_allow_html=True)
+st.markdown(f'<p class="sec-label">Mídia Paga</p><p class="sec-title">{active_page}</p><p class="sec-sub">Mês Corrente · {fmt(start)} → {fmt(end)}</p>', unsafe_allow_html=True)
 st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -246,7 +246,7 @@ if active_page == "Dashboard":
         d = results[name]
         if d["status"] == "ok":
             cards.append(_card(name, fmt_brl(to_brl_smart(d["spend"], d["currency"])),
-                f"USD {d['spend']:,.2f}", badge="DSP", badge_cls=PLATFORM_BADGE[name]))
+                f"USD {d['spend']:,.2f}"))
         elif d["status"] == "error":
             cards.append(_card_empty(name, d["message"]))
         # no_credentials: skip silently
@@ -258,7 +258,7 @@ if active_page == "Dashboard":
             f"{nexd_data['impressions']:,.0f} impressões",
             badge=f"{_pct:.1f}% do pacote", badge_cls=_cls))
 
-    cards.append(_card("Total MTD", fmt_brl(total_brl),
+    cards.append(_card("Total Mês Corrente", fmt_brl(total_brl),
         f"USD 1 = R$ {rate:.4f}", badge="Consolidado", badge_cls="badge-gray"))
 
     cols = st.columns(len(cards))
@@ -333,7 +333,7 @@ if active_page == "Dashboard":
 
     # Campaign Journey
     st.divider()
-    st.markdown('<p class="sec-label">Planilha</p><p class="sec-title">Campaign Journey</p><p class="sec-sub">Gasto MTD por token cruzado com a planilha</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sec-label">Planilha</p><p class="sec-title">Campaign Journey</p><p class="sec-sub">Gasto do mês corrente por token cruzado com a planilha</p>', unsafe_allow_html=True)
 
     if journey["status"] == "error":
         st.error(f"Erro ao ler planilha: {journey['message']}")
@@ -385,9 +385,9 @@ if active_page == "Dashboard":
                 _table_style(df_d).format(fmt_map, na_rep="—"),
                 use_container_width=True, hide_index=True,
             )
-            st.caption(f"{len(df_d)} campanhas com gasto MTD identificadas por token")
+            st.caption(f"{len(df_d)} campanhas com gasto no mês corrente identificadas por token")
         else:
-            st.info("Nenhum token com gasto MTD encontrado nas plataformas.")
+            st.info("Nenhum token com gasto no mês corrente encontrado nas plataformas.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

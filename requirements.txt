@@ -7,5 +7,8 @@ google-auth==2.38.0
 google-auth-httplib2==0.2.0
 google-api-python-client==2.165.0
 google-auth-oauthlib==1.2.1
+google-cloud-bigquery==3.30.0
 httpx==0.28.1
 openpyxl==3.1.5
+fastapi==0.135.3
+uvicorn==0.44.0
