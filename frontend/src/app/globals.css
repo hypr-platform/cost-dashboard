@@ -1919,6 +1919,33 @@ button.card.platformStatCardNoTokenButton .cardSubtitle {
   margin-bottom: 2px;
 }
 
+.filterCheckboxField {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #2b3a55;
+  background: linear-gradient(180deg, #10192e 0%, #0d1628 100%);
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.25;
+  cursor: pointer;
+}
+
+.filterCheckboxField input {
+  width: 16px;
+  height: 16px;
+  accent-color: #3b82f6;
+  cursor: pointer;
+}
+
+.filterFieldCheckbox {
+  max-width: 360px;
+}
+
 .filterField {
   position: relative;
   flex: 1 1 240px;

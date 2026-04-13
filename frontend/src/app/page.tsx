@@ -64,6 +64,17 @@ type StackAdaptSortDirection = "asc" | "desc";
 type AttentionNoTokenSortKey = "platform" | "line" | "gasto";
 type AttentionOutOfPeriodSortKey = "platform" | "token" | "cliente" | "campanha" | "account_management" | "vigencia" | "gasto";
 type AttentionSortDirection = "asc" | "desc";
+type AttentionOutOfPeriodRow = {
+  platform: string;
+  token: string;
+  line: string;
+  cliente: string;
+  campanha: string;
+  account_management: string;
+  vigencia_start: string | null;
+  vigencia_end: string | null;
+  gasto: number;
+};
 
 type BudgetData = {
   month_key: string;
@@ -132,17 +143,7 @@ type DashboardResponse = {
   attention: {
     no_token_rows: { platform: string; line: string; gasto: number }[];
     no_token_total_brl: number;
-    out_of_period_rows: {
-      platform: string;
-      token: string;
-      line: string;
-      cliente: string;
-      campanha: string;
-      account_management: string;
-      vigencia_start: string | null;
-      vigencia_end: string | null;
-      gasto: number;
-    }[];
+    out_of_period_rows: AttentionOutOfPeriodRow[];
     out_of_period_total_brl: number;
   };
   budget: BudgetData;
@@ -314,6 +315,7 @@ const URL_PARAM_CAMPAIGN_STATUS = "campaign_status";
 /** Filtro por produto vendido da campanha. */
 const URL_PARAM_CAMPAIGN_TYPE = "tipo";
 const URL_PARAM_FEATURES = "features";
+const URL_PARAM_HIDE_OUT_OF_PERIOD = "hide_oop";
 const URL_PARAM_MONTH = "month";
 const URL_PARAM_VIEW = "view";
 const MONTH_KEY_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -433,6 +435,25 @@ function journeySnapshotForPlatformRow(
     account_management: row.account_management,
     status: journey?.status ?? "",
     investido: Number(journey?.investido ?? row.investido ?? 0),
+    total_plataformas: Number(journey?.total_plataformas ?? 0),
+    pct_investido: Number(journey?.pct_investido ?? 0),
+  } as JourneyRow;
+}
+
+function journeySnapshotForOutOfPeriodRow(
+  row: AttentionOutOfPeriodRow,
+  journeyByToken: Map<string, JourneyRow>
+): JourneyRow {
+  const t = String(row.token ?? "").trim();
+  const journey = t && hasCampaignToken(t) ? journeyByToken.get(t) : undefined;
+  return {
+    token: row.token,
+    cliente: row.cliente,
+    campanha: row.campanha,
+    produto_vendido: journey?.produto_vendido ?? "",
+    account_management: row.account_management,
+    status: journey?.status ?? "",
+    investido: Number(journey?.investido ?? 0),
     total_plataformas: Number(journey?.total_plataformas ?? 0),
     pct_investido: Number(journey?.pct_investido ?? 0),
   } as JourneyRow;
@@ -1302,6 +1323,9 @@ function HomeContent() {
   const [campaignTypeFilter, setCampaignTypeFilter] = useState<string[]>(() =>
     parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE))
   );
+  const [hideOutOfPeriodCampaigns, setHideOutOfPeriodCampaigns] = useState(
+    () => searchParams.get(URL_PARAM_HIDE_OUT_OF_PERIOD) === "1"
+  );
   const [selectedViewMode, setSelectedViewMode] = useState<AnalysisViewMode>(() => {
     const paramView = searchParams.get(URL_PARAM_VIEW);
     return isValidAnalysisViewMode(paramView) ? paramView : "month";
@@ -1446,6 +1470,7 @@ function HomeContent() {
       (FEATURE_OPTIONS as readonly string[]).includes(value)
     );
     const nextCampaignTypes = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE));
+    const nextHideOutOfPeriod = searchParams.get(URL_PARAM_HIDE_OUT_OF_PERIOD) === "1";
     const nextView = searchParams.get(URL_PARAM_VIEW);
     const nextMonth = searchParams.get(URL_PARAM_MONTH);
     const normalizedView = isValidAnalysisViewMode(nextView) ? nextView : "month";
@@ -1483,6 +1508,7 @@ function HomeContent() {
     );
     setFeatureFilter((prev) => (prev.join("|") === nextFeatures.join("|") ? prev : nextFeatures));
     setCampaignTypeFilter((prev) => (prev.join("|") === nextCampaignTypes.join("|") ? prev : nextCampaignTypes));
+    setHideOutOfPeriodCampaigns((prev) => (prev === nextHideOutOfPeriod ? prev : nextHideOutOfPeriod));
     setSelectedViewMode((prev) => (prev === normalizedView ? prev : normalizedView));
     setSelectedMonthKey((prev) => (prev === normalizedMonth ? prev : normalizedMonth));
   }, [currentMonthKey, currentYearKey, searchParams]);
@@ -1512,6 +1538,7 @@ function HomeContent() {
     setQueryValue(URL_PARAM_CAMPAIGN_STATUS, stringifyCsvList(campaignStatusFilter));
     setQueryValue(URL_PARAM_FEATURES, stringifyCsvList(featureFilter));
     setQueryValue(URL_PARAM_CAMPAIGN_TYPE, stringifyCsvList(campaignTypeFilter));
+    setQueryValue(URL_PARAM_HIDE_OUT_OF_PERIOD, hideOutOfPeriodCampaigns ? "1" : null);
     setQueryValue(URL_PARAM_VIEW, selectedViewMode === "month" ? null : selectedViewMode);
     setQueryValue(URL_PARAM_MONTH, selectedMonthKey);
 
@@ -1531,6 +1558,7 @@ function HomeContent() {
     campaignFilter,
     campaignStatusFilter,
     featureFilter,
+    hideOutOfPeriodCampaigns,
     campaignTypeFilter,
     clientFilter,
     csFilter,
@@ -1574,6 +1602,24 @@ function HomeContent() {
     }
     return map;
   }, [data?.platform_pages]);
+  const outOfPeriodTokens = useMemo(() => {
+    const tokens = new Set<string>();
+    for (const row of data?.attention.out_of_period_rows ?? []) {
+      const token = String(row.token ?? "").trim();
+      if (!hasCampaignToken(token)) continue;
+      tokens.add(token);
+    }
+    return tokens;
+  }, [data?.attention.out_of_period_rows]);
+  const shouldHideOutOfPeriodCampaign = useCallback(
+    (token: string | null | undefined) => {
+      if (!hideOutOfPeriodCampaigns) return false;
+      const normalized = String(token ?? "").trim();
+      if (!hasCampaignToken(normalized)) return false;
+      return outOfPeriodTokens.has(normalized);
+    },
+    [hideOutOfPeriodCampaigns, outOfPeriodTokens]
+  );
   const hasDashboardFilters =
     clientFilter.length > 0 ||
     csFilter.length > 0 ||
@@ -1609,32 +1655,35 @@ function HomeContent() {
     },
     [tokenFeaturesByToken]
   );
+  const dashboardFilterOn = hasDashboardFilters || hideOutOfPeriodCampaigns;
   const dashboardFilteredRows = useMemo(() => {
-    if (!hasDashboardFilters) return journeyRows;
-    return journeyRows.filter((row) =>
-      rowMatchesDashboardFilters(row, {
+    if (!dashboardFilterOn) return journeyRows;
+    return journeyRows.filter((row) => {
+      if (shouldHideOutOfPeriodCampaign(row.token)) return false;
+      return rowMatchesDashboardFilters(row, {
         clients: clientFilter,
         cs: csFilter,
         campaigns: campaignFilter,
         statuses: campaignStatusFilter,
         features: featureFilter,
         campaignTypes: campaignTypeFilter,
-      })
-    );
+      });
+    });
   }, [
     campaignFilter,
     campaignStatusFilter,
+    dashboardFilterOn,
     featureFilter,
     campaignTypeFilter,
     clientFilter,
     csFilter,
-    hasDashboardFilters,
     journeyRows,
     rowMatchesDashboardFilters,
+    shouldHideOutOfPeriodCampaign,
   ]);
 
   const filteredSpendByPlatform = useMemo(() => {
-    if (!dashboardFilteredRows.length || !hasDashboardFilters || !data) return null;
+    if (!dashboardFilteredRows.length || !dashboardFilterOn || !data) return null;
     const platforms = data.dashboard.active_platforms;
     const sums: Record<string, number> = Object.fromEntries(platforms.map((p) => [p, 0]));
     for (const row of dashboardFilteredRows) {
@@ -1643,12 +1692,12 @@ function HomeContent() {
       }
     }
     return sums;
-  }, [dashboardFilteredRows, data, hasDashboardFilters]);
+  }, [dashboardFilterOn, dashboardFilteredRows, data]);
 
   const spendData = useMemo(() => data?.dashboard.spend_by_platform ?? [], [data]);
   const chartData = useMemo(() => {
     const base = [...spendData].sort((a, b) => b.spend_brl - a.spend_brl);
-    if (!hasDashboardFilters || !filteredSpendByPlatform) {
+    if (!dashboardFilterOn || !filteredSpendByPlatform) {
       return base.map((item) => ({ ...item, color: PLATFORM_COLORS[item.platform] ?? "#6366f1" }));
     }
     return base
@@ -1658,7 +1707,7 @@ function HomeContent() {
         color: PLATFORM_COLORS[item.platform] ?? "#6366f1",
       }))
       .filter((item) => item.spend_brl > 0);
-  }, [filteredSpendByPlatform, hasDashboardFilters, spendData]);
+  }, [dashboardFilterOn, filteredSpendByPlatform, spendData]);
   const barChartData = useMemo(() => [...chartData].reverse(), [chartData]);
   const periodTotalSpend = useMemo(() => chartData.reduce((sum, row) => sum + row.spend_brl, 0), [chartData]);
   const dominantChartShare = useMemo(() => {
@@ -2138,7 +2187,33 @@ function HomeContent() {
 
   const platformRowMatchesDashboardFilters = useCallback(
     (row: PlatformPageRow) => {
+      if (shouldHideOutOfPeriodCampaign(row.token)) return false;
       const pseudo = journeySnapshotForPlatformRow(row, journeyByToken);
+      return rowMatchesDashboardFilters(pseudo, {
+        clients: clientFilter,
+        cs: csFilter,
+        campaigns: campaignFilter,
+        statuses: campaignStatusFilter,
+        features: featureFilter,
+        campaignTypes: campaignTypeFilter,
+      });
+    },
+    [
+      journeyByToken,
+      clientFilter,
+      csFilter,
+      campaignFilter,
+      campaignStatusFilter,
+      featureFilter,
+      campaignTypeFilter,
+      rowMatchesDashboardFilters,
+      shouldHideOutOfPeriodCampaign,
+    ]
+  );
+
+  const outOfPeriodRowMatchesDashboardFilters = useCallback(
+    (row: AttentionOutOfPeriodRow) => {
+      const pseudo = journeySnapshotForOutOfPeriodRow(row, journeyByToken);
       return rowMatchesDashboardFilters(pseudo, {
         clients: clientFilter,
         cs: csFilter,
@@ -2161,9 +2236,9 @@ function HomeContent() {
   );
 
   const filteredDetailedPlatformRows = useMemo(() => {
-    if (!hasDashboardFilters) return detailedPlatformRows;
+    if (!dashboardFilterOn) return detailedPlatformRows;
     return detailedPlatformRows.filter(platformRowMatchesDashboardFilters);
-  }, [detailedPlatformRows, hasDashboardFilters, platformRowMatchesDashboardFilters]);
+  }, [dashboardFilterOn, detailedPlatformRows, platformRowMatchesDashboardFilters]);
 
   const detailedPlatformDerived = useMemo(() => {
     const rows = filteredDetailedPlatformRows;
@@ -2285,6 +2360,7 @@ function HomeContent() {
     const filteredRows = outOfPeriodRows.filter((row) => {
       const p = (row.platform ?? "").trim() || "Outros";
       if (attentionOutOfPeriodDspFilters.length > 0 && !attentionOutOfPeriodDspFilters.includes(p)) return false;
+      if (hasDashboardFilters && !outOfPeriodRowMatchesDashboardFilters(row)) return false;
       if (!outOfPeriodSearchNormalized) return true;
       const searchableText = [
         row.platform,
@@ -2323,7 +2399,14 @@ function HomeContent() {
     });
     const filteredTotal = filteredRows.reduce((sum, row) => sum + row.gasto, 0);
     return { sortedRows, filteredTotal };
-  }, [attentionOutOfPeriodDspFilters, attentionOutOfPeriodSort, outOfPeriodRows, outOfPeriodSearchNormalized]);
+  }, [
+    attentionOutOfPeriodDspFilters,
+    attentionOutOfPeriodSort,
+    hasDashboardFilters,
+    outOfPeriodRowMatchesDashboardFilters,
+    outOfPeriodRows,
+    outOfPeriodSearchNormalized,
+  ]);
 
   const outOfPeriodUniquePlatforms = useMemo(
     () =>
@@ -2422,7 +2505,6 @@ function HomeContent() {
       spendBrl?: number;
       href?: string;
     }> = [];
-    const dashboardFilterOn = hasDashboardFilters;
     const dspFiltered = filteredSpendByPlatform;
 
     for (const name of ["StackAdapt", "DV360", "Xandr"] as const) {
@@ -2443,7 +2525,6 @@ function HomeContent() {
           logoSrc: PLATFORM_LOGOS[name],
           platformKey: name,
           spendBrl: cardSpend,
-          href: routeForPage(name),
         });
       } else if (result.status === "error") {
         firstRowDspCards.push({
@@ -2453,7 +2534,6 @@ function HomeContent() {
           dimmed: true,
           titleEmphasis: true,
           logoSrc: PLATFORM_LOGOS[name],
-          href: routeForPage(name),
         });
       }
     }
@@ -2472,41 +2552,42 @@ function HomeContent() {
 
     const nexdPage = data.platform_pages.Nexd;
     const nexdStatus = data.nexd?.status;
-    if (nexdPage) {
-      const impressions = Math.round(Number(nexdPage.impressions ?? 0));
-      secondRowDspCards.push({
-        title: "NEXD",
-        value: brl(Number(nexdPage.spend_brl ?? 0)),
-        subtitle: `${impressions.toLocaleString("pt-BR")} impressões`,
-        titleEmphasis: true,
-        logoSrc: PLATFORM_LOGOS.Nexd,
-        platformKey: "Nexd",
-        spendBrl: Number(nexdPage.spend_brl ?? 0),
-        href: routeForPage("Nexd"),
-      });
-    } else if (nexdStatus === "error") {
-      secondRowDspCards.push({
-        title: "NEXD",
-        value: "—",
-        subtitle: data.nexd?.message ?? "Falha ao carregar",
-        dimmed: true,
-        titleEmphasis: true,
-        logoSrc: PLATFORM_LOGOS.Nexd,
-        platformKey: "Nexd",
-        spendBrl: 0,
-      });
-    } else {
-      secondRowDspCards.push({
-        title: "NEXD",
-        value: brl(0),
-        subtitle: "Sem dados",
-        badge: "Em breve",
-        badgeTone: "soon",
-        titleEmphasis: true,
-        logoSrc: PLATFORM_LOGOS.Nexd,
-        platformKey: "Nexd",
-        spendBrl: 0,
-      });
+    if (!dashboardFilterOn) {
+      if (nexdPage) {
+        const impressions = Math.round(Number(nexdPage.impressions ?? 0));
+        secondRowDspCards.push({
+          title: "NEXD",
+          value: brl(Number(nexdPage.spend_brl ?? 0)),
+          subtitle: `${impressions.toLocaleString("pt-BR")} impressões`,
+          titleEmphasis: true,
+          logoSrc: PLATFORM_LOGOS.Nexd,
+          platformKey: "Nexd",
+          spendBrl: Number(nexdPage.spend_brl ?? 0),
+        });
+      } else if (nexdStatus === "error") {
+        secondRowDspCards.push({
+          title: "NEXD",
+          value: "—",
+          subtitle: data.nexd?.message ?? "Falha ao carregar",
+          dimmed: true,
+          titleEmphasis: true,
+          logoSrc: PLATFORM_LOGOS.Nexd,
+          platformKey: "Nexd",
+          spendBrl: 0,
+        });
+      } else {
+        secondRowDspCards.push({
+          title: "NEXD",
+          value: brl(0),
+          subtitle: "Sem dados",
+          badge: "Em breve",
+          badgeTone: "soon",
+          titleEmphasis: true,
+          logoSrc: PLATFORM_LOGOS.Nexd,
+          platformKey: "Nexd",
+          spendBrl: 0,
+        });
+      }
     }
 
     const hivestackPage = data.platform_pages.Hivestack;
@@ -2520,7 +2601,6 @@ function HomeContent() {
         logoSrc: PLATFORM_LOGOS.Hivestack,
         platformKey: "Hivestack",
         spendBrl: Number(hivestackPage.spend_brl ?? 0),
-        href: routeForPage("Hivestack"),
       });
     } else if (hivestackStatus === "error") {
       secondRowDspCards.push({
@@ -2613,8 +2693,8 @@ function HomeContent() {
         <section className="panel panelSub filterPanelCard">
           <h3>Filtros do dashboard</h3>
           <p className="muted filterPanelHint">
-            Os filtros recalculam cards e gráficos de DSP. Nexd segue o total mensal (sem rateio por
-            token); o&nbsp;consolidado filtrado soma apenas DSPs.
+            Os filtros recalculam cards e gráficos de DSP. Com filtros ativos, NEXD é ocultada para
+            evitar leitura ambígua; o&nbsp;consolidado filtrado soma apenas DSPs.
           </p>
           <div className="filterToolbar">
             <MultiSelectFilter
@@ -2672,7 +2752,18 @@ function HomeContent() {
               placeholder="Todos os status"
               disabledOptions={disabledCampaignStatusOptions}
             />
-            {hasDashboardFilters ? (
+            <div className="filterField filterFieldCheckbox">
+              <span className="filterFieldLabel">Visibilidade</span>
+              <label className="filterCheckboxField">
+                <input
+                  type="checkbox"
+                  checked={hideOutOfPeriodCampaigns}
+                  onChange={(event) => setHideOutOfPeriodCampaigns(event.target.checked)}
+                />
+                <span>Ocultar campanhas fora do mês vigente</span>
+              </label>
+            </div>
+            {hasDashboardFilters || hideOutOfPeriodCampaigns ? (
               <button
                 type="button"
                 className="button buttonGhost buttonSmall filterClearButton"
@@ -2683,6 +2774,7 @@ function HomeContent() {
                   setCampaignTypeFilter([]);
                   setCampaignFilter([]);
                   setCampaignStatusFilter([]);
+                  setHideOutOfPeriodCampaigns(false);
                 }}
               >
                 Limpar filtros
@@ -3356,7 +3448,7 @@ function HomeContent() {
         filteredTotalGasto,
       } = detailedPlatformDerived;
       const lineDetailFiltersActive =
-        hasDashboardFilters || stackAdaptSearch.trim() !== "" || dspLinesOnlyWithoutToken;
+        dashboardFilterOn || stackAdaptSearch.trim() !== "" || dspLinesOnlyWithoutToken;
       const budget = getBudgetForPlatform(platformName, page.spend_brl);
       const handleExportDetailedLines = () => {
         const headers = [
@@ -3449,7 +3541,18 @@ function HomeContent() {
                 placeholder="Todos os status"
                 disabledOptions={disabledCampaignStatusOptions}
               />
-              {hasDashboardFilters ? (
+              <div className="filterField filterFieldCheckbox">
+                <span className="filterFieldLabel">Visibilidade</span>
+                <label className="filterCheckboxField">
+                  <input
+                    type="checkbox"
+                    checked={hideOutOfPeriodCampaigns}
+                    onChange={(event) => setHideOutOfPeriodCampaigns(event.target.checked)}
+                  />
+                  <span>Ocultar campanhas fora do mês vigente</span>
+                </label>
+              </div>
+              {hasDashboardFilters || hideOutOfPeriodCampaigns ? (
                 <button
                   type="button"
                   className="button buttonGhost buttonSmall filterClearButton"
@@ -3460,6 +3563,7 @@ function HomeContent() {
                     setCampaignTypeFilter([]);
                     setCampaignFilter([]);
                     setCampaignStatusFilter([]);
+                    setHideOutOfPeriodCampaigns(false);
                   }}
                 >
                   Limpar filtros
@@ -4132,6 +4236,87 @@ function HomeContent() {
                 <p className="alertInfo attentionNoTokenPieEmpty">Nenhum gasto por plataforma para exibir.</p>
               )}
             </div>
+          </div>
+        </section>
+
+        <section className="panel panelSub filterPanelCard">
+          <h3>Filtros do dashboard</h3>
+          <p className="muted filterPanelHint">
+            Os mesmos filtros da home, DSPS e DeepDive. Eles refinam os cards e a tabela desta tela;
+            a busca e o chip de DSP continuam valendo por cima.
+          </p>
+          <div className="filterToolbar">
+            <MultiSelectFilter
+              id="out-filter-client"
+              label="Cliente"
+              options={clients}
+              value={clientFilter}
+              onChange={setClientFilter}
+              placeholder="Todos os clientes"
+              disabledOptions={disabledClientOptions}
+            />
+            <MultiSelectFilter
+              id="out-filter-cs"
+              label="CS (Account Management)"
+              options={csFilterOptions}
+              value={csFilter}
+              onChange={setCsFilter}
+              placeholder="Todos os CS"
+              showAvatar
+              disabledOptions={disabledCsOptions}
+            />
+            <MultiSelectFilter
+              id="out-filter-feature"
+              label="Feature"
+              options={[...FEATURE_OPTIONS]}
+              value={featureFilter}
+              onChange={setFeatureFilter}
+              placeholder="Todas as features"
+              disabledOptions={disabledFeatureOptions}
+            />
+            <MultiSelectFilter
+              id="out-filter-campaign-type"
+              label="Produto Vendido"
+              options={productFilterOptions}
+              value={campaignTypeFilter}
+              onChange={setCampaignTypeFilter}
+              placeholder="Todos os produtos vendidos"
+              disabledOptions={disabledCampaignTypeOptions}
+            />
+            <MultiSelectFilter
+              id="out-filter-campaign"
+              label="Campanha"
+              options={campaignFilterOptions}
+              value={campaignFilter}
+              onChange={setCampaignFilter}
+              placeholder="Todas as campanhas"
+              disabledOptions={disabledCampaignOptions}
+            />
+            <MultiSelectFilter
+              id="out-filter-campaign-status"
+              label="Status da campanha"
+              options={campaignStatusOptions}
+              value={campaignStatusFilter}
+              onChange={setCampaignStatusFilter}
+              placeholder="Todos os status"
+              disabledOptions={disabledCampaignStatusOptions}
+            />
+            {hasDashboardFilters ? (
+              <button
+                type="button"
+                className="button buttonGhost buttonSmall filterClearButton"
+                onClick={() => {
+                  setClientFilter([]);
+                  setCsFilter([]);
+                  setFeatureFilter([]);
+                  setCampaignTypeFilter([]);
+                  setCampaignFilter([]);
+                  setCampaignStatusFilter([]);
+                }}
+              >
+                Limpar filtros
+              </button>
+            ) : null}
           </div>
         </section>
 
