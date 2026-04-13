@@ -37,9 +37,8 @@ gcloud run deploy "${SERVICE_NAME}" \
   --timeout 300 \
   --min-instances 1 \
   --max-instances 1 \
-  --env-vars-file "${ENV_FILE}" \
-  --command uvicorn \
-  --args backend.main:app,--host,0.0.0.0,--port,8080
+  --clear-base-image \
+  --env-vars-file "${ENV_FILE}"
 
 SERVICE_URL="$(gcloud run services describe "${SERVICE_NAME}" --region "${REGION}" --format='value(status.url)')"
 echo "Deploy concluido. URL: ${SERVICE_URL}"

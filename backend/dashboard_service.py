@@ -412,13 +412,27 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
     if nexd_data.get("status") == "ok":
         impressions = nexd_data.get("impressions", 0)
         cap = nexd_data.get("cap", 1) or 1
+        layout_rows: list[dict[str, Any]] = []
+        for row in nexd_data.get("layouts", []):
+            layout_impressions = int(row.get("impressions", 0) or 0)
+            estimated_cost_brl = layout_impressions * NEXD_CPM_BRL
+            layout_rows.append(
+                {
+                    "layout": row.get("layout", "—"),
+                    "impressions": layout_impressions,
+                    "creatives": int(row.get("creatives", 0) or 0),
+                    "estimated_cost_brl": estimated_cost_brl,
+                    "pct_estimated_cost": (estimated_cost_brl / nexd_cost_brl * 100) if nexd_cost_brl > 0 else 0.0,
+                }
+            )
+        layout_rows.sort(key=lambda x: x["estimated_cost_brl"], reverse=True)
         platform_pages["Nexd"] = {
             "spend_brl": nexd_cost_brl,
             "impressions": impressions,
             "cap": cap,
             "pct_cap": impressions / cap * 100,
             "campaigns": nexd_data.get("campaigns", []),
-            "layouts": nexd_data.get("layouts", []),
+            "layouts": layout_rows,
         }
 
     no_token_rows = []

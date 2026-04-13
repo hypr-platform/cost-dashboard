@@ -157,6 +157,10 @@ body {
   font-size: 0.9rem;
 }
 
+.nexdSummaryLine {
+  margin-bottom: 12px;
+}
+
 .welcomeMessage {
   margin-bottom: 4px;
   color: #93c5fd;
@@ -1770,6 +1774,10 @@ td {
   padding: 12px;
 }
 
+.panelSub + .panelSub {
+  margin-top: 12px;
+}
+
 .panelSub h3 {
   margin-bottom: 8px;
   font-size: 0.95rem;
@@ -1784,6 +1792,28 @@ td {
 
 .panelSubHeading h3 {
   margin-bottom: 0;
+}
+
+.panelSubTitleWithInfo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.infoTooltipIcon {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  color: #cbd5e1;
+  background: rgba(15, 23, 42, 0.7);
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: help;
+  user-select: none;
 }
 
 .alertInfo,

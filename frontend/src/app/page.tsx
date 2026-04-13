@@ -16,8 +16,6 @@ import {
   LineChart,
   Pie,
   PieChart,
-  RadialBar,
-  RadialBarChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -113,7 +111,13 @@ type DashboardResponse = {
       cap?: number;
       pct_cap?: number;
       campaigns?: { name: string; impressions: number }[];
-      layouts?: { layout: string; impressions: number }[];
+      layouts?: {
+        layout: string;
+        impressions: number;
+        creatives?: number;
+        estimated_cost_brl?: number;
+        pct_estimated_cost?: number;
+      }[];
     }
   >;
   attention: {
@@ -133,6 +137,12 @@ type DashboardResponse = {
     out_of_period_total_brl: number;
   };
   budget: BudgetData;
+  nexd?: {
+    status: "ok" | "error" | "no_credentials";
+    message?: string;
+    impressions?: number;
+    cap?: number;
+  };
   _meta?: {
     snapshot_at?: string;
     source?: string;
@@ -1949,6 +1959,7 @@ export default function Home() {
       logoSrc?: string;
       platformKey?: string;
       spendBrl?: number;
+      href?: string;
     }> = [];
     for (const name of ["StackAdapt", "DV360", "Xandr"] as const) {
       const result = data.platform_results[name];
@@ -1988,16 +1999,43 @@ export default function Home() {
       spendBrl: 0,
     });
 
-    secondRowDspCards.push({
-      title: "NEXD",
-      value: brl(0),
-      subtitle: "USD 0.00",
-      badge: "Em breve",
-      titleEmphasis: true,
-      logoSrc: PLATFORM_LOGOS.Nexd,
-      platformKey: "Nexd",
-      spendBrl: 0,
-    });
+    const nexdPage = data.platform_pages.Nexd;
+    const nexdStatus = data.nexd?.status;
+    if (nexdPage) {
+      const impressions = Math.round(Number(nexdPage.impressions ?? 0));
+      secondRowDspCards.push({
+        title: "NEXD",
+        value: brl(Number(nexdPage.spend_brl ?? 0)),
+        subtitle: `${impressions.toLocaleString("pt-BR")} impressões`,
+        titleEmphasis: true,
+        logoSrc: PLATFORM_LOGOS.Nexd,
+        platformKey: "Nexd",
+        spendBrl: Number(nexdPage.spend_brl ?? 0),
+        href: routeForPage("Nexd"),
+      });
+    } else if (nexdStatus === "error") {
+      secondRowDspCards.push({
+        title: "NEXD",
+        value: "—",
+        subtitle: data.nexd?.message ?? "Falha ao carregar",
+        dimmed: true,
+        titleEmphasis: true,
+        logoSrc: PLATFORM_LOGOS.Nexd,
+        platformKey: "Nexd",
+        spendBrl: 0,
+      });
+    } else {
+      secondRowDspCards.push({
+        title: "NEXD",
+        value: brl(0),
+        subtitle: "Sem dados",
+        badge: "Em breve",
+        titleEmphasis: true,
+        logoSrc: PLATFORM_LOGOS.Nexd,
+        platformKey: "Nexd",
+        spendBrl: 0,
+      });
+    }
 
     const consolidatedCard: {
       title: string;
@@ -2477,69 +2515,168 @@ export default function Home() {
     if (platformName === "Nexd") {
       const cap = page.cap ?? 1;
       const impressions = page.impressions ?? 0;
-      const pct = page.pct_cap ?? 0;
-      const radialData = [{ name: "Uso", value: Math.min(100, Math.max(0, pct)) }];
+      const usedPct = Math.max(0, Math.min(100, cap > 0 ? (impressions / cap) * 100 : 0));
+      const remainingImpressions = Math.max(0, cap - impressions);
+      const remainingPct = Math.max(0, 100 - usedPct);
+      const progressColor = usedPct >= 80 ? "#ef4444" : usedPct >= 60 ? "#f59e0b" : "#3b82f6";
+      const nexdFormatPieData = (page.layouts ?? [])
+        .map((row, index) => ({
+          name: row.layout,
+          value: Number(row.estimated_cost_brl ?? 0),
+          color: [
+            "#3b82f6",
+            "#06b6d4",
+            "#8b5cf6",
+            "#22c55e",
+            "#f59e0b",
+            "#ef4444",
+            "#14b8a6",
+            "#a855f7",
+          ][index % 8],
+        }))
+        .filter((row) => row.value > 0);
+      const nexdFormatPieTotal = nexdFormatPieData.reduce((sum, row) => sum + row.value, 0);
       return (
         <section className="panel">
           <h2>Nexd</h2>
-          <p className="muted">{brl(page.spend_brl)} • {impressions.toLocaleString("pt-BR")} impressões</p>
-          <div className="gridTwo">
-            <div className="panelSub">
-              <div className="panelSubHeading">
-                <h3>Uso do pacote</h3>
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall"
-                  onClick={() => exportChartAsPng(nexdUsageChartRef.current, "nexd uso do pacote")}
-                >
-                  Exportar PNG
-                </button>
+          <p className="muted nexdSummaryLine">{brl(page.spend_brl)} • {impressions.toLocaleString("pt-BR")} impressões</p>
+          <div className="panelSub" ref={nexdUsageChartRef}>
+            <div className="panelSubHeading">
+              <h3>Uso do pacote</h3>
+              <button
+                type="button"
+                className="button buttonGhost buttonSmall"
+                onClick={() => exportChartAsPng(nexdUsageChartRef.current, "nexd uso do pacote")}
+              >
+                Exportar PNG
+              </button>
+            </div>
+            <div style={{ padding: "8px 4px 4px" }}>
+              <div
+                style={{
+                  width: "100%",
+                  height: "18px",
+                  borderRadius: "999px",
+                  background: "rgba(148, 163, 184, 0.25)",
+                  overflow: "hidden",
+                }}
+                aria-label="Uso do pacote Nexd"
+              >
+                <div
+                  style={{
+                    width: `${usedPct.toFixed(2)}%`,
+                    height: "100%",
+                    borderRadius: "999px",
+                    background: progressColor,
+                    transition: "width 0.35s ease",
+                  }}
+                />
               </div>
-              <div className="chartWrap chartWrapSmall" ref={nexdUsageChartRef}>
-                <ResponsiveContainer width="100%" height={220}>
-                  <RadialBarChart cx="50%" cy="50%" innerRadius="60%" outerRadius="100%" data={radialData} startAngle={90} endAngle={-270}>
-                    <RadialBar dataKey="value" fill={pct >= 80 ? "#ef4444" : pct >= 60 ? "#f59e0b" : "#3b82f6"} />
-                    <Tooltip formatter={(value) => `${Number(value ?? 0).toFixed(1)}%`} />
-                  </RadialBarChart>
-                </ResponsiveContainer>
-                <p className="muted">Cap: {cap.toLocaleString("pt-BR")} • Restam: {(cap - impressions).toLocaleString("pt-BR")}</p>
+              <div
+                style={{
+                  marginTop: "10px",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  color: "#9fb0c8",
+                  fontSize: "0.95rem",
+                }}
+              >
+                <span>{usedPct.toFixed(1)}% usado</span>
+                <span>{remainingPct.toFixed(1)}% restante</span>
               </div>
             </div>
-            <div className="panelSub">
-              <h3>Por campanha</h3>
-              <div className="tableWrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Campanha</th>
-                      <th>Impressões</th>
-                      <th>% do total</th>
+            <p className="muted">
+              Cap: {cap.toLocaleString("pt-BR")} • Restam: {remainingImpressions.toLocaleString("pt-BR")}
+            </p>
+          </div>
+
+          <div className="panelSub">
+            <h3>Por campanha</h3>
+            <div className="tableWrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Campanha</th>
+                    <th>Impressões</th>
+                    <th>% do total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(page.campaigns ?? []).map((row) => (
+                    <tr key={row.name}>
+                      <td>{row.name}</td>
+                      <td>{row.impressions.toLocaleString("pt-BR")}</td>
+                      <td>{impressions > 0 ? `${((row.impressions / impressions) * 100).toFixed(1)}%` : "0.0%"}</td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {(page.campaigns ?? []).map((row) => (
-                      <tr key={row.name}>
-                        <td>{row.name}</td>
-                        <td>{row.impressions.toLocaleString("pt-BR")}</td>
-                        <td>{impressions > 0 ? `${((row.impressions / impressions) * 100).toFixed(1)}%` : "0.0%"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
 
           {(page.layouts ?? []).length ? (
             <div className="panelSub">
-              <h3>Por formato</h3>
+              <div className="panelSubHeading">
+                <div className="panelSubTitleWithInfo">
+                  <h3>Por formato</h3>
+                  <span
+                    className="infoTooltipIcon"
+                    title="Custo estimado por formato = impressões do formato x 0,0014 BRL (CPM fixo de R$ 1,40). A API da Nexd não retorna custo real por formato."
+                    aria-label="Disclaimer: custo por formato é estimado por CPM fixo"
+                  >
+                    i
+                  </span>
+                </div>
+              </div>
+              {nexdFormatPieData.length ? (
+                <>
+                <div className="chartWrap chartWrapSmall">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={nexdFormatPieData}
+                        dataKey="value"
+                        nameKey="name"
+                        innerRadius={62}
+                        outerRadius={96}
+                        paddingAngle={2}
+                        stroke="rgba(15, 23, 42, 0.7)"
+                        strokeWidth={1}
+                      >
+                        {nexdFormatPieData.map((entry) => (
+                          <Cell key={entry.name} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        formatter={(value) => brl(Number(Array.isArray(value) ? value[0] : value ?? 0))}
+                        labelFormatter={(label) => `Formato: ${label}`}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="chartLegend">
+                  {nexdFormatPieData.map((entry) => (
+                    <div className="chartLegendItem" key={`nexd-format-${entry.name}`}>
+                      <span className="chartLegendDot" style={{ backgroundColor: entry.color }} />
+                      <span>
+                        {entry.name}{" "}
+                        {nexdFormatPieTotal > 0 ? `(${((entry.value / nexdFormatPieTotal) * 100).toFixed(1)}%)` : "(0.0%)"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="muted">Total do custo estimado por formato: {brl(nexdFormatPieTotal)}</p>
+                </>
+              ) : null}
               <div className="tableWrap">
                 <table>
                   <thead>
                     <tr>
                       <th>Formato</th>
                       <th>Impressões</th>
-                      <th>% do total</th>
+                      <th>Custo estimado (BRL)</th>
+                      <th>% custo estimado</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2547,7 +2684,8 @@ export default function Home() {
                       <tr key={row.layout}>
                         <td>{row.layout}</td>
                         <td>{row.impressions.toLocaleString("pt-BR")}</td>
-                        <td>{impressions > 0 ? `${((row.impressions / impressions) * 100).toFixed(1)}%` : "0.0%"}</td>
+                        <td>{brl(Number(row.estimated_cost_brl ?? 0))}</td>
+                        <td>{`${Number(row.pct_estimated_cost ?? 0).toFixed(1)}%`}</td>
                       </tr>
                     ))}
                   </tbody>
