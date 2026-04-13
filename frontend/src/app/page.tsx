@@ -26,6 +26,7 @@ type JourneyRow = {
   token: string;
   cliente: string;
   campanha: string;
+  produto_vendido?: string;
   account_management?: string;
   status: string;
   investido: number;
@@ -214,7 +215,16 @@ const ACCOUNT_MANAGER_WHATSAPP_NUMBERS: Record<string, string> = {
   "Beatriz Severine": "5511963340543",
   "Thiago Nascimento": "5511948887830",
 };
-const FALLBACK_WHATSAPP_NUMBER = "5511999999999";
+
+function getAccountManagerWhatsAppNumber(name: string | null | undefined): string | null {
+  const managerName = (name ?? "").trim();
+  if (!managerName) return null;
+  return ACCOUNT_MANAGER_WHATSAPP_NUMBERS[managerName] ?? null;
+}
+
+function hasAccountManagerWhatsApp(name: string | null | undefined): boolean {
+  return Boolean(getAccountManagerWhatsAppNumber(name));
+}
 
 function getDspFilterLogoSrc(platform: string): string | undefined {
   const p = platform.trim();
@@ -241,8 +251,9 @@ function getAccountManagerWhatsAppUrl(
   }
 ): string {
   const managerName = (name ?? "").trim() || "time";
-  const rawPhone = ACCOUNT_MANAGER_WHATSAPP_NUMBERS[managerName] ?? FALLBACK_WHATSAPP_NUMBER;
+  const rawPhone = getAccountManagerWhatsAppNumber(name) ?? "";
   const digitsOnly = rawPhone.replace(/\D/g, "");
+  if (!digitsOnly) return "";
   const vigenciaText = `${formatDateBr(context.vigencia_start)} até ${formatDateBr(context.vigencia_end)}`;
   const text = encodeURIComponent(
     `Oi ${managerName}, tudo bem? ` +
@@ -263,8 +274,9 @@ function getCampaignReferenceWhatsAppUrl(
   }
 ): string {
   const managerName = (name ?? "").trim() || "time";
-  const rawPhone = ACCOUNT_MANAGER_WHATSAPP_NUMBERS[managerName] ?? FALLBACK_WHATSAPP_NUMBER;
+  const rawPhone = getAccountManagerWhatsAppNumber(name) ?? "";
   const digitsOnly = rawPhone.replace(/\D/g, "");
+  if (!digitsOnly) return "";
   const details = [
     `campanha ${context.campanha}`,
     `token ${context.token}`,
@@ -299,30 +311,39 @@ const URL_PARAM_CLIENTS = "clients";
 const URL_PARAM_CS = "cs";
 const URL_PARAM_CAMPAIGNS = "campaigns";
 const URL_PARAM_CAMPAIGN_STATUS = "campaign_status";
-/** Filtro por padrão no nome da campanha (Survey / RMNf / AON). */
+/** Filtro por produto vendido da campanha. */
 const URL_PARAM_CAMPAIGN_TYPE = "tipo";
+const URL_PARAM_FEATURES = "features";
 const URL_PARAM_MONTH = "month";
-const CAMPAIGN_TYPE_OPTIONS = ["Survey", "RMNf", "AON"] as const;
+const URL_PARAM_VIEW = "view";
 const MONTH_KEY_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
+const YEAR_KEY_REGEX = /^\d{4}$/;
+const FEATURE_OPTIONS = ["RMN Físico", "Survey", "Topics", "P-DOOH", "Downloaded Apps"] as const;
+type AnalysisViewMode = "month" | "year";
+const ANALYSIS_VIEW_OPTIONS: ReadonlyArray<{ value: AnalysisViewMode; label: string }> = [
+  { value: "month", label: "Mês" },
+  { value: "year", label: "Ano" },
+];
+const AVAILABLE_YEAR_KEYS = ["2025", "2026"] as const;
 
-function campaignNameMatchesTypeOption(campanha: string, typeOption: string): boolean {
-  const name = String(campanha ?? "").trim();
-  const upper = name.toUpperCase();
-  if (typeOption === "Survey") {
-    return upper.endsWith("SURVEY") || upper.endsWith("SURVERY");
-  }
-  if (typeOption === "RMNf") {
-    return upper.endsWith("RMNF");
-  }
-  if (typeOption === "AON") {
-    return upper.startsWith("AON");
-  }
-  return false;
+function featuresFromLineName(lineName: string): string[] {
+  const normalized = String(lineName ?? "")
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  const features: string[] = [];
+  if (normalized.includes("RMNFISICO")) features.push("RMN Físico");
+  if (normalized.includes("SURVEY")) features.push("Survey");
+  if (normalized.includes("TOPICS")) features.push("Topics");
+  if (normalized.includes("PDOOH")) features.push("P-DOOH");
+  if (normalized.includes("DOWNLOADED_APPS")) features.push("Downloaded Apps");
+  return features;
 }
 
-function rowMatchesCampaignTypes(campanha: string, selectedTypes: string[]): boolean {
-  if (!selectedTypes.length) return true;
-  return selectedTypes.some((t) => campaignNameMatchesTypeOption(campanha, t));
+function rowMatchesCampaignProducts(produtoVendido: string | null | undefined, selectedProducts: string[]): boolean {
+  if (!selectedProducts.length) return true;
+  const normalized = String(produtoVendido ?? "").trim();
+  return selectedProducts.includes(normalized);
 }
 const BRL_FORMATTER = new Intl.NumberFormat("pt-BR", {
   style: "currency",
@@ -343,6 +364,7 @@ type NavKey =
   | "StackAdapt"
   | "DV360"
   | "Xandr"
+  | "Hivestack"
   | "Amazon DSP";
 
 const NAV_LABELS: Record<NavKey, string> = {
@@ -353,6 +375,7 @@ const NAV_LABELS: Record<NavKey, string> = {
   StackAdapt: "StackAdapt",
   DV360: "DV360",
   Xandr: "Xandr",
+  Hivestack: "Hivestack",
   "Amazon DSP": "Amazon DSP",
 };
 
@@ -363,6 +386,7 @@ const PAGE_TO_SLUG: Record<Exclude<NavKey, "Dashboard">, string> = {
   StackAdapt: "stack-adapt",
   DV360: "dv360",
   Xandr: "xandr",
+  Hivestack: "hivestack",
   "Amazon DSP": "amazon-dsp",
 };
 const SLUG_TO_PAGE: Record<string, Exclude<NavKey, "Dashboard">> = {
@@ -373,6 +397,7 @@ const SLUG_TO_PAGE: Record<string, Exclude<NavKey, "Dashboard">> = {
   "stack-adapt": "StackAdapt",
   dv360: "DV360",
   xandr: "Xandr",
+  hivestack: "Hivestack",
   "amazon-dsp": "Amazon DSP",
 };
 
@@ -404,6 +429,7 @@ function journeySnapshotForPlatformRow(
     token: row.token,
     cliente: row.cliente,
     campanha: row.campanha,
+    produto_vendido: journey?.produto_vendido ?? "",
     account_management: row.account_management,
     status: journey?.status ?? "",
     investido: Number(journey?.investido ?? row.investido ?? 0),
@@ -492,10 +518,19 @@ function isValidMonthKey(value: string | null | undefined): value is string {
   return MONTH_KEY_REGEX.test(value.trim());
 }
 
+function isValidYearKey(value: string | null | undefined): value is string {
+  if (!value) return false;
+  return YEAR_KEY_REGEX.test(value.trim());
+}
+
 function getCurrentMonthKey(): string {
   const now = new Date();
   const month = String(now.getMonth() + 1).padStart(2, "0");
   return `${now.getFullYear()}-${month}`;
+}
+
+function getCurrentYearKey(): string {
+  return String(new Date().getFullYear());
 }
 
 function monthKeyToDateRange(monthKey: string): { start: string; end: string } {
@@ -506,6 +541,21 @@ function monthKeyToDateRange(monthKey: string): { start: string; end: string } {
   return {
     start: `${yearRaw}-${monthRaw}-01`,
     end: `${yearRaw}-${monthRaw}-${String(lastDay).padStart(2, "0")}`,
+  };
+}
+
+function isValidAnalysisViewMode(value: string | null | undefined): value is AnalysisViewMode {
+  return value === "month" || value === "year";
+}
+
+function resolveAnalysisDateRange(viewMode: AnalysisViewMode, monthKey: string): { start: string; end: string } {
+  if (viewMode === "month") {
+    return monthKeyToDateRange(monthKey);
+  }
+  const year = isValidYearKey(monthKey) ? monthKey : getCurrentYearKey();
+  return {
+    start: `${year}-01-01`,
+    end: `${year}-12-31`,
   };
 }
 
@@ -889,6 +939,10 @@ function MultiSelectFilter({
     if (!normalizedQuery) return options;
     return options.filter((opt) => opt.toLowerCase().includes(normalizedQuery));
   }, [normalizedQuery, options]);
+  const selectableOptions = useMemo(
+    () => visibleOptions.filter((opt) => !disabledOptions?.has(opt) || value.includes(opt)),
+    [disabledOptions, value, visibleOptions]
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -1005,7 +1059,7 @@ function MultiSelectFilter({
               </button>
             ) : null}
           </li>
-          {visibleOptions.length ? visibleOptions.map((opt) => {
+          {selectableOptions.length ? selectableOptions.map((opt) => {
             const selected = value.includes(opt);
             const disabled = isOptionDisabled(opt);
             return (
@@ -1031,7 +1085,7 @@ function MultiSelectFilter({
               </label>
             </li>
           );}) : (
-            <li className="multiSelectEmptyState">Nenhum resultado encontrado.</li>
+            <li className="multiSelectEmptyState">Nenhuma opção disponível para os filtros atuais.</li>
           )}
         </ul>
       ) : null}
@@ -1240,20 +1294,31 @@ function HomeContent() {
   const [campaignStatusFilter, setCampaignStatusFilter] = useState<string[]>(
     () => parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_STATUS))
   );
-  const [campaignTypeFilter, setCampaignTypeFilter] = useState<string[]>(() =>
-    parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE)).filter((t) =>
-      (CAMPAIGN_TYPE_OPTIONS as readonly string[]).includes(t)
+  const [featureFilter, setFeatureFilter] = useState<string[]>(() =>
+    parseCsvList(searchParams.get(URL_PARAM_FEATURES)).filter((value) =>
+      (FEATURE_OPTIONS as readonly string[]).includes(value)
     )
   );
+  const [campaignTypeFilter, setCampaignTypeFilter] = useState<string[]>(() =>
+    parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE))
+  );
+  const [selectedViewMode, setSelectedViewMode] = useState<AnalysisViewMode>(() => {
+    const paramView = searchParams.get(URL_PARAM_VIEW);
+    return isValidAnalysisViewMode(paramView) ? paramView : "month";
+  });
   const [selectedMonthKey, setSelectedMonthKey] = useState<string>(() => {
     const paramMonth = searchParams.get(URL_PARAM_MONTH);
-    return isValidMonthKey(paramMonth) ? paramMonth : getCurrentMonthKey();
+    if (isValidMonthKey(paramMonth) || isValidYearKey(paramMonth)) {
+      return paramMonth;
+    }
+    return getCurrentMonthKey();
   });
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
   const [isForceRefreshing, setIsForceRefreshing] = useState(false);
   const [refreshRunStartedAt, setRefreshRunStartedAt] = useState<number | null>(null);
   const [refreshElapsedSeconds, setRefreshElapsedSeconds] = useState(0);
+  const [isDspsMenuExpanded, setIsDspsMenuExpanded] = useState(true);
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
   const userEmail = user?.primaryEmailAddress?.emailAddress?.toLowerCase() ?? "";
   const userDisplayName =
@@ -1263,20 +1328,27 @@ function HomeContent() {
     "pessoa";
   const isAllowedDomain = userEmail.endsWith("@hypr.mobi");
   const shouldFetchData = isUserLoaded && isSignedIn && isAllowedDomain;
-  const selectedMonthRange = useMemo(() => monthKeyToDateRange(selectedMonthKey), [selectedMonthKey]);
-  const availableMonthKeys = useMemo(() => {
+  const selectedDateRange = useMemo(
+    () => resolveAnalysisDateRange(selectedViewMode, selectedMonthKey),
+    [selectedMonthKey, selectedViewMode]
+  );
+  const yearOptions = useMemo(() => [...AVAILABLE_YEAR_KEYS], []);
+  const currentMonthKey = useMemo(() => getCurrentMonthKey(), []);
+  const currentYearKey = useMemo(() => getCurrentYearKey(), []);
+  const periodOptions = useMemo(() => {
+    if (selectedViewMode === "year") return yearOptions;
     const options = buildRecentMonthKeys(18);
     if (options.includes(selectedMonthKey)) return options;
     return [selectedMonthKey, ...options];
-  }, [selectedMonthKey]);
+  }, [selectedMonthKey, selectedViewMode, yearOptions]);
   const dashboardUrl = useMemo(() => {
     if (!shouldFetchData) return null;
     const query = new URLSearchParams({
-      start: selectedMonthRange.start,
-      end: selectedMonthRange.end,
+      start: selectedDateRange.start,
+      end: selectedDateRange.end,
     });
     return `${apiBase}/api/dashboard?${query.toString()}`;
-  }, [apiBase, selectedMonthRange.end, selectedMonthRange.start, shouldFetchData]);
+  }, [apiBase, selectedDateRange.end, selectedDateRange.start, shouldFetchData]);
   const { data, error, isLoading, isValidating, mutate } = useSWR<DashboardResponse>(dashboardUrl, fetcher, {
     keepPreviousData: true,
     revalidateOnFocus: false,
@@ -1370,11 +1442,21 @@ function HomeContent() {
     const nextCs = parseCsvList(searchParams.get(URL_PARAM_CS));
     const nextCampaigns = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGNS));
     const nextCampaignStatuses = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_STATUS));
-    const nextCampaignTypes = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE)).filter((t) =>
-      (CAMPAIGN_TYPE_OPTIONS as readonly string[]).includes(t)
+    const nextFeatures = parseCsvList(searchParams.get(URL_PARAM_FEATURES)).filter((value) =>
+      (FEATURE_OPTIONS as readonly string[]).includes(value)
     );
+    const nextCampaignTypes = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE));
+    const nextView = searchParams.get(URL_PARAM_VIEW);
     const nextMonth = searchParams.get(URL_PARAM_MONTH);
-    const normalizedMonth = isValidMonthKey(nextMonth) ? nextMonth : getCurrentMonthKey();
+    const normalizedView = isValidAnalysisViewMode(nextView) ? nextView : "month";
+    const normalizedMonth =
+      normalizedView === "year"
+        ? isValidYearKey(nextMonth)
+          ? nextMonth
+          : currentYearKey
+        : isValidMonthKey(nextMonth)
+          ? nextMonth
+          : currentMonthKey;
 
     setStackAdaptSearch(searchParams.get(URL_PARAM_STACK_SEARCH) ?? "");
     setDspLinesOnlyWithoutToken(searchParams.get(URL_PARAM_STACK_NO_TOKEN_ONLY) === "1");
@@ -1399,9 +1481,11 @@ function HomeContent() {
     setCampaignStatusFilter((prev) =>
       prev.join("|") === nextCampaignStatuses.join("|") ? prev : nextCampaignStatuses
     );
+    setFeatureFilter((prev) => (prev.join("|") === nextFeatures.join("|") ? prev : nextFeatures));
     setCampaignTypeFilter((prev) => (prev.join("|") === nextCampaignTypes.join("|") ? prev : nextCampaignTypes));
+    setSelectedViewMode((prev) => (prev === normalizedView ? prev : normalizedView));
     setSelectedMonthKey((prev) => (prev === normalizedMonth ? prev : normalizedMonth));
-  }, [searchParams]);
+  }, [currentMonthKey, currentYearKey, searchParams]);
 
   useEffect(() => {
     const nextParams = new URLSearchParams(searchParams.toString());
@@ -1426,7 +1510,9 @@ function HomeContent() {
     setQueryValue(URL_PARAM_CS, stringifyCsvList(csFilter));
     setQueryValue(URL_PARAM_CAMPAIGNS, stringifyCsvList(campaignFilter));
     setQueryValue(URL_PARAM_CAMPAIGN_STATUS, stringifyCsvList(campaignStatusFilter));
+    setQueryValue(URL_PARAM_FEATURES, stringifyCsvList(featureFilter));
     setQueryValue(URL_PARAM_CAMPAIGN_TYPE, stringifyCsvList(campaignTypeFilter));
+    setQueryValue(URL_PARAM_VIEW, selectedViewMode === "month" ? null : selectedViewMode);
     setQueryValue(URL_PARAM_MONTH, selectedMonthKey);
 
     const currentQuery = searchParams.toString();
@@ -1444,6 +1530,7 @@ function HomeContent() {
     attentionOutOfPeriodSort.key,
     campaignFilter,
     campaignStatusFilter,
+    featureFilter,
     campaignTypeFilter,
     clientFilter,
     csFilter,
@@ -1451,6 +1538,7 @@ function HomeContent() {
     pathname,
     router,
     searchParams,
+    selectedViewMode,
     selectedMonthKey,
     stackAdaptSearch,
     stackAdaptSort.direction,
@@ -1466,11 +1554,32 @@ function HomeContent() {
     }
     return m;
   }, [journeyRows]);
+  const tokenFeaturesByToken = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    const platformPages = data?.platform_pages ?? {};
+    for (const page of Object.values(platformPages)) {
+      const rows = page?.rows ?? [];
+      for (const row of rows) {
+        const token = String(row.token ?? "").trim();
+        if (!hasCampaignToken(token)) continue;
+        const rowFeatures = featuresFromLineName(String(row.line ?? ""));
+        if (!rowFeatures.length) continue;
+        let set = map.get(token);
+        if (!set) {
+          set = new Set<string>();
+          map.set(token, set);
+        }
+        for (const feature of rowFeatures) set.add(feature);
+      }
+    }
+    return map;
+  }, [data?.platform_pages]);
   const hasDashboardFilters =
     clientFilter.length > 0 ||
     csFilter.length > 0 ||
     campaignFilter.length > 0 ||
     campaignStatusFilter.length > 0 ||
+    featureFilter.length > 0 ||
     campaignTypeFilter.length > 0;
   const rowMatchesDashboardFilters = useCallback(
     (
@@ -1480,6 +1589,7 @@ function HomeContent() {
         cs: string[];
         campaigns: string[];
         statuses: string[];
+        features: string[];
         campaignTypes: string[];
       }
     ) => {
@@ -1487,10 +1597,17 @@ function HomeContent() {
       if (filters.cs.length && !filters.cs.includes(rowCsLabel(row))) return false;
       if (filters.campaigns.length && !filters.campaigns.includes(row.campanha)) return false;
       if (filters.statuses.length && !filters.statuses.includes(row.status)) return false;
-      if (!rowMatchesCampaignTypes(row.campanha, filters.campaignTypes)) return false;
+      if (filters.features.length) {
+        const token = String(row.token ?? "").trim();
+        if (!hasCampaignToken(token)) return false;
+        const featureSet = tokenFeaturesByToken.get(token);
+        if (!featureSet) return false;
+        if (!filters.features.some((feature) => featureSet.has(feature))) return false;
+      }
+      if (!rowMatchesCampaignProducts(row.produto_vendido, filters.campaignTypes)) return false;
       return true;
     },
-    []
+    [tokenFeaturesByToken]
   );
   const dashboardFilteredRows = useMemo(() => {
     if (!hasDashboardFilters) return journeyRows;
@@ -1500,12 +1617,14 @@ function HomeContent() {
         cs: csFilter,
         campaigns: campaignFilter,
         statuses: campaignStatusFilter,
+        features: featureFilter,
         campaignTypes: campaignTypeFilter,
       })
     );
   }, [
     campaignFilter,
     campaignStatusFilter,
+    featureFilter,
     campaignTypeFilter,
     clientFilter,
     csFilter,
@@ -1547,11 +1666,15 @@ function HomeContent() {
     return chartData[0].spend_brl / periodTotalSpend;
   }, [chartData, periodTotalSpend]);
   const shouldFallbackPieChart = chartData.length <= 1 || dominantChartShare >= 0.9;
+  const dailyChartPlatforms = useMemo(
+    () => (data?.dashboard.active_platforms ?? []).filter((platform) => platform !== "Hivestack"),
+    [data?.dashboard.active_platforms]
+  );
   const hasDailyVariation = useMemo(() => {
     const rows = data?.dashboard.daily ?? [];
     if (rows.length <= 1) return false;
     const baseline = rows[0];
-    const keys = ["total", ...(data?.dashboard.active_platforms ?? [])];
+    const keys = ["total", ...dailyChartPlatforms];
     return rows.some((row) =>
       keys.some((key) => {
         const baseValue = Number(baseline[key] ?? 0);
@@ -1559,7 +1682,7 @@ function HomeContent() {
         return Math.abs(currentValue - baseValue) > 0.01;
       })
     );
-  }, [data?.dashboard.active_platforms, data?.dashboard.daily]);
+  }, [dailyChartPlatforms, data?.dashboard.daily]);
   const routeMatch = useMemo<{ page: NavKey; known: boolean }>(() => {
     const normalizedPath = pathname && pathname !== "/" ? pathname.replace(/\/+$/, "") : "/";
     if (normalizedPath === "/") return { page: "Dashboard", known: true };
@@ -1579,7 +1702,7 @@ function HomeContent() {
       return fallback;
     }
     const pages: NavKey[] = ["Dashboard"];
-    const orderedPlatforms: NavKey[] = ["StackAdapt", "DV360", "Xandr", "Amazon DSP"];
+    const orderedPlatforms: NavKey[] = ["StackAdapt", "DV360", "Xandr", "Hivestack", "Amazon DSP"];
     for (const name of orderedPlatforms) {
       if (name === "DV360") {
         pages.push(name);
@@ -1614,6 +1737,19 @@ function HomeContent() {
       a.localeCompare(b, "pt-BR")
     );
   }, [journeyRows]);
+  const productFilterOptions = useMemo(() => {
+    return [...new Set(journeyRows.map((row) => String(row.produto_vendido ?? "").trim()).filter(Boolean))].sort((a, b) =>
+      a.localeCompare(b, "pt-BR")
+    );
+  }, [journeyRows]);
+  useEffect(() => {
+    if (!productFilterOptions.length) return;
+    const allowed = new Set(productFilterOptions);
+    setCampaignTypeFilter((prev) => {
+      const next = prev.filter((value) => allowed.has(value));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [productFilterOptions]);
 
   const clients = useMemo(() => {
     return [...new Set(journeyRows.map((row) => row.cliente).filter(Boolean))].sort((a, b) =>
@@ -1631,12 +1767,22 @@ function HomeContent() {
                 cs: csFilter,
                 campaigns: campaignFilter,
                 statuses: campaignStatusFilter,
+                features: featureFilter,
                 campaignTypes: campaignTypeFilter,
               })
             )
         )
       ),
-    [campaignFilter, campaignStatusFilter, campaignTypeFilter, clients, csFilter, journeyRows, rowMatchesDashboardFilters]
+    [
+      campaignFilter,
+      campaignStatusFilter,
+      campaignTypeFilter,
+      clients,
+      csFilter,
+      featureFilter,
+      journeyRows,
+      rowMatchesDashboardFilters,
+    ]
   );
   const disabledCsOptions = useMemo(
     () =>
@@ -1649,12 +1795,22 @@ function HomeContent() {
                 cs: [cs],
                 campaigns: campaignFilter,
                 statuses: campaignStatusFilter,
+                features: featureFilter,
                 campaignTypes: campaignTypeFilter,
               })
             )
         )
       ),
-    [campaignFilter, campaignStatusFilter, campaignTypeFilter, clientFilter, csFilterOptions, journeyRows, rowMatchesDashboardFilters]
+    [
+      campaignFilter,
+      campaignStatusFilter,
+      campaignTypeFilter,
+      clientFilter,
+      csFilterOptions,
+      featureFilter,
+      journeyRows,
+      rowMatchesDashboardFilters,
+    ]
   );
   const disabledCampaignOptions = useMemo(
     () =>
@@ -1667,6 +1823,7 @@ function HomeContent() {
                 cs: csFilter,
                 campaigns: [campaign],
                 statuses: campaignStatusFilter,
+                features: featureFilter,
                 campaignTypes: campaignTypeFilter,
               })
             )
@@ -1678,6 +1835,7 @@ function HomeContent() {
       campaignTypeFilter,
       clientFilter,
       csFilter,
+      featureFilter,
       journeyRows,
       rowMatchesDashboardFilters,
     ]
@@ -1693,6 +1851,7 @@ function HomeContent() {
                 cs: csFilter,
                 campaigns: campaignFilter,
                 statuses: [status],
+                features: featureFilter,
                 campaignTypes: campaignTypeFilter,
               })
             )
@@ -1704,27 +1863,57 @@ function HomeContent() {
       campaignTypeFilter,
       clientFilter,
       csFilter,
+      featureFilter,
       journeyRows,
       rowMatchesDashboardFilters,
     ]
   );
-  const disabledCampaignTypeOptions = useMemo(
+  const disabledFeatureOptions = useMemo(
     () =>
       new Set(
-        [...CAMPAIGN_TYPE_OPTIONS].filter(
-          (tipo) =>
+        [...FEATURE_OPTIONS].filter(
+          (feature) =>
             !journeyRows.some((row) =>
               rowMatchesDashboardFilters(row, {
                 clients: clientFilter,
                 cs: csFilter,
                 campaigns: campaignFilter,
                 statuses: campaignStatusFilter,
-                campaignTypes: [tipo],
+                features: [feature],
+                campaignTypes: campaignTypeFilter,
               })
             )
         )
       ),
-    [campaignFilter, campaignStatusFilter, clientFilter, csFilter, journeyRows, rowMatchesDashboardFilters]
+    [campaignFilter, campaignStatusFilter, campaignTypeFilter, clientFilter, csFilter, journeyRows, rowMatchesDashboardFilters]
+  );
+  const disabledCampaignTypeOptions = useMemo(
+    () =>
+      new Set(
+        productFilterOptions.filter(
+          (produto) =>
+            !journeyRows.some((row) =>
+              rowMatchesDashboardFilters(row, {
+                clients: clientFilter,
+                cs: csFilter,
+                campaigns: campaignFilter,
+                statuses: campaignStatusFilter,
+                features: featureFilter,
+                campaignTypes: [produto],
+              })
+            )
+        )
+      ),
+    [
+      campaignFilter,
+      campaignStatusFilter,
+      clientFilter,
+      csFilter,
+      featureFilter,
+      journeyRows,
+      productFilterOptions,
+      rowMatchesDashboardFilters,
+    ]
   );
 
   const handleRefresh = async () => {
@@ -1943,7 +2132,7 @@ function HomeContent() {
 
   const detailedPlatformRows = useMemo(() => {
     if (!data) return [] as PlatformPageRow[];
-    if (!["StackAdapt", "DV360", "Xandr"].includes(resolvedActivePage)) return [] as PlatformPageRow[];
+    if (!["StackAdapt", "DV360", "Xandr", "Hivestack"].includes(resolvedActivePage)) return [] as PlatformPageRow[];
     return data.platform_pages[resolvedActivePage]?.rows ?? [];
   }, [data, resolvedActivePage]);
 
@@ -1955,6 +2144,7 @@ function HomeContent() {
         cs: csFilter,
         campaigns: campaignFilter,
         statuses: campaignStatusFilter,
+        features: featureFilter,
         campaignTypes: campaignTypeFilter,
       });
     },
@@ -1964,6 +2154,7 @@ function HomeContent() {
       csFilter,
       campaignFilter,
       campaignStatusFilter,
+      featureFilter,
       campaignTypeFilter,
       rowMatchesDashboardFilters,
     ]
@@ -2173,7 +2364,7 @@ function HomeContent() {
   const dashboardErrorIsTimeout = dashboardErrorMessage.toLowerCase().includes("timeout");
   const periodRangeLabel = data
     ? `${formatDateBr(data.period.start)} → ${formatDateBr(data.period.end)}`
-    : `${formatDateBr(selectedMonthRange.start)} → ${formatDateBr(selectedMonthRange.end)}`;
+    : `${formatDateBr(selectedDateRange.start)} → ${formatDateBr(selectedDateRange.end)}`;
 
   const renderDashboardPage = () => {
     if (!data) return null;
@@ -2318,16 +2509,43 @@ function HomeContent() {
       });
     }
 
-    secondRowDspCards.push({
-      title: "Hivestack",
-      value: brl(0),
-      subtitle: "USD 0.00",
-      badge: "Em breve",
-      badgeTone: "soon",
-      titleEmphasis: true,
-      logoSrc: PLATFORM_LOGOS.Hivestack,
-      spendBrl: 0,
-    });
+    const hivestackPage = data.platform_pages.Hivestack;
+    const hivestackStatus = data.platform_results.Hivestack?.status;
+    if (hivestackPage) {
+      secondRowDspCards.push({
+        title: "Hivestack",
+        value: brl(Number(hivestackPage.spend_brl ?? 0)),
+        subtitle: "Fonte BigQuery (BRL)",
+        titleEmphasis: true,
+        logoSrc: PLATFORM_LOGOS.Hivestack,
+        platformKey: "Hivestack",
+        spendBrl: Number(hivestackPage.spend_brl ?? 0),
+        href: routeForPage("Hivestack"),
+      });
+    } else if (hivestackStatus === "error") {
+      secondRowDspCards.push({
+        title: "Hivestack",
+        value: "—",
+        subtitle: data.platform_results.Hivestack?.message ?? "Falha ao carregar",
+        dimmed: true,
+        titleEmphasis: true,
+        logoSrc: PLATFORM_LOGOS.Hivestack,
+        platformKey: "Hivestack",
+        spendBrl: 0,
+      });
+    } else {
+      secondRowDspCards.push({
+        title: "Hivestack",
+        value: brl(0),
+        subtitle: "Sem dados",
+        badge: "Em breve",
+        badgeTone: "soon",
+        titleEmphasis: true,
+        logoSrc: PLATFORM_LOGOS.Hivestack,
+        platformKey: "Hivestack",
+        spendBrl: 0,
+      });
+    }
 
     const investedTotal = dashboardFilteredRows.reduce((sum, row) => sum + Number(row.investido ?? 0), 0);
 
@@ -2419,12 +2637,21 @@ function HomeContent() {
               disabledOptions={disabledCsOptions}
             />
             <MultiSelectFilter
+              id="filter-feature"
+              label="Feature"
+              options={[...FEATURE_OPTIONS]}
+              value={featureFilter}
+              onChange={setFeatureFilter}
+              placeholder="Todas as features"
+              disabledOptions={disabledFeatureOptions}
+            />
+            <MultiSelectFilter
               id="filter-campaign-type"
-              label="Tipo"
-              options={[...CAMPAIGN_TYPE_OPTIONS]}
+              label="Produto Vendido"
+              options={productFilterOptions}
               value={campaignTypeFilter}
               onChange={setCampaignTypeFilter}
-              placeholder="Todos os tipos"
+              placeholder="Todos os produtos vendidos"
               disabledOptions={disabledCampaignTypeOptions}
             />
             <MultiSelectFilter
@@ -2452,6 +2679,7 @@ function HomeContent() {
                 onClick={() => {
                   setClientFilter([]);
                   setCsFilter([]);
+                  setFeatureFilter([]);
                   setCampaignTypeFilter([]);
                   setCampaignFilter([]);
                   setCampaignStatusFilter([]);
@@ -2734,7 +2962,7 @@ function HomeContent() {
                         data: formatDateBr(String(row.date)),
                         total_brl: Number(row.total ?? 0).toFixed(2),
                       };
-                      for (const platform of data.dashboard.active_platforms) {
+                      for (const platform of dailyChartPlatforms) {
                         baseRow[`${platform}_brl`] = Number(row[platform] ?? 0).toFixed(2);
                       }
                       return baseRow;
@@ -2782,7 +3010,7 @@ function HomeContent() {
                   />
                   <Tooltip content={<NumberTooltip />} labelFormatter={(label) => formatDateBr(String(label))} />
                   <Legend content={<PlatformLegend />} />
-                  {data.dashboard.active_platforms.map((platform) => (
+                  {dailyChartPlatforms.map((platform) => (
                     <Line
                       key={platform}
                       type="monotone"
@@ -2887,19 +3115,21 @@ function HomeContent() {
                               />
                             ) : null}
                             <span>{String(row.account_management)}</span>
-                            <a
-                              href={getCampaignReferenceWhatsAppUrl(String(row.account_management), {
-                                campanha: row.campanha,
-                                token: row.token,
-                              })}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="accountManagerWhatsappLink"
-                              aria-label={`Conversar com ${String(row.account_management)} no WhatsApp`}
-                              title="Abrir conversa no WhatsApp"
-                            >
-                              <WhatsAppIcon />
-                            </a>
+                            {hasAccountManagerWhatsApp(String(row.account_management)) ? (
+                              <a
+                                href={getCampaignReferenceWhatsAppUrl(String(row.account_management), {
+                                  campanha: row.campanha,
+                                  token: row.token,
+                                })}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="accountManagerWhatsappLink"
+                                aria-label={`Conversar com ${String(row.account_management)} no WhatsApp`}
+                                title="Abrir conversa no WhatsApp"
+                              >
+                                <WhatsAppIcon />
+                              </a>
+                            ) : null}
                           </span>
                         ) : (
                           "—"
@@ -3159,9 +3389,9 @@ function HomeContent() {
           <section className="panel panelSub filterPanelCard">
             <h3>Filtros do dashboard</h3>
             <p className="muted filterPanelHint">
-              Os mesmos filtros da home (Cliente, CS, Tipo, Campanha e Status). Eles refinam os cards, os
-              contadores e a tabela desta DSP; a busca e o chip &quot;só sem token&quot; continuam valendo
-              por cima.
+              Os mesmos filtros da home (Cliente, CS, Feature, Produto Vendido, Campanha e Status). Eles
+              refinam os cards, os contadores e a tabela desta DSP; a busca e o chip
+              &quot;só sem token&quot; continuam valendo por cima.
             </p>
             <div className="filterToolbar">
               <MultiSelectFilter
@@ -3184,12 +3414,21 @@ function HomeContent() {
                 disabledOptions={disabledCsOptions}
               />
               <MultiSelectFilter
+                id={`dsp-filter-feature-${platformName}`}
+                label="Feature"
+                options={[...FEATURE_OPTIONS]}
+                value={featureFilter}
+                onChange={setFeatureFilter}
+                placeholder="Todas as features"
+                disabledOptions={disabledFeatureOptions}
+              />
+              <MultiSelectFilter
                 id={`dsp-filter-campaign-type-${platformName}`}
-                label="Tipo"
-                options={[...CAMPAIGN_TYPE_OPTIONS]}
+                label="Produto Vendido"
+                options={productFilterOptions}
                 value={campaignTypeFilter}
                 onChange={setCampaignTypeFilter}
-                placeholder="Todos os tipos"
+                placeholder="Todos os produtos vendidos"
                 disabledOptions={disabledCampaignTypeOptions}
               />
               <MultiSelectFilter
@@ -3217,6 +3456,7 @@ function HomeContent() {
                   onClick={() => {
                     setClientFilter([]);
                     setCsFilter([]);
+                    setFeatureFilter([]);
                     setCampaignTypeFilter([]);
                     setCampaignFilter([]);
                     setCampaignStatusFilter([]);
@@ -3444,21 +3684,23 @@ function HomeContent() {
                                 />
                               ) : null}
                               <span className="accountManagerName">{row.account_management}</span>
-                              <a
-                                href={getCampaignReferenceWhatsAppUrl(row.account_management, {
-                                  campanha: row.campanha,
-                                  token: row.token,
-                                  platform: platformName,
-                                  line: row.line,
-                                })}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="accountManagerWhatsappLink"
-                                aria-label={`Conversar com ${row.account_management} no WhatsApp`}
-                                title="Abrir conversa no WhatsApp"
-                              >
-                                <WhatsAppIcon />
-                              </a>
+                              {hasAccountManagerWhatsApp(row.account_management) ? (
+                                <a
+                                  href={getCampaignReferenceWhatsAppUrl(row.account_management, {
+                                    campanha: row.campanha,
+                                    token: row.token,
+                                    platform: platformName,
+                                    line: row.line,
+                                  })}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="accountManagerWhatsappLink"
+                                  aria-label={`Conversar com ${row.account_management} no WhatsApp`}
+                                  title="Abrir conversa no WhatsApp"
+                                >
+                                  <WhatsAppIcon />
+                                </a>
+                              ) : null}
                             </span>
                           ) : (
                             "—"
@@ -3578,21 +3820,23 @@ function HomeContent() {
                                 />
                               ) : null}
                               <span className="accountManagerName">{row.account_management}</span>
-                              <a
-                                href={getCampaignReferenceWhatsAppUrl(row.account_management, {
-                                  campanha: row.campanha,
-                                  token: row.token,
-                                  platform: platformName,
-                                  line: row.line,
-                                })}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="accountManagerWhatsappLink"
-                                aria-label={`Conversar com ${row.account_management} no WhatsApp`}
-                                title="Abrir conversa no WhatsApp"
-                              >
-                                <WhatsAppIcon />
-                              </a>
+                              {hasAccountManagerWhatsApp(row.account_management) ? (
+                                <a
+                                  href={getCampaignReferenceWhatsAppUrl(row.account_management, {
+                                    campanha: row.campanha,
+                                    token: row.token,
+                                    platform: platformName,
+                                    line: row.line,
+                                  })}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="accountManagerWhatsappLink"
+                                  aria-label={`Conversar com ${row.account_management} no WhatsApp`}
+                                  title="Abrir conversa no WhatsApp"
+                                >
+                                  <WhatsAppIcon />
+                                </a>
+                              ) : null}
                             </span>
                           ) : (
                             "—"
@@ -4045,22 +4289,24 @@ function HomeContent() {
                                 />
                               ) : null}
                               <span>{row.account_management}</span>
-                              <a
-                                href={getAccountManagerWhatsAppUrl(row.account_management, {
-                                  campanha: row.campanha,
-                                  token: row.token,
-                                  platform: row.platform,
-                                  vigencia_start: row.vigencia_start,
-                                  vigencia_end: row.vigencia_end,
-                                })}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="accountManagerWhatsappLink"
-                                aria-label={`Conversar com ${row.account_management} no WhatsApp`}
-                                title="Abrir conversa no WhatsApp"
-                              >
-                                <WhatsAppIcon />
-                              </a>
+                              {hasAccountManagerWhatsApp(row.account_management) ? (
+                                <a
+                                  href={getAccountManagerWhatsAppUrl(row.account_management, {
+                                    campanha: row.campanha,
+                                    token: row.token,
+                                    platform: row.platform,
+                                    vigencia_start: row.vigencia_start,
+                                    vigencia_end: row.vigencia_end,
+                                  })}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="accountManagerWhatsappLink"
+                                  aria-label={`Conversar com ${row.account_management} no WhatsApp`}
+                                  title="Abrir conversa no WhatsApp"
+                                >
+                                  <WhatsAppIcon />
+                                </a>
+                              ) : null}
                             </span>
                           ) : (
                             "—"
@@ -4095,16 +4341,32 @@ function HomeContent() {
           <p className="sidebarTitle">Painel de Custos</p>
           <p className="sidebarSubtitle">{periodRangeLabel}</p>
         </div>
-        <nav className="sidebarNav">
-          {navOptions.map((option) => (
+        <nav className="sidebarNav" aria-label="Navegacao principal">
+          <section className="sidebarGroup" aria-label="Dsps">
             <button
-              key={option}
-              className={`navButton ${resolvedActivePage === option ? "navButtonActive" : ""}`}
-              onClick={() => router.push(appendQueryToRoute(routeForPage(option)))}
+              type="button"
+              className="sidebarGroupToggle"
+              aria-expanded={isDspsMenuExpanded}
+              aria-controls="sidebar-dsps-items"
+              onClick={() => setIsDspsMenuExpanded((current) => !current)}
             >
-              {NAV_LABELS[option]}
+              <span className="sidebarGroupTitle">dsps</span>
+              <span className={`sidebarGroupChevron ${isDspsMenuExpanded ? "sidebarGroupChevronOpen" : ""}`}>▾</span>
             </button>
-          ))}
+            {isDspsMenuExpanded ? (
+              <div id="sidebar-dsps-items" className="sidebarGroupItems">
+                {navOptions.map((option) => (
+                  <button
+                    key={option}
+                    className={`navButton navButtonNested ${resolvedActivePage === option ? "navButtonActive" : ""}`}
+                    onClick={() => router.push(appendQueryToRoute(routeForPage(option)))}
+                  >
+                    {NAV_LABELS[option]}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </section>
         </nav>
       </aside>
 
@@ -4119,15 +4381,40 @@ function HomeContent() {
               <p className="muted">{periodRangeLabel}</p>
             </div>
             <label className="monthFilterControl">
-              <span className="monthFilterLabel">Mês de análise</span>
+              <span className="monthFilterLabel">Período de análise</span>
+              <select
+                value={selectedViewMode}
+                onChange={(event) => {
+                  const nextMode = event.target.value as AnalysisViewMode;
+                  setSelectedViewMode(nextMode);
+                  setSelectedMonthKey((prev) => {
+                    if (nextMode === "year") {
+                      if (isValidYearKey(prev)) return prev;
+                      return currentYearKey;
+                    }
+                    if (isValidMonthKey(prev)) return prev;
+                    return currentMonthKey;
+                  });
+                }}
+                aria-label="Selecionar período de análise"
+              >
+                {ANALYSIS_VIEW_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="monthFilterControl">
+              <span className="monthFilterLabel">{selectedViewMode === "year" ? "Ano de análise" : "Mês de análise"}</span>
               <select
                 value={selectedMonthKey}
                 onChange={(event) => setSelectedMonthKey(event.target.value)}
-                aria-label="Selecionar mês de análise"
+                aria-label={selectedViewMode === "year" ? "Selecionar ano de análise" : "Selecionar mês de análise"}
               >
-                {availableMonthKeys.map((monthKey) => (
+                {periodOptions.map((monthKey) => (
                   <option key={monthKey} value={monthKey}>
-                    {formatMonthKeyLabel(monthKey)}
+                    {selectedViewMode === "year" ? monthKey : formatMonthKeyLabel(monthKey)}
                   </option>
                 ))}
               </select>

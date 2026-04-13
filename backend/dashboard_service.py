@@ -10,7 +10,7 @@ from typing import Any
 
 from backend import bigquery_store
 from backend.budget_store import dynamic_platform_targets_brl, get_platform_budget_share_percent
-from src.apis import amazon_dsp, dv360, nexd, stackadapt, xandr
+from src.apis import amazon_dsp, dv360, hivestack, nexd, stackadapt, xandr
 from src.apis.sheets import extract_token_from_line, fetch_campaign_journey
 from src.utils.currency import get_usd_to_brl, to_brl
 from src.utils.date_utils import fmt, get_mtd_dates
@@ -27,6 +27,7 @@ PLATFORMS = {
     "DV360": dv360,
     "Xandr": xandr,
     "Amazon DSP": amazon_dsp,
+    "Hivestack": hivestack,
 }
 
 
@@ -181,7 +182,7 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
             for name, module in PLATFORMS.items()
         }
         rate_future = executor.submit(get_usd_to_brl)
-        journey_future = executor.submit(fetch_campaign_journey)
+        journey_future = executor.submit(fetch_campaign_journey, start, end)
         nexd_future = executor.submit(nexd.fetch_mtd_impressions, start, end)
 
         results: dict[str, dict[str, Any]] = {}
@@ -357,6 +358,7 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
             "token": token,
             "cliente": campaign.get("cliente", ""),
             "campanha": campaign.get("campanha", ""),
+            "produto_vendido": campaign.get("produto_vendido", ""),
             "account_management": campaign.get("account_management", ""),
             "status": "Ativa" if _is_campaign_active(campaign, today) else "Encerrada",
             "investido": campaign.get("investido", 0.0),

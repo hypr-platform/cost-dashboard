@@ -20,7 +20,7 @@ body {
 }
 
 body {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .authContainer {
@@ -205,6 +205,55 @@ body {
   gap: 2px;
 }
 
+.sidebarGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebarGroupToggle {
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 10px 4px;
+  cursor: pointer;
+}
+
+.sidebarGroupToggle:hover {
+  background: #111827;
+}
+
+.sidebarGroupTitle {
+  margin: 0;
+  color: #9ca3af;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sidebarGroupChevron {
+  color: #9ca3af;
+  transition: transform 0.15s ease;
+}
+
+.sidebarGroupChevronOpen {
+  transform: rotate(0deg);
+}
+
+.sidebarGroupChevron:not(.sidebarGroupChevronOpen) {
+  transform: rotate(-90deg);
+}
+
+.sidebarGroupItems {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .navButton {
   border: 0;
   border-left: 2px solid transparent;
@@ -214,6 +263,10 @@ body {
   font-size: 0.86rem;
   padding: 9px 10px;
   cursor: pointer;
+}
+
+.navButtonNested {
+  padding-left: 18px;
 }
 
 .navButton:hover {

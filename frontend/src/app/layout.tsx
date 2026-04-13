@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist_Mono, Montserrat } from "next/font/google";
 import { clerkLocalizationPtBr } from "@/lib/clerkLocalization";
 import "./globals.css";
 
-const geistSans = Geist({
+const montserrat = Montserrat({
   variable: "--font-geist-sans",
   subsets: ["latin"],
 });
@@ -25,7 +25,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="pt-BR" className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="pt-BR" className={`${montserrat.variable} ${geistMono.variable}`}>
       <body>
         <ClerkProvider localization={clerkLocalizationPtBr}>{children}</ClerkProvider>
       </body>
