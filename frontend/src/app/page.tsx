@@ -1,10 +1,19 @@
 "use client";
 
-import { UserButton, useClerk, useUser } from "@clerk/nextjs";
+import { useClerk, useUser } from "@clerk/nextjs";
 import html2canvas from "html2canvas";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import useSWR from "swr";
 import {
   Bar,
@@ -26,13 +35,15 @@ type JourneyRow = {
   token: string;
   cliente: string;
   campanha: string;
+  campaign_start?: string | null;
+  campaign_end?: string | null;
   produto_vendido?: string;
   account_management?: string;
   status: string;
   investido: number;
   total_plataformas: number;
   pct_investido: number;
-  [platform: string]: string | number | undefined;
+  [platform: string]: string | number | null | undefined;
 };
 
 function rowCsLabel(row: JourneyRow): string {
@@ -64,6 +75,18 @@ type StackAdaptSortDirection = "asc" | "desc";
 type AttentionNoTokenSortKey = "platform" | "line" | "gasto";
 type AttentionOutOfPeriodSortKey = "platform" | "token" | "cliente" | "campanha" | "account_management" | "vigencia" | "gasto";
 type AttentionSortDirection = "asc" | "desc";
+type CampaignJourneySortKey =
+  | "token"
+  | "cliente"
+  | "campanha"
+  | "account_management"
+  | "status"
+  | "investido"
+  | "total_plataformas"
+  | "pct_investido"
+  | "campaign_start"
+  | "campaign_end"
+  | `platform:${string}`;
 type AttentionOutOfPeriodRow = {
   platform: string;
   token: string;
@@ -117,6 +140,7 @@ type DashboardResponse = {
   dashboard: {
     spend_by_platform: { platform: string; spend_brl: number }[];
     daily: Array<{ date: string; total: number; [platform: string]: string | number }>;
+    daily_filtered?: Array<{ date: string; total: number; [platform: string]: string | number }>;
     campaign_journey_rows: JourneyRow[];
     active_platforms: string[];
   };
@@ -179,14 +203,19 @@ type RefreshMetricsResponse = {
   p95_duration_seconds: number | null;
 };
 
+type RefreshPhase = "idle" | "starting" | "running" | "success" | "error";
+
+/** Cores únicas nos gráficos por DSP (pizza, linhas, atenção, etc.) */
 const PLATFORM_COLORS: Record<string, string> = {
-  "StackAdapt": "#3b82f6",
+  StackAdapt: "#2563eb",
   DV360: "#22c55e",
-  Xandr: "#ef4444",
-  "Amazon DSP": "#22c55e",
-  Nexd: "#89cff0",
-  Hivestack: "#e31c79",
-  Total: "#ffffff",
+  Xandr: "#dc2626",
+  "Amazon DSP": "#f97316",
+  Amazon: "#f97316",
+  Nexd: "#7dd3fc",
+  NEXD: "#7dd3fc",
+  Hivestack: "#ec4899",
+  Total: "#e2e8f0",
 };
 const PLATFORM_LOGOS: Record<string, string> = {
   "StackAdapt": "/stackadapt-logo.png",
@@ -315,7 +344,10 @@ const URL_PARAM_CAMPAIGN_STATUS = "campaign_status";
 /** Filtro por produto vendido da campanha. */
 const URL_PARAM_CAMPAIGN_TYPE = "tipo";
 const URL_PARAM_FEATURES = "features";
-const URL_PARAM_HIDE_OUT_OF_PERIOD = "hide_oop";
+/** Quando `1`, inclui na visão principal o gasto em campanhas fora da vigência do período. Padrão: omitido (não incluir). */
+const URL_PARAM_INCLUDE_OUT_OF_PERIOD = "include_oop";
+/** Legado: removido da URL ao sincronizar; leitura ignorada. */
+const URL_PARAM_HIDE_OUT_OF_PERIOD_LEGACY = "hide_oop";
 const URL_PARAM_MONTH = "month";
 const URL_PARAM_VIEW = "view";
 const MONTH_KEY_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -431,6 +463,8 @@ function journeySnapshotForPlatformRow(
     token: row.token,
     cliente: row.cliente,
     campanha: row.campanha,
+    campaign_start: journey?.campaign_start ?? null,
+    campaign_end: journey?.campaign_end ?? null,
     produto_vendido: journey?.produto_vendido ?? "",
     account_management: row.account_management,
     status: journey?.status ?? "",
@@ -450,6 +484,8 @@ function journeySnapshotForOutOfPeriodRow(
     token: row.token,
     cliente: row.cliente,
     campanha: row.campanha,
+    campaign_start: journey?.campaign_start ?? row.vigencia_start ?? null,
+    campaign_end: journey?.campaign_end ?? row.vigencia_end ?? null,
     produto_vendido: journey?.produto_vendido ?? "",
     account_management: row.account_management,
     status: journey?.status ?? "",
@@ -481,6 +517,24 @@ const fetcher = async (url: string) => {
 
 function brl(value: number) {
   return BRL_FORMATTER.format(value);
+}
+
+/** Converte #RGB / #RRGGBB em rgba() para borda/glow do tooltip alinhado à cor da barra. */
+function hexToRgba(hex: string, alpha: number): string {
+  const raw = hex.trim().replace("#", "");
+  if (raw.length === 3) {
+    const r = parseInt(raw[0] + raw[0], 16);
+    const g = parseInt(raw[1] + raw[1], 16);
+    const b = parseInt(raw[2] + raw[2], 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  if (raw.length === 6) {
+    const r = parseInt(raw.slice(0, 2), 16);
+    const g = parseInt(raw.slice(2, 4), 16);
+    const b = parseInt(raw.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  return `rgba(100, 116, 139, ${alpha})`;
 }
 
 function formatDonutCenterValue(value: number) {
@@ -602,6 +656,17 @@ function formatMonthKeyLabel(monthKey: string): string {
   });
 }
 
+function capitalizeFirst(value: string): string {
+  if (!value) return value;
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatDateBrShort(value: string | null | undefined): string {
+  const full = formatDateBr(value);
+  const match = full.match(/^(\d{2}\/\d{2})\/\d{4}$/);
+  return match ? match[1] : full;
+}
+
 function csvEscape(value: string | number | null | undefined): string {
   const normalized = String(value ?? "");
   if (!normalized.includes('"') && !normalized.includes(",") && !normalized.includes("\n")) {
@@ -627,7 +692,7 @@ function downloadCsv(filename: string, headers: string[], rows: Array<Array<stri
 async function downloadElementPng(element: HTMLElement, filename: string) {
   const canvas = await html2canvas(element, {
     scale: 2,
-    backgroundColor: "#0b1220",
+    backgroundColor: "#1e2a33",
     useCORS: true,
     allowTaint: true,
     logging: false,
@@ -670,31 +735,91 @@ function parseOutOfPeriodSortParam(
   return { key, direction: direction === "asc" ? "asc" : "desc" };
 }
 
+type NumberTooltipPayloadEntry = {
+  value?: number | string;
+  name?: string;
+  color?: string;
+  fill?: string;
+  stroke?: string;
+  payload?: unknown;
+};
+
+/** Cor da série no tooltip (barra usa `fill`; linha usa `stroke`/`color`; fallback pelo payload ou label do eixo). */
+function tooltipEntryVisualColor(entry: NumberTooltipPayloadEntry, categoryLabel?: ReactNode): string {
+  const nameKey = typeof entry.name === "string" ? entry.name.trim() : "";
+  if (nameKey) {
+    if (PLATFORM_COLORS[nameKey]) {
+      return PLATFORM_COLORS[nameKey];
+    }
+    if (nameKey.toLowerCase() === "total" && PLATFORM_COLORS.Total) {
+      return PLATFORM_COLORS.Total;
+    }
+  }
+  const fromShape = entry.fill ?? entry.color ?? entry.stroke;
+  if (typeof fromShape === "string" && fromShape && fromShape !== "none" && fromShape !== "transparent") {
+    return fromShape;
+  }
+  const raw = entry.payload;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const p = raw as Record<string, unknown>;
+    if (typeof p.color === "string" && p.color) {
+      return p.color;
+    }
+    if (typeof p.platform === "string" && PLATFORM_COLORS[p.platform]) {
+      return PLATFORM_COLORS[p.platform];
+    }
+  }
+  if (categoryLabel != null && categoryLabel !== "") {
+    const key = String(categoryLabel);
+    if (PLATFORM_COLORS[key]) {
+      return PLATFORM_COLORS[key];
+    }
+  }
+  return "#64748b";
+}
+
 function NumberTooltip({
   active,
   payload,
   label,
   totalValue,
+  labelFormatter,
 }: {
   active?: boolean;
-  payload?: Array<{ value: number | string; name: string; color?: string }>;
-  label?: string;
+  payload?: NumberTooltipPayloadEntry[];
+  label?: ReactNode;
   totalValue?: number | null;
+  labelFormatter?: (label: ReactNode) => ReactNode;
 }) {
   if (!active || !payload?.length) {
     return null;
   }
+  const resolvedLabel = labelFormatter && label != null && label !== "" ? labelFormatter(label) : label;
+  const showLabel = resolvedLabel != null && resolvedLabel !== "";
+  const accent = tooltipEntryVisualColor(payload[0], showLabel ? resolvedLabel : undefined);
+  const shellStyle = {
+    "--number-tooltip-border": hexToRgba(accent, 0.32),
+    "--number-tooltip-glow": hexToRgba(accent, 0.2),
+  } as CSSProperties;
   return (
-    <div className="tooltip">
-      {label ? <p>{label}</p> : null}
+    <div className="tooltipNumberShell" style={shellStyle}>
+      {showLabel ? <div className="tooltipNumberLabel">{resolvedLabel}</div> : null}
       {payload.map((entry) => {
         const numericValue = Number(entry.value ?? 0);
         const pct = totalValue && totalValue > 0 ? (numericValue / totalValue) * 100 : null;
+        const rowColor = tooltipEntryVisualColor(entry, showLabel ? resolvedLabel : undefined);
         return (
-          <p key={`${entry.name}-${entry.value}`} style={{ color: entry.color ?? "#d1d5db" }}>
-            {entry.name}: {brl(numericValue)}
-            {pct !== null ? ` (${pct.toFixed(1)}% do total)` : ""}
-          </p>
+          <div key={`${entry.name}-${entry.value}`} className="tooltipNumberRow">
+            <span className="tooltipNumberSwatch" style={{ backgroundColor: rowColor }} aria-hidden />
+            <p className="tooltipNumberRowText">
+              <span className="tooltipNumberRowName">{entry.name}</span>
+              {": "}
+              <span className="tooltipNumberRowAmount">{brl(numericValue)}</span>
+              {pct !== null ? (
+                <span className="tooltipNumberRowPct"> ({pct.toFixed(1)}% do total)</span>
+              ) : null}
+            </p>
+          </div>
         );
       })}
     </div>
@@ -712,10 +837,11 @@ function PlatformLegend({ payload }: { payload?: PlatformLegendEntry[] }) {
     <div className="chartLegend">
       {payload.map((entry) => {
         const name = String(entry.value ?? "");
-        const displayName = name === "total" ? "Total" : name;
+        const seriesKey = name === "Total" ? "total" : name;
+        const displayName = seriesKey === "total" ? "Total" : name;
         const logoSrc = PLATFORM_LOGOS[displayName];
         return (
-          <div className="chartLegendItem" key={`${name}-${entry.color ?? "no-color"}`}>
+          <div className="chartLegendItem" key={`${seriesKey}-${entry.color ?? "no-color"}`}>
             {logoSrc ? (
               <Image
                 src={logoSrc}
@@ -731,6 +857,61 @@ function PlatformLegend({ payload }: { payload?: PlatformLegendEntry[] }) {
             )}
             <span>{displayName}</span>
           </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DailyCostLegend({
+  entries,
+  activeKey,
+  onToggle,
+}: {
+  entries: PlatformLegendEntry[];
+  activeKey: string | null;
+  onToggle: (seriesKey: string) => void;
+}) {
+  if (!entries.length) return null;
+  const hasFilter = activeKey !== null;
+  return (
+    <div className="chartLegend chartLegendFilterable">
+      {entries.map((entry) => {
+        const name = String(entry.value ?? "");
+        const seriesKey = name === "Total" ? "total" : name;
+        const displayName = seriesKey === "total" ? "Total" : name;
+        const logoSrc = PLATFORM_LOGOS[displayName];
+        const isActive = !hasFilter || activeKey === seriesKey;
+        return (
+          <button
+            key={`${seriesKey}-${entry.color ?? "no-color"}`}
+            type="button"
+            className={`chartLegendItem chartLegendItemFilter ${
+              isActive ? "chartLegendItemFilterOn" : "chartLegendItemFilterOff"
+            }`}
+            onClick={() => onToggle(seriesKey)}
+            aria-pressed={activeKey === seriesKey}
+            aria-label={
+              activeKey === seriesKey
+                ? `Remover filtro de ${displayName}`
+                : `Filtrar gráfico por ${displayName}`
+            }
+          >
+            {logoSrc ? (
+              <Image
+                src={logoSrc}
+                alt=""
+                width={24}
+                height={24}
+                className={`chartLegendLogo ${displayName === "Xandr" ? "cardLogoXandr" : ""} ${
+                  displayName.startsWith("Amazon") ? "cardLogoAmazon" : ""
+                } ${displayName === "Nexd" ? "cardLogoNexd" : ""}`}
+              />
+            ) : (
+              <span className="chartLegendDot" style={{ backgroundColor: entry.color ?? "#64748b" }} aria-hidden />
+            )}
+            <span>{displayName}</span>
+          </button>
         );
       })}
     </div>
@@ -813,6 +994,7 @@ function KpiCard({
   title,
   value,
   subtitle,
+  usdLine,
   badge,
   badgeTone,
   statusIndicator,
@@ -822,10 +1004,16 @@ function KpiCard({
   budget,
   variant,
   href,
+  metric,
+  summaryHighlight,
 }: {
   title: string;
   value: string;
-  subtitle: ReactNode;
+  subtitle?: ReactNode;
+  /** Linha secundária em USD (menor peso visual que o valor em BRL). */
+  usdLine?: string | null;
+  /** Métrica extra label + valor (ex.: NEXD — Impressões). */
+  metric?: { label: string; value: string };
   badge?: string;
   badgeTone?: "soon";
   statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
@@ -841,21 +1029,32 @@ function KpiCard({
   };
   variant?: "default" | "premium";
   href?: string;
+  /** Destaque na linha de totais (Investido / Consolidado). */
+  summaryHighlight?: boolean;
 }) {
   const router = useRouter();
-  const progress = budget?.progress_pct ?? 0;
-  const progressClamped = Math.max(0, Math.min(progress, 100));
-  const isOverTarget = progress > 100;
+  const progressRaw = budget?.progress_pct ?? 0;
+  const progressClamped = Math.max(0, Math.min(progressRaw, 100));
+  const isOverTarget = progressRaw > 100;
   const hasBudgetTarget = budget?.target_brl !== null && budget?.target_brl !== undefined;
   const investmentSharePct = budget?.investment_share_pct;
+  const budgetFillTone = isOverTarget ? "Over" : progressRaw >= 90 ? "Warn" : "Ok";
 
   const go = () => {
     if (href) router.push(href);
   };
 
+  const hasSubtitle = subtitle !== undefined && subtitle !== null && subtitle !== false && subtitle !== "";
+
   return (
     <div
-      className={`card ${dimmed ? "cardDimmed" : ""} ${variant === "premium" ? "cardPremium" : ""} ${href ? "cardClickable" : ""}`}
+      className={`card ${dimmed ? "cardDimmed" : ""} ${variant === "premium" ? "cardPremium" : ""} ${href ? "cardClickable" : ""} ${
+        badgeTone === "soon" && !dimmed
+          ? title.startsWith("Amazon")
+            ? "cardVisualSoonAmazon"
+            : "cardVisualSoon"
+          : ""
+      } ${summaryHighlight ? "cardSummaryHighlight" : ""}`}
       role={href ? "link" : undefined}
       tabIndex={href ? 0 : undefined}
       aria-label={href ? `Abrir ${title}` : undefined}
@@ -897,33 +1096,63 @@ function KpiCard({
           </span>
         ) : null}
       </div>
-      <p className="cardValue">{value}</p>
-      <p className="cardSubtitle">{subtitle}</p>
+      <div className="cardKpiPrimary">
+        <p className="cardValue">{value}</p>
+        {usdLine ? <p className="cardUsdLine">{usdLine}</p> : null}
+      </div>
+      {metric ? (
+        <div className="cardMetricBlock">
+          <p className="cardMetricLabel">{metric.label}</p>
+          <p className="cardMetricValue">{metric.value}</p>
+        </div>
+      ) : null}
+      {hasSubtitle ? (
+        <div
+          className={`cardSubtitle ${usdLine || metric ? "cardSubtitleAfterUsd" : ""}`}
+        >
+          {subtitle}
+        </div>
+      ) : null}
       {budget && hasBudgetTarget ? (
         <div className="cardBudgetSlot">
           <div className="cardBudget">
-            <p className="cardBudgetTargetLine">
-              <span className="cardBudgetTargetLabel">Alvo de Share de Investimento</span>
-              <span className="cardBudgetTargetValue">
-                {brl(budget.target_brl ?? 0)}
-                {investmentSharePct != null && Number.isFinite(investmentSharePct)
-                  ? ` (${Number(investmentSharePct).toLocaleString("pt-BR", { maximumFractionDigits: 2 })}%)`
-                  : ""}
-              </span>
-            </p>
-            <div className="budgetProgressTrack budgetProgressTrackCard">
+            <div className="cardBudgetMetaBlock">
+              <p className="cardBudgetMetaHeading">Meta</p>
+              <p className="cardBudgetMetaFigures">
+                <span className="cardBudgetMetaFiguresBrl">
+                  {BRL_INTEGER_FORMATTER.format(budget.target_brl ?? 0)}
+                </span>
+                {investmentSharePct != null && Number.isFinite(investmentSharePct) ? (
+                  <span className="cardBudgetMetaFiguresPct">
+                    {" "}
+                    ({Number(investmentSharePct).toLocaleString("pt-BR", { maximumFractionDigits: 0 })}% do total)
+                  </span>
+                ) : null}
+              </p>
+            </div>
+            <div className="budgetProgressTrack budgetProgressTrackCard" aria-hidden={!Number.isFinite(progressRaw)}>
               <div
-                className={`budgetProgressFill ${isOverTarget ? "budgetProgressFillOver" : ""}`}
+                className={`budgetProgressFill budgetProgressFill${budgetFillTone}`}
                 style={{ width: `${progressClamped}%` }}
               />
             </div>
-            <p className={`cardBudgetText ${isOverTarget ? "alertErrorInline" : ""}`}>
-              {isOverTarget
-                ? `Budget extrapolado em ${((budget.progress_pct ?? 0) - 100).toFixed(1)}% (${brl(
-                    Math.abs(budget.remaining_brl ?? 0)
-                  )})`
-                : `${(budget.progress_pct ?? 0).toFixed(1)}% • Restante: ${brl(budget.remaining_brl ?? 0)}`}
-            </p>
+            <div className={`cardBudgetCompareBlock ${isOverTarget ? "cardBudgetCompareBlockOver" : ""}`}>
+              {isOverTarget ? (
+                <>
+                  <p className="cardBudgetCompare cardBudgetCompareOver">
+                    +{Math.round((budget.progress_pct ?? 0) - 100)}% acima
+                  </p>
+                  <p className="cardBudgetCompareDetail">
+                    {BRL_INTEGER_FORMATTER.format(Math.abs(budget.remaining_brl ?? 0))} acima
+                  </p>
+                </>
+              ) : (
+                <p className="cardBudgetCompare">
+                  {(budget.progress_pct ?? 0).toFixed(1).replace(".", ",")}% do budget · Restante{" "}
+                  {brl(budget.remaining_brl ?? 0)}
+                </p>
+              )}
+            </div>
           </div>
         </div>
       ) : null}
@@ -940,6 +1169,7 @@ function MultiSelectFilter({
   placeholder = "Todos",
   showAvatar = false,
   disabledOptions,
+  compact = false,
 }: {
   id: string;
   label: string;
@@ -949,12 +1179,14 @@ function MultiSelectFilter({
   placeholder?: string;
   showAvatar?: boolean;
   disabledOptions?: ReadonlySet<string>;
+  compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const rootRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const selectedOptions = options.filter((opt) => value.includes(opt));
+  const hasSelection = selectedOptions.length > 0;
   const normalizedQuery = query.trim().toLowerCase();
   const visibleOptions = useMemo(() => {
     if (!normalizedQuery) return options;
@@ -970,22 +1202,23 @@ function MultiSelectFilter({
     const onDoc = (e: MouseEvent) => {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
         setOpen(false);
+        setQuery("");
       }
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [open]);
   useEffect(() => {
-    if (!open) {
-      setQuery("");
-      return;
-    }
+    if (!open) return;
     const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
     return () => window.clearTimeout(id);
   }, [open]);
 
   const summary =
     value.length === 0 ? placeholder : value.length === 1 ? value[0] : `${value.length} selecionados`;
+
+  const compactValueDisplay =
+    value.length === 1 ? value[0] : value.length > 1 ? String(value.length) : "";
 
   const isOptionDisabled = (opt: string) => Boolean(disabledOptions?.has(opt) && !value.includes(opt));
 
@@ -994,7 +1227,6 @@ function MultiSelectFilter({
     if (value.includes(opt)) onChange(value.filter((x) => x !== opt));
     else onChange([...value, opt]);
   };
-  const removeSelected = (opt: string) => onChange(value.filter((x) => x !== opt));
   const clearAll = () => onChange([]);
 
   const initialsFor = (name: string) =>
@@ -1006,18 +1238,32 @@ function MultiSelectFilter({
       .join("");
 
   return (
-    <div className="filterField" ref={rootRef}>
-      <label htmlFor={`${id}-trigger`} className="filterFieldLabel">
-        {label}
-      </label>
+    <div className={`filterField ${compact ? "filterFieldCompact" : ""}`} ref={rootRef}>
+      {compact ? null : (
+        <label htmlFor={`${id}-trigger`} className="filterFieldLabel">
+          {label}
+        </label>
+      )}
       <button
         type="button"
         id={`${id}-trigger`}
-        className="multiSelectTrigger"
+        className={`multiSelectTrigger ${hasSelection ? "multiSelectTriggerActive" : ""} ${
+          compact ? "multiSelectTriggerCompact" : ""
+        }`}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-label={
+          compact && options.length && !value.length ? `${label}. ${placeholder}` : undefined
+        }
         disabled={!options.length}
-        onClick={() => options.length && setOpen((o) => !o)}
+        onClick={() => {
+          if (!options.length) return;
+          setOpen((previous) => {
+            const next = !previous;
+            if (!next) setQuery("");
+            return next;
+          });
+        }}
       >
         <span className="multiSelectTriggerMain">
           {showAvatar && selectedOptions.length > 0 ? (
@@ -1034,35 +1280,48 @@ function MultiSelectFilter({
               })}
             </span>
           ) : null}
-          <span className="multiSelectTriggerLabel">{!options.length ? "Sem opções" : summary}</span>
+          {compact ? (
+            <span className="multiSelectInlineSummary">
+              {!options.length ? (
+                <>
+                  <span className="multiSelectInlineLabel">{label}</span>
+                  <span className="multiSelectInlineSep" aria-hidden>
+                    {"\u00A0•\u00A0"}
+                  </span>
+                  <span className="multiSelectTriggerLabel multiSelectTriggerLabelPlaceholder">Sem opções</span>
+                </>
+              ) : value.length === 0 ? (
+                <span className="multiSelectInlineLabel multiSelectInlineLabelSolo">{label}</span>
+              ) : (
+                <>
+                  <span className="multiSelectInlineLabel">{label}</span>
+                  <span className="multiSelectInlineSep" aria-hidden>
+                    {"\u00A0•\u00A0"}
+                  </span>
+                  <span
+                    className={`multiSelectTriggerLabel ${
+                      hasSelection ? "multiSelectTriggerLabelActive" : "multiSelectTriggerLabelPlaceholder"
+                    }`}
+                  >
+                    {compactValueDisplay}
+                  </span>
+                </>
+              )}
+            </span>
+          ) : (
+            <span
+              className={`multiSelectTriggerLabel ${
+                hasSelection ? "multiSelectTriggerLabelActive" : "multiSelectTriggerLabelPlaceholder"
+              }`}
+            >
+              {!options.length ? "Sem opções" : summary}
+            </span>
+          )}
         </span>
         <span className="multiSelectChevron" aria-hidden>
           {"\u25BC"}
         </span>
       </button>
-      {selectedOptions.length ? (
-        <div className="multiSelectChipsRow">
-          <div className="multiSelectChips" aria-label={`Filtros selecionados para ${label}`}>
-            {selectedOptions.map((opt) => (
-              <button
-                key={`${id}-chip-${opt}`}
-                type="button"
-                className="multiSelectChip"
-                onClick={() => removeSelected(opt)}
-                aria-label={`Remover ${opt}`}
-              >
-                <span>{opt}</span>
-                <span className="multiSelectChipX" aria-hidden>
-                  ×
-                </span>
-              </button>
-            ))}
-          </div>
-          <button type="button" className="multiSelectClearAllButton" onClick={clearAll}>
-            Limpar tudo
-          </button>
-        </div>
-      ) : null}
       {open && options.length ? (
         <ul className="multiSelectList" role="listbox" aria-multiselectable="true">
           <li className="multiSelectSearchRow">
@@ -1119,7 +1378,9 @@ function formatAge(from: number | null) {
   const diff = Math.floor((Date.now() - from) / 1000);
   const minutes = Math.floor(diff / 60);
   if (minutes <= 0) return "Atualizado há menos de 1min";
-  return `Atualizado há ${minutes}min`;
+  if (minutes < 60) return `Atualizado há ${minutes}min`;
+  if (minutes < 24 * 60) return `Atualizado há ${Math.floor(minutes / 60)}h`;
+  return `Atualizado há ${Math.floor(minutes / (24 * 60))}d`;
 }
 
 function formatDateTime(value: number) {
@@ -1169,6 +1430,42 @@ function ReloadIcon({ spinning = false }: { spinning?: boolean }) {
   );
 }
 
+function FilterPanelDrawerChevron({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      aria-hidden="true"
+      className={`filterPanelDrawerChevron ${expanded ? "filterPanelDrawerChevronOpen" : ""}`}
+    >
+      <path
+        d="M6 9l6 6 6-6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function FilterLinesIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" className="filterPanelTitleFilterIcon">
+      <path
+        d="M4 7h16M7 12h10M10 17h4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function EyeIcon() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" className="cardTextButtonEyeIcon">
@@ -1204,9 +1501,15 @@ function DashboardSkeleton() {
   return (
     <main className="appLayout">
       <aside className="sidebar">
-        <div>
-          <div className="skeleton skeletonText skeletonTitle" />
-          <div className="skeleton skeletonText skeletonSubtitle" />
+        <div className="sidebarBrand">
+          <Image
+            src="/hypr-logo-white.png"
+            alt="HYPR"
+            width={188}
+            height={48}
+            className="sidebarBrandLogo"
+            priority
+          />
         </div>
 
         <nav className="sidebarNav" aria-label="Carregando navegação">
@@ -1241,10 +1544,15 @@ function DashboardSkeleton() {
             <div key={`kpi-row2-skeleton-${idx}`} className="card skeleton skeletonBlock skeletonCard" />
           ))}
         </section>
-        <section className="gridCards homeAlertsRow">
-          {Array.from({ length: 2 }).map((_, idx) => (
-            <div key={`alert-skeleton-${idx}`} className="card skeleton skeletonBlock skeletonCard" />
-          ))}
+        <section className="homeAlertsSection" aria-hidden="true">
+          <div className="homeAlertsSectionHeader">
+            <div className="skeleton skeletonText skeletonEyebrow" />
+          </div>
+          <div className="gridCards homeAlertsRow">
+            {Array.from({ length: 2 }).map((_, idx) => (
+              <div key={`alert-skeleton-${idx}`} className="card skeleton skeletonBlock skeletonCard" />
+            ))}
+          </div>
         </section>
 
         <section className="gridTwo gridTwoCharts">
@@ -1309,6 +1617,10 @@ function HomeContent() {
     key: AttentionOutOfPeriodSortKey;
     direction: AttentionSortDirection;
   }>(() => parseOutOfPeriodSortParam(searchParams.get(URL_PARAM_OUT_SORT)));
+  const [campaignJourneySort, setCampaignJourneySort] = useState<{
+    key: CampaignJourneySortKey;
+    direction: AttentionSortDirection;
+  }>({ key: "total_plataformas", direction: "desc" });
   const [clientFilter, setClientFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CLIENTS)));
   const [csFilter, setCsFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CS)));
   const [campaignFilter, setCampaignFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CAMPAIGNS)));
@@ -1323,9 +1635,7 @@ function HomeContent() {
   const [campaignTypeFilter, setCampaignTypeFilter] = useState<string[]>(() =>
     parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE))
   );
-  const [hideOutOfPeriodCampaigns, setHideOutOfPeriodCampaigns] = useState(
-    () => searchParams.get(URL_PARAM_HIDE_OUT_OF_PERIOD) === "1"
-  );
+  const includeOutOfPeriodCampaigns = false;
   const [selectedViewMode, setSelectedViewMode] = useState<AnalysisViewMode>(() => {
     const paramView = searchParams.get(URL_PARAM_VIEW);
     return isValidAnalysisViewMode(paramView) ? paramView : "month";
@@ -1339,17 +1649,21 @@ function HomeContent() {
   });
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
-  const [isForceRefreshing, setIsForceRefreshing] = useState(false);
+  const [refreshPhase, setRefreshPhase] = useState<RefreshPhase>("idle");
   const [refreshRunStartedAt, setRefreshRunStartedAt] = useState<number | null>(null);
   const [refreshElapsedSeconds, setRefreshElapsedSeconds] = useState(0);
+  const [refreshRequestedAt, setRefreshRequestedAt] = useState<number | null>(null);
+  const [refreshObservedRunId, setRefreshObservedRunId] = useState<string | null>(null);
+  const [refreshObservedStartedAt, setRefreshObservedStartedAt] = useState<string | null>(null);
+  const [refreshHasSeenRunning, setRefreshHasSeenRunning] = useState(false);
   const [isDspsMenuExpanded, setIsDspsMenuExpanded] = useState(true);
+  const [isDashboardFiltersExpanded, setIsDashboardFiltersExpanded] = useState(false);
+  const [snapshotInfoOpen, setSnapshotInfoOpen] = useState(false);
+  const [dailyCostFocusedSeries, setDailyCostFocusedSeries] = useState<string | null>(null);
+  /** Hover no donut ou na legenda lateral (Distribuição): destaca fatia + linha. */
+  const [distributionHighlightPlatform, setDistributionHighlightPlatform] = useState<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
   const userEmail = user?.primaryEmailAddress?.emailAddress?.toLowerCase() ?? "";
-  const userDisplayName =
-    user?.firstName?.trim() ||
-    user?.fullName?.trim() ||
-    user?.primaryEmailAddress?.emailAddress?.split("@")[0] ||
-    "pessoa";
   const isAllowedDomain = userEmail.endsWith("@hypr.mobi");
   const shouldFetchData = isUserLoaded && isSignedIn && isAllowedDomain;
   const selectedDateRange = useMemo(
@@ -1367,24 +1681,41 @@ function HomeContent() {
   }, [selectedMonthKey, selectedViewMode, yearOptions]);
   const dashboardUrl = useMemo(() => {
     if (!shouldFetchData) return null;
-    const query = new URLSearchParams({
-      start: selectedDateRange.start,
-      end: selectedDateRange.end,
-    });
+    const query = new URLSearchParams({ start: selectedDateRange.start, end: selectedDateRange.end });
+    const setCsvQuery = (key: string, values: string[]) => {
+      const encoded = stringifyCsvList(values);
+      if (encoded) query.set(key, encoded);
+    };
+    setCsvQuery(URL_PARAM_CLIENTS, clientFilter);
+    setCsvQuery(URL_PARAM_CS, csFilter);
+    setCsvQuery(URL_PARAM_CAMPAIGNS, campaignFilter);
+    setCsvQuery(URL_PARAM_CAMPAIGN_STATUS, campaignStatusFilter);
+    setCsvQuery(URL_PARAM_FEATURES, featureFilter);
+    setCsvQuery(URL_PARAM_CAMPAIGN_TYPE, campaignTypeFilter);
     return `${apiBase}/api/dashboard?${query.toString()}`;
-  }, [apiBase, selectedDateRange.end, selectedDateRange.start, shouldFetchData]);
+  }, [
+    apiBase,
+    campaignFilter,
+    campaignStatusFilter,
+    campaignTypeFilter,
+    clientFilter,
+    csFilter,
+    featureFilter,
+    selectedDateRange.end,
+    selectedDateRange.start,
+    shouldFetchData,
+  ]);
   const { data, error, isLoading, isValidating, mutate } = useSWR<DashboardResponse>(dashboardUrl, fetcher, {
     keepPreviousData: true,
     revalidateOnFocus: false,
     revalidateOnReconnect: false,
     dedupingInterval: 60000,
     onSuccess: (nextData) => {
-      if (nextData?._meta?.snapshot_at) {
-        const parsed = Date.parse(nextData._meta.snapshot_at);
-        setLastUpdatedAt(Number.isNaN(parsed) ? Date.now() : parsed);
-        return;
+      if (!nextData?._meta?.snapshot_at) return;
+      const parsed = Date.parse(nextData._meta.snapshot_at);
+      if (!Number.isNaN(parsed)) {
+        setLastUpdatedAt(parsed);
       }
-      setLastUpdatedAt(Date.now());
     },
   });
   const refreshMetricsUrl = shouldFetchData ? `${apiBase}/api/dashboard/refresh/metrics` : null;
@@ -1422,7 +1753,8 @@ function HomeContent() {
     {
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
-      refreshInterval: (status) => (status?.running ? 2000 : 0),
+      refreshInterval: (status) =>
+        status?.running || refreshPhase === "starting" || refreshPhase === "running" ? 2000 : 0,
       dedupingInterval: 1000,
     }
   );
@@ -1436,14 +1768,14 @@ function HomeContent() {
     }
     return null;
   }, [data?._meta?.snapshot_at, lastUpdatedAt]);
-  const isRefreshRunning = Boolean(refreshStatus?.running) || isForceRefreshing;
-  const previousRefreshRunningRef = useRef(false);
+  const isRefreshRunning = refreshPhase === "starting" || refreshPhase === "running" || Boolean(refreshStatus?.running);
   const spendByPlatformChartRef = useRef<HTMLDivElement | null>(null);
   const distributionChartRef = useRef<HTMLDivElement | null>(null);
   const dailyCostChartRef = useRef<HTMLDivElement | null>(null);
   const noTokenDistributionChartRef = useRef<HTMLDivElement | null>(null);
   const outOfPeriodDistributionChartRef = useRef<HTMLDivElement | null>(null);
   const nexdUsageChartRef = useRef<HTMLDivElement | null>(null);
+  const snapshotInfoWrapRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!isUserLoaded) return;
@@ -1455,6 +1787,24 @@ function HomeContent() {
       void signOut({ redirectUrl: "/unauthorized" });
     }
   }, [isAllowedDomain, isSignedIn, isUserLoaded, router, signOut]);
+
+  useEffect(() => {
+    if (!snapshotInfoOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (snapshotInfoWrapRef.current && !snapshotInfoWrapRef.current.contains(e.target as Node)) {
+        setSnapshotInfoOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSnapshotInfoOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [snapshotInfoOpen]);
 
   useEffect(() => {
     const nextStackSort = parseStackSortParam(searchParams.get(URL_PARAM_STACK_SORT));
@@ -1470,7 +1820,6 @@ function HomeContent() {
       (FEATURE_OPTIONS as readonly string[]).includes(value)
     );
     const nextCampaignTypes = parseCsvList(searchParams.get(URL_PARAM_CAMPAIGN_TYPE));
-    const nextHideOutOfPeriod = searchParams.get(URL_PARAM_HIDE_OUT_OF_PERIOD) === "1";
     const nextView = searchParams.get(URL_PARAM_VIEW);
     const nextMonth = searchParams.get(URL_PARAM_MONTH);
     const normalizedView = isValidAnalysisViewMode(nextView) ? nextView : "month";
@@ -1508,7 +1857,6 @@ function HomeContent() {
     );
     setFeatureFilter((prev) => (prev.join("|") === nextFeatures.join("|") ? prev : nextFeatures));
     setCampaignTypeFilter((prev) => (prev.join("|") === nextCampaignTypes.join("|") ? prev : nextCampaignTypes));
-    setHideOutOfPeriodCampaigns((prev) => (prev === nextHideOutOfPeriod ? prev : nextHideOutOfPeriod));
     setSelectedViewMode((prev) => (prev === normalizedView ? prev : normalizedView));
     setSelectedMonthKey((prev) => (prev === normalizedMonth ? prev : normalizedMonth));
   }, [currentMonthKey, currentYearKey, searchParams]);
@@ -1538,7 +1886,8 @@ function HomeContent() {
     setQueryValue(URL_PARAM_CAMPAIGN_STATUS, stringifyCsvList(campaignStatusFilter));
     setQueryValue(URL_PARAM_FEATURES, stringifyCsvList(featureFilter));
     setQueryValue(URL_PARAM_CAMPAIGN_TYPE, stringifyCsvList(campaignTypeFilter));
-    setQueryValue(URL_PARAM_HIDE_OUT_OF_PERIOD, hideOutOfPeriodCampaigns ? "1" : null);
+    nextParams.delete(URL_PARAM_INCLUDE_OUT_OF_PERIOD);
+    nextParams.delete(URL_PARAM_HIDE_OUT_OF_PERIOD_LEGACY);
     setQueryValue(URL_PARAM_VIEW, selectedViewMode === "month" ? null : selectedViewMode);
     setQueryValue(URL_PARAM_MONTH, selectedMonthKey);
 
@@ -1558,7 +1907,6 @@ function HomeContent() {
     campaignFilter,
     campaignStatusFilter,
     featureFilter,
-    hideOutOfPeriodCampaigns,
     campaignTypeFilter,
     clientFilter,
     csFilter,
@@ -1602,23 +1950,77 @@ function HomeContent() {
     }
     return map;
   }, [data?.platform_pages]);
-  const outOfPeriodTokens = useMemo(() => {
-    const tokens = new Set<string>();
+  const normalizeOutOfPeriodKeyPart = (value: string | null | undefined) => String(value ?? "").trim().toLowerCase();
+  const outOfPeriodLineKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const row of data?.attention.out_of_period_rows ?? []) {
+      const key = [
+        normalizeOutOfPeriodKeyPart(row.platform),
+        normalizeOutOfPeriodKeyPart(row.token),
+        normalizeOutOfPeriodKeyPart(row.line),
+        normalizeOutOfPeriodKeyPart(row.cliente),
+        normalizeOutOfPeriodKeyPart(row.campanha),
+        normalizeOutOfPeriodKeyPart(row.account_management),
+      ].join("::");
+      keys.add(key);
+    }
+    return keys;
+  }, [data?.attention.out_of_period_rows]);
+  const outOfPeriodSpendByTokenPlatform = useMemo(() => {
+    const tokenMap = new Map<string, Map<string, number>>();
     for (const row of data?.attention.out_of_period_rows ?? []) {
       const token = String(row.token ?? "").trim();
-      if (!hasCampaignToken(token)) continue;
-      tokens.add(token);
+      const platform = String(row.platform ?? "").trim();
+      if (!hasCampaignToken(token) || !platform) continue;
+      const currentToken = tokenMap.get(token) ?? new Map<string, number>();
+      currentToken.set(platform, (currentToken.get(platform) ?? 0) + Number(row.gasto ?? 0));
+      tokenMap.set(token, currentToken);
     }
-    return tokens;
+    return tokenMap;
   }, [data?.attention.out_of_period_rows]);
-  const shouldHideOutOfPeriodCampaign = useCallback(
-    (token: string | null | undefined) => {
-      if (!hideOutOfPeriodCampaigns) return false;
-      const normalized = String(token ?? "").trim();
-      if (!hasCampaignToken(normalized)) return false;
-      return outOfPeriodTokens.has(normalized);
+  const adjustedJourneyRows = useMemo(() => {
+    if (includeOutOfPeriodCampaigns) return journeyRows;
+    const activePlatforms = data?.dashboard.active_platforms ?? [];
+    if (!activePlatforms.length) return journeyRows;
+    return journeyRows.map((row) => {
+      const token = String(row.token ?? "").trim();
+      if (!hasCampaignToken(token)) return row;
+      const platformAdjustments = outOfPeriodSpendByTokenPlatform.get(token);
+      if (!platformAdjustments) return row;
+      let changed = false;
+      const nextRow: JourneyRow = { ...row };
+      for (const platform of activePlatforms) {
+        const adjust = platformAdjustments.get(platform) ?? 0;
+        if (adjust <= 0) continue;
+        const currentSpend = Number(row[platform] ?? 0);
+        const nextSpend = Math.max(0, currentSpend - adjust);
+        if (nextSpend !== currentSpend) {
+          nextRow[platform] = nextSpend;
+          changed = true;
+        }
+      }
+      if (!changed) return row;
+      const recomputedTotal = activePlatforms.reduce((sum, platform) => sum + Number(nextRow[platform] ?? 0), 0);
+      nextRow.total_plataformas = recomputedTotal;
+      const invested = Number(row.investido ?? 0);
+      nextRow.pct_investido = invested > 0 ? (recomputedTotal / invested) * 100 : 0;
+      return nextRow;
+    });
+  }, [data?.dashboard.active_platforms, includeOutOfPeriodCampaigns, journeyRows, outOfPeriodSpendByTokenPlatform]);
+  const shouldHideOutOfPeriodPlatformRow = useCallback(
+    (row: PlatformPageRow, platformName: string | null) => {
+      if (includeOutOfPeriodCampaigns || !platformName) return false;
+      const key = [
+        normalizeOutOfPeriodKeyPart(platformName),
+        normalizeOutOfPeriodKeyPart(row.token),
+        normalizeOutOfPeriodKeyPart(row.line),
+        normalizeOutOfPeriodKeyPart(row.cliente),
+        normalizeOutOfPeriodKeyPart(row.campanha),
+        normalizeOutOfPeriodKeyPart(row.account_management),
+      ].join("::");
+      return outOfPeriodLineKeys.has(key);
     },
-    [hideOutOfPeriodCampaigns, outOfPeriodTokens]
+    [includeOutOfPeriodCampaigns, outOfPeriodLineKeys]
   );
   const hasDashboardFilters =
     clientFilter.length > 0 ||
@@ -1627,6 +2029,22 @@ function HomeContent() {
     campaignStatusFilter.length > 0 ||
     featureFilter.length > 0 ||
     campaignTypeFilter.length > 0;
+  const hasDashboardScopeFilters = hasDashboardFilters;
+  const activeDashboardFilterCount =
+    clientFilter.length +
+    csFilter.length +
+    campaignTypeFilter.length +
+    featureFilter.length +
+    campaignFilter.length +
+    campaignStatusFilter.length;
+  const clearDashboardFilters = useCallback(() => {
+    setClientFilter([]);
+    setCsFilter([]);
+    setFeatureFilter([]);
+    setCampaignTypeFilter([]);
+    setCampaignFilter([]);
+    setCampaignStatusFilter([]);
+  }, []);
   const rowMatchesDashboardFilters = useCallback(
     (
       row: JourneyRow,
@@ -1655,11 +2073,10 @@ function HomeContent() {
     },
     [tokenFeaturesByToken]
   );
-  const dashboardFilterOn = hasDashboardFilters || hideOutOfPeriodCampaigns;
   const dashboardFilteredRows = useMemo(() => {
-    if (!dashboardFilterOn) return journeyRows;
-    return journeyRows.filter((row) => {
-      if (shouldHideOutOfPeriodCampaign(row.token)) return false;
+    return adjustedJourneyRows.filter((row) => {
+      if (Number(row.total_plataformas ?? 0) <= 0) return false;
+      if (!hasDashboardFilters) return true;
       return rowMatchesDashboardFilters(row, {
         clients: clientFilter,
         cs: csFilter,
@@ -1672,18 +2089,18 @@ function HomeContent() {
   }, [
     campaignFilter,
     campaignStatusFilter,
-    dashboardFilterOn,
     featureFilter,
     campaignTypeFilter,
     clientFilter,
     csFilter,
-    journeyRows,
+    adjustedJourneyRows,
     rowMatchesDashboardFilters,
-    shouldHideOutOfPeriodCampaign,
+    hasDashboardFilters,
   ]);
 
   const filteredSpendByPlatform = useMemo(() => {
-    if (!dashboardFilteredRows.length || !dashboardFilterOn || !data) return null;
+    if (!hasDashboardScopeFilters || !data) return null;
+    if (!dashboardFilteredRows.length) return null;
     const platforms = data.dashboard.active_platforms;
     const sums: Record<string, number> = Object.fromEntries(platforms.map((p) => [p, 0]));
     for (const row of dashboardFilteredRows) {
@@ -1692,35 +2109,54 @@ function HomeContent() {
       }
     }
     return sums;
-  }, [dashboardFilterOn, dashboardFilteredRows, data]);
+  }, [hasDashboardScopeFilters, dashboardFilteredRows, data]);
 
   const spendData = useMemo(() => data?.dashboard.spend_by_platform ?? [], [data]);
   const chartData = useMemo(() => {
     const base = [...spendData].sort((a, b) => b.spend_brl - a.spend_brl);
-    if (!dashboardFilterOn || !filteredSpendByPlatform) {
-      return base.map((item) => ({ ...item, color: PLATFORM_COLORS[item.platform] ?? "#6366f1" }));
+    if (!hasDashboardScopeFilters || !filteredSpendByPlatform) {
+      return base.map((item) => ({ ...item, color: PLATFORM_COLORS[item.platform] ?? "#64748b" }));
     }
     return base
       .map((item) => ({
         ...item,
         spend_brl: filteredSpendByPlatform[item.platform] ?? 0,
-        color: PLATFORM_COLORS[item.platform] ?? "#6366f1",
+        color: PLATFORM_COLORS[item.platform] ?? "#64748b",
       }))
       .filter((item) => item.spend_brl > 0);
-  }, [dashboardFilterOn, filteredSpendByPlatform, spendData]);
-  const barChartData = useMemo(() => [...chartData].reverse(), [chartData]);
+  }, [hasDashboardScopeFilters, filteredSpendByPlatform, spendData]);
+  /** Barras horizontais: maior gasto no topo (mesma ordem que chartData — desc por valor). */
+  const barChartData = useMemo(() => [...chartData], [chartData]);
   const periodTotalSpend = useMemo(() => chartData.reduce((sum, row) => sum + row.spend_brl, 0), [chartData]);
   const dominantChartShare = useMemo(() => {
     if (!chartData.length || periodTotalSpend <= 0) return 0;
     return chartData[0].spend_brl / periodTotalSpend;
   }, [chartData, periodTotalSpend]);
   const shouldFallbackPieChart = chartData.length <= 1 || dominantChartShare >= 0.9;
-  const dailyChartPlatforms = useMemo(
-    () => (data?.dashboard.active_platforms ?? []).filter((platform) => platform !== "Hivestack"),
-    [data?.dashboard.active_platforms]
+  useEffect(() => {
+    setDistributionHighlightPlatform((cur) => {
+      if (cur === null) return null;
+      return chartData.some((r) => r.platform === cur) ? cur : null;
+    });
+  }, [chartData]);
+  const dailyChartPlatforms = useMemo(() => {
+    const platforms = (data?.dashboard.active_platforms ?? []).filter((platform) => platform !== "Hivestack");
+    const daily = hasDashboardScopeFilters ? (data?.dashboard.daily_filtered ?? data?.dashboard.daily ?? []) : (data?.dashboard.daily ?? []);
+    if (!daily.length || !platforms.length) return platforms;
+    const totals = new Map<string, number>(platforms.map((p) => [p, 0]));
+    for (const row of daily) {
+      for (const p of platforms) {
+        totals.set(p, (totals.get(p) ?? 0) + Number(row[p] ?? 0));
+      }
+    }
+    return [...platforms].sort((a, b) => (totals.get(b) ?? 0) - (totals.get(a) ?? 0));
+  }, [data?.dashboard.active_platforms, data?.dashboard.daily, data?.dashboard.daily_filtered, hasDashboardScopeFilters]);
+  const dailyChartRows = useMemo(
+    () => (hasDashboardScopeFilters ? (data?.dashboard.daily_filtered ?? data?.dashboard.daily ?? []) : (data?.dashboard.daily ?? [])),
+    [data?.dashboard.daily, data?.dashboard.daily_filtered, hasDashboardScopeFilters]
   );
   const hasDailyVariation = useMemo(() => {
-    const rows = data?.dashboard.daily ?? [];
+    const rows = dailyChartRows;
     if (rows.length <= 1) return false;
     const baseline = rows[0];
     const keys = ["total", ...dailyChartPlatforms];
@@ -1731,7 +2167,24 @@ function HomeContent() {
         return Math.abs(currentValue - baseValue) > 0.01;
       })
     );
-  }, [dailyChartPlatforms, data?.dashboard.daily]);
+  }, [dailyChartPlatforms, dailyChartRows]);
+  const dailyChartLegendPayload = useMemo<PlatformLegendEntry[]>(
+    () => [
+      ...dailyChartPlatforms.map((platform) => ({
+        value: platform,
+        color: PLATFORM_COLORS[platform] ?? "#4e1e9c",
+      })),
+      { value: "Total", color: PLATFORM_COLORS.Total ?? "#e2e8f0" },
+    ],
+    [dailyChartPlatforms]
+  );
+  useEffect(() => {
+    setDailyCostFocusedSeries((current) => {
+      if (!current) return null;
+      const allowed = new Set<string>(["total", ...dailyChartPlatforms]);
+      return allowed.has(current) ? current : null;
+    });
+  }, [dailyChartPlatforms]);
   const routeMatch = useMemo<{ page: NavKey; known: boolean }>(() => {
     const normalizedPath = pathname && pathname !== "/" ? pathname.replace(/\/+$/, "") : "/";
     if (normalizedPath === "/") return { page: "Dashboard", known: true };
@@ -1772,6 +2225,36 @@ function HomeContent() {
   const resolvedActivePage: NavKey = requestedPage;
 
   const campaignRows = useMemo(() => dashboardFilteredRows, [dashboardFilteredRows]);
+  const sortedCampaignRows = useMemo(() => {
+    const rows = [...campaignRows];
+    const { key, direction } = campaignJourneySort;
+    const normalizeString = (value: unknown) => String(value ?? "").trim();
+    const getValue = (row: JourneyRow): string | number => {
+      if (key.startsWith("platform:")) {
+        const platform = key.slice("platform:".length);
+        return Number(row[platform] ?? 0);
+      }
+      if (key === "investido" || key === "total_plataformas" || key === "pct_investido") {
+        return Number(row[key] ?? 0);
+      }
+      if (key === "campaign_start" || key === "campaign_end") {
+        const raw = normalizeString(row[key]);
+        const timestamp = raw ? Date.parse(raw) : Number.NaN;
+        return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+      }
+      return normalizeString(row[key]);
+    };
+    rows.sort((a, b) => {
+      const valueA = getValue(a);
+      const valueB = getValue(b);
+      const compare =
+        typeof valueA === "number" && typeof valueB === "number"
+          ? valueA - valueB
+          : String(valueA).localeCompare(String(valueB), "pt-BR", { numeric: true, sensitivity: "base" });
+      return direction === "asc" ? compare : -compare;
+    });
+    return rows;
+  }, [campaignJourneySort, campaignRows]);
 
   const csFilterOptions = useMemo(() => {
     return [...new Set(journeyRows.map(rowCsLabel))].sort((a, b) => a.localeCompare(b, "pt-BR"));
@@ -1965,12 +2448,39 @@ function HomeContent() {
     ]
   );
 
+  const finalizeRefreshRun = useCallback(
+    (result: "success" | "error", errorMessage?: string) => {
+      if (result === "success") {
+        void mutate();
+        void mutateRefreshMetrics();
+        setToast({ message: "Dados atualizados na fonte.", kind: "success" });
+      } else {
+        setToast({ message: errorMessage || "Atualizacao na fonte falhou.", kind: "error" });
+      }
+      setRefreshPhase("idle");
+      setRefreshRunStartedAt(null);
+      setRefreshElapsedSeconds(0);
+      setRefreshRequestedAt(null);
+      setRefreshObservedRunId(null);
+      setRefreshObservedStartedAt(null);
+      setRefreshHasSeenRunning(false);
+    },
+    [mutate, mutateRefreshMetrics]
+  );
+
   const handleRefresh = async () => {
     if (!dashboardUrl) return;
     if (isRefreshRunning) return;
-    setIsForceRefreshing(true);
-    setRefreshRunStartedAt(Date.now());
+
+    const startedAtLocal = Date.now();
+    setRefreshPhase("starting");
+    setRefreshRequestedAt(startedAtLocal);
+    setRefreshRunStartedAt(startedAtLocal);
     setRefreshElapsedSeconds(0);
+    setRefreshObservedRunId(null);
+    setRefreshObservedStartedAt(null);
+    setRefreshHasSeenRunning(false);
+
     try {
       const dashboardUri = new URL(dashboardUrl);
       const refreshQuery = new URLSearchParams();
@@ -1986,13 +2496,29 @@ function HomeContent() {
       if (!refreshResponse.ok) {
         throw new Error("Falha ao disparar atualizacao na fonte.");
       }
-      await mutateRefreshStatus();
+
+      const latestStatus = await mutateRefreshStatus();
+      if (latestStatus?.run_id) setRefreshObservedRunId(latestStatus.run_id);
+      if (latestStatus?.started_at) {
+        setRefreshObservedStartedAt(latestStatus.started_at);
+        const parsed = Date.parse(latestStatus.started_at);
+        if (!Number.isNaN(parsed)) setRefreshRunStartedAt(parsed);
+      }
+      if (latestStatus?.running) {
+        setRefreshPhase("running");
+        setRefreshHasSeenRunning(true);
+      }
       showToast("Atualizacao da fonte iniciada.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Nao foi possivel atualizar na fonte.";
-      showToast(message, "error");
-    } finally {
-      setIsForceRefreshing(false);
+      setToast({ message, kind: "error" });
+      setRefreshPhase("idle");
+      setRefreshRunStartedAt(null);
+      setRefreshElapsedSeconds(0);
+      setRefreshRequestedAt(null);
+      setRefreshObservedRunId(null);
+      setRefreshObservedStartedAt(null);
+      setRefreshHasSeenRunning(false);
     }
   };
 
@@ -2013,40 +2539,95 @@ function HomeContent() {
   }, [isRefreshRunning, refreshRunStartedAt]);
 
   useEffect(() => {
-    if (!refreshStatus?.started_at) return;
-    const parsed = Date.parse(refreshStatus.started_at);
-    if (!Number.isNaN(parsed)) {
-      setRefreshRunStartedAt(parsed);
+    if (refreshPhase !== "starting" && refreshPhase !== "running") return;
+    if (!refreshRequestedAt) return;
+
+    if (refreshStatus?.run_id && !refreshObservedRunId) {
+      setRefreshObservedRunId(refreshStatus.run_id);
     }
-  }, [refreshStatus?.started_at]);
+    if (refreshStatus?.started_at && !refreshObservedStartedAt) {
+      setRefreshObservedStartedAt(refreshStatus.started_at);
+    }
+    if (refreshStatus?.started_at) {
+      const parsed = Date.parse(refreshStatus.started_at);
+      if (!Number.isNaN(parsed)) {
+        setRefreshRunStartedAt(parsed);
+      }
+    }
+
+    if (refreshStatus?.running) {
+      setRefreshPhase("running");
+      setRefreshHasSeenRunning(true);
+    }
+
+    const backendStatus = String(refreshStatus?.status ?? "").toLowerCase();
+    const isTerminalStatus = backendStatus === "success" || backendStatus === "error";
+    const markerMatchesCurrentRun = (() => {
+      if (refreshObservedRunId && refreshStatus?.run_id) {
+        return refreshObservedRunId === refreshStatus.run_id;
+      }
+      if (refreshObservedStartedAt && refreshStatus?.started_at) {
+        return refreshObservedStartedAt === refreshStatus.started_at;
+      }
+      if (refreshStatus?.started_at) {
+        const parsed = Date.parse(refreshStatus.started_at);
+        return !Number.isNaN(parsed) && parsed >= refreshRequestedAt - 5000;
+      }
+      return refreshHasSeenRunning;
+    })();
+
+    if (isTerminalStatus && markerMatchesCurrentRun) {
+      if (backendStatus === "success") {
+        finalizeRefreshRun("success");
+      } else {
+        finalizeRefreshRun("error", refreshStatus?.error || "Atualizacao na fonte falhou.");
+      }
+      return;
+    }
+
+    if (!refreshStatus?.running && refreshHasSeenRunning && markerMatchesCurrentRun) {
+      finalizeRefreshRun("success");
+    }
+  }, [
+    finalizeRefreshRun,
+    refreshHasSeenRunning,
+    refreshObservedRunId,
+    refreshObservedStartedAt,
+    refreshPhase,
+    refreshRequestedAt,
+    refreshStatus,
+  ]);
 
   useEffect(() => {
-    const wasRunning = previousRefreshRunningRef.current;
-    const isRunningNow = Boolean(refreshStatus?.running);
-    if (wasRunning && !isRunningNow) {
-      if (refreshStatus?.status === "success") {
-        void mutate();
-        void mutateRefreshMetrics();
-        showToast("Dados atualizados na fonte.");
-      } else if (refreshStatus?.status === "error") {
-        showToast(refreshStatus.error || "Atualizacao na fonte falhou.", "error");
-      }
-      setRefreshRunStartedAt(null);
-      setRefreshElapsedSeconds(0);
+    if (refreshPhase !== "starting" || !refreshRequestedAt) return;
+    const timeoutMs = 30000;
+    const elapsedMs = Date.now() - refreshRequestedAt;
+    const remainingMs = timeoutMs - elapsedMs;
+    if (remainingMs <= 0) {
+      finalizeRefreshRun("error", "Nao foi possivel confirmar inicio da atualizacao.");
+      return;
     }
-    previousRefreshRunningRef.current = isRunningNow;
-  }, [refreshStatus, mutate, mutateRefreshMetrics]);
+    const timeoutId = setTimeout(() => {
+      finalizeRefreshRun("error", "Nao foi possivel confirmar inicio da atualizacao.");
+    }, remainingMs);
+    return () => clearTimeout(timeoutId);
+  }, [finalizeRefreshRun, refreshPhase, refreshRequestedAt]);
 
   useEffect(() => {
     if (routeMatch.known) return;
     router.replace("/");
   }, [routeMatch.known, router]);
 
-  const getBudgetForPlatform = (platform: string, spent: number) => {
+  const getBudgetForPlatform = (
+    platform: string,
+    spent: number,
+    options?: { preferDisplayedSpend?: boolean }
+  ) => {
     const entry =
       platform === GENERAL_BUDGET_KEY ? data?.budget.general : (data?.budget.platforms?.[platform] ?? null);
     const target = entry?.target_brl ?? null;
-    const spentValue = entry?.spent_brl ?? spent;
+    const shouldPreferDisplayedSpend = options?.preferDisplayedSpend ?? false;
+    const spentValue = shouldPreferDisplayedSpend ? spent : (entry?.spent_brl ?? spent);
     const progress = target && target > 0 ? (spentValue / target) * 100 : null;
     const remaining = target !== null ? target - spentValue : null;
     const fromApi = platform !== GENERAL_BUDGET_KEY ? data?.budget.share_percent?.[platform] : undefined;
@@ -2179,15 +2760,42 @@ function HomeContent() {
     return attentionOutOfPeriodSort.direction === "asc" ? "↑" : "↓";
   };
 
+  const toggleCampaignJourneySort = (key: CampaignJourneySortKey) => {
+    setCampaignJourneySort((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
+      }
+      const defaultDirection: AttentionSortDirection =
+        key === "token" ||
+        key === "cliente" ||
+        key === "campanha" ||
+        key === "account_management" ||
+        key === "status" ||
+        key === "campaign_start" ||
+        key === "campaign_end"
+          ? "asc"
+          : "desc";
+      return { key, direction: defaultDirection };
+    });
+  };
+
+  const campaignJourneySortIndicator = (key: CampaignJourneySortKey) => {
+    if (campaignJourneySort.key !== key) return "↕";
+    return campaignJourneySort.direction === "asc" ? "↑" : "↓";
+  };
+
+  const detailedPlatformName = ["StackAdapt", "DV360", "Xandr", "Hivestack"].includes(resolvedActivePage)
+    ? resolvedActivePage
+    : null;
   const detailedPlatformRows = useMemo(() => {
     if (!data) return [] as PlatformPageRow[];
-    if (!["StackAdapt", "DV360", "Xandr", "Hivestack"].includes(resolvedActivePage)) return [] as PlatformPageRow[];
-    return data.platform_pages[resolvedActivePage]?.rows ?? [];
-  }, [data, resolvedActivePage]);
+    if (!detailedPlatformName) return [] as PlatformPageRow[];
+    return data.platform_pages[detailedPlatformName]?.rows ?? [];
+  }, [data, detailedPlatformName]);
 
   const platformRowMatchesDashboardFilters = useCallback(
     (row: PlatformPageRow) => {
-      if (shouldHideOutOfPeriodCampaign(row.token)) return false;
+      if (shouldHideOutOfPeriodPlatformRow(row, detailedPlatformName)) return false;
       const pseudo = journeySnapshotForPlatformRow(row, journeyByToken);
       return rowMatchesDashboardFilters(pseudo, {
         clients: clientFilter,
@@ -2207,7 +2815,8 @@ function HomeContent() {
       featureFilter,
       campaignTypeFilter,
       rowMatchesDashboardFilters,
-      shouldHideOutOfPeriodCampaign,
+      detailedPlatformName,
+      shouldHideOutOfPeriodPlatformRow,
     ]
   );
 
@@ -2236,9 +2845,8 @@ function HomeContent() {
   );
 
   const filteredDetailedPlatformRows = useMemo(() => {
-    if (!dashboardFilterOn) return detailedPlatformRows;
     return detailedPlatformRows.filter(platformRowMatchesDashboardFilters);
-  }, [dashboardFilterOn, detailedPlatformRows, platformRowMatchesDashboardFilters]);
+  }, [detailedPlatformRows, platformRowMatchesDashboardFilters]);
 
   const detailedPlatformDerived = useMemo(() => {
     const rows = filteredDetailedPlatformRows;
@@ -2345,7 +2953,7 @@ function HomeContent() {
       .map(([platform, spend_brl]) => ({
         platform,
         spend_brl,
-        color: PLATFORM_COLORS[platform] ?? "#6366f1",
+        color: PLATFORM_COLORS[platform] ?? "#4e1e9c",
       }))
       .sort((a, b) => b.spend_brl - a.spend_brl);
   }, [noTokenRows]);
@@ -2426,13 +3034,24 @@ function HomeContent() {
       .map(([platform, spend_brl]) => ({
         platform,
         spend_brl,
-        color: PLATFORM_COLORS[platform] ?? "#6366f1",
+        color: PLATFORM_COLORS[platform] ?? "#4e1e9c",
       }))
       .sort((a, b) => b.spend_brl - a.spend_brl);
   }, [outOfPeriodRows]);
   const outOfPeriodPieTotal = useMemo(
     () => outOfPeriodPieChartData.reduce((sum, row) => sum + row.spend_brl, 0),
     [outOfPeriodPieChartData]
+  );
+  const homeNoTokenAlertCount = noTokenRows.length;
+  const homeNoTokenAlertTotal = useMemo(
+    () => noTokenRows.reduce((sum, row) => sum + Number(row.gasto ?? 0), 0),
+    [noTokenRows]
+  );
+  const homeOutOfPeriodAlertRows = useMemo(() => outOfPeriodRows, [outOfPeriodRows]);
+  const homeOutOfPeriodAlertCount = homeOutOfPeriodAlertRows.length;
+  const homeOutOfPeriodAlertTotal = useMemo(
+    () => homeOutOfPeriodAlertRows.reduce((sum, row) => sum + Number(row.gasto ?? 0), 0),
+    [homeOutOfPeriodAlertRows]
   );
 
   if (!isUserLoaded) return <SessionLoading message="Validando sessão..." />;
@@ -2445,9 +3064,26 @@ function HomeContent() {
   const dashboardErrorMessage =
     error instanceof Error ? error.message : "Nao foi possivel sincronizar os dados no momento.";
   const dashboardErrorIsTimeout = dashboardErrorMessage.toLowerCase().includes("timeout");
-  const periodRangeLabel = data
-    ? `${formatDateBr(data.period.start)} → ${formatDateBr(data.period.end)}`
-    : `${formatDateBr(selectedDateRange.start)} → ${formatDateBr(selectedDateRange.end)}`;
+  const periodStart = data?.period.start ?? selectedDateRange.start;
+  const periodEnd = data?.period.end ?? selectedDateRange.end;
+  const periodRangeCompactLabel =
+    selectedViewMode === "year"
+      ? `Ano completo • ${formatDateBrShort(periodStart)} → ${formatDateBrShort(periodEnd)}`
+      : `${formatDateBrShort(periodStart)} → ${formatDateBrShort(periodEnd)}`;
+  const periodHeroLabel =
+    selectedViewMode === "year"
+      ? `${isValidYearKey(selectedMonthKey) ? selectedMonthKey : getCurrentYearKey()}`
+      : capitalizeFirst(formatMonthKeyLabel(selectedMonthKey));
+  const snapshotAgeMinutes = displayedSnapshotAt ? Math.max(0, Math.floor((Date.now() - displayedSnapshotAt) / 60000)) : null;
+  const snapshotStatus = isRefreshRunning
+    ? { label: "Atualizando", tone: "processing" as const }
+    : !displayedSnapshotAt
+      ? { label: "Sem atualização", tone: "neutral" as const }
+      : snapshotAgeMinutes !== null && snapshotAgeMinutes <= 90
+        ? { label: "Atualizado", tone: "ok" as const }
+        : snapshotAgeMinutes !== null && snapshotAgeMinutes <= 240
+          ? { label: "Em atraso", tone: "warn" as const }
+          : { label: "Desatualizado", tone: "danger" as const };
 
   const renderDashboardPage = () => {
     if (!data) return null;
@@ -2462,8 +3098,10 @@ function HomeContent() {
         ...data.dashboard.active_platforms,
         "Total Plataformas",
         "% Investido",
+        "Start date campanha",
+        "End date campanha",
       ];
-      const rowsToExport = campaignRows.map((row) => [
+      const rowsToExport = sortedCampaignRows.map((row) => [
         row.token,
         row.cliente,
         row.campanha,
@@ -2473,6 +3111,8 @@ function HomeContent() {
         ...data.dashboard.active_platforms.map((platform) => Number(row[platform] ?? 0)),
         row.total_plataformas,
         row.pct_investido,
+        row.campaign_start ?? "",
+        row.campaign_end ?? "",
       ]);
       downloadCsv("campaign-journey.csv", headers, rowsToExport);
     };
@@ -2480,21 +3120,8 @@ function HomeContent() {
     const firstRowDspCards: Array<{
       title: string;
       value: string;
-      subtitle: ReactNode;
-      badge?: string;
-      badgeTone?: "soon";
-      statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
-      dimmed?: boolean;
-      titleEmphasis?: boolean;
-      logoSrc?: string;
-      platformKey?: string;
-      spendBrl?: number;
-      href?: string;
-    }> = [];
-    const secondRowDspCards: Array<{
-      title: string;
-      value: string;
-      subtitle: ReactNode;
+      subtitle?: ReactNode;
+      usdLine?: string;
       badge?: string;
       badgeTone?: "soon";
       statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
@@ -2507,20 +3134,40 @@ function HomeContent() {
     }> = [];
     const dspFiltered = filteredSpendByPlatform;
 
+    const compareDspKpiCardsBySpendDesc = (
+      a: { title: string; spendBrl?: number; dimmed?: boolean; badgeTone?: "soon" },
+      b: { title: string; spendBrl?: number; dimmed?: boolean; badgeTone?: "soon" }
+    ) => {
+      const sa = a.dimmed && a.spendBrl == null ? Number.NEGATIVE_INFINITY : (a.spendBrl ?? 0);
+      const sb = b.dimmed && b.spendBrl == null ? Number.NEGATIVE_INFINITY : (b.spendBrl ?? 0);
+      if (sb !== sa) return sb - sa;
+      const soonA = a.badgeTone === "soon" ? 1 : 0;
+      const soonB = b.badgeTone === "soon" ? 1 : 0;
+      if (soonA !== soonB) return soonA - soonB;
+      if (Boolean(a.dimmed) !== Boolean(b.dimmed)) return Number(a.dimmed) - Number(b.dimmed);
+      return String(a.title).localeCompare(String(b.title), "pt-BR", { sensitivity: "base" });
+    };
+
     for (const name of ["StackAdapt", "DV360", "Xandr"] as const) {
       const result = data.platform_results[name];
       if (!result) continue;
       if (result.status === "ok") {
         const pageSpend = data.platform_pages[name]?.spend_brl ?? 0;
-        const cardSpend = dashboardFilterOn ? (dspFiltered?.[name] ?? 0) : pageSpend;
+        const cardSpend = hasDashboardScopeFilters ? (dspFiltered?.[name] ?? 0) : pageSpend;
+        const usdTotal = result.spend ?? 0;
+        const rate = data.exchange_rate_usd_brl;
+        const usdForSubtitle =
+          hasDashboardScopeFilters
+            ? pageSpend > 0
+              ? (cardSpend / pageSpend) * usdTotal
+              : rate > 0
+                ? cardSpend / rate
+                : 0
+            : usdTotal;
         firstRowDspCards.push({
           title: name,
           value: brl(cardSpend),
-          subtitle: dashboardFilterOn
-            ? cardSpend > 0
-              ? "Volume atribuível aos filtros"
-              : "Sem gasto com os filtros"
-            : `USD ${(result.spend ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`,
+          usdLine: `USD ${usdForSubtitle.toLocaleString("en-US", { maximumFractionDigits: 2 })}`,
           titleEmphasis: true,
           logoSrc: PLATFORM_LOGOS[name],
           platformKey: name,
@@ -2538,10 +3185,29 @@ function HomeContent() {
       }
     }
 
-    secondRowDspCards.push({
+    firstRowDspCards.sort(compareDspKpiCardsBySpendDesc);
+
+    const secondRowPlatformCards: Array<{
+      title: string;
+      value: string;
+      subtitle?: ReactNode;
+      usdLine?: string;
+      metric?: { label: string; value: string };
+      badge?: string;
+      badgeTone?: "soon";
+      statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
+      dimmed?: boolean;
+      titleEmphasis?: boolean;
+      logoSrc?: string;
+      platformKey?: string;
+      spendBrl?: number;
+      href?: string;
+    }> = [];
+
+    secondRowPlatformCards.push({
       title: "Amazon",
       value: brl(0),
-      subtitle: "USD 0.00",
+      subtitle: "Indisponível",
       badge: "Em breve",
       badgeTone: "soon",
       titleEmphasis: true,
@@ -2552,20 +3218,27 @@ function HomeContent() {
 
     const nexdPage = data.platform_pages.Nexd;
     const nexdStatus = data.nexd?.status;
-    if (!dashboardFilterOn) {
+    if (!hasDashboardFilters) {
       if (nexdPage) {
         const impressions = Math.round(Number(nexdPage.impressions ?? 0));
-        secondRowDspCards.push({
+        secondRowPlatformCards.push({
           title: "NEXD",
           value: brl(Number(nexdPage.spend_brl ?? 0)),
-          subtitle: `${impressions.toLocaleString("pt-BR")} impressões`,
+          usdLine:
+            nexdPage.spend_usd != null && Number.isFinite(Number(nexdPage.spend_usd))
+              ? `USD ${Number(nexdPage.spend_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+              : undefined,
+          metric: {
+            label: "Impressões",
+            value: impressions.toLocaleString("pt-BR"),
+          },
           titleEmphasis: true,
           logoSrc: PLATFORM_LOGOS.Nexd,
           platformKey: "Nexd",
           spendBrl: Number(nexdPage.spend_brl ?? 0),
         });
       } else if (nexdStatus === "error") {
-        secondRowDspCards.push({
+        secondRowPlatformCards.push({
           title: "NEXD",
           value: "—",
           subtitle: data.nexd?.message ?? "Falha ao carregar",
@@ -2576,7 +3249,7 @@ function HomeContent() {
           spendBrl: 0,
         });
       } else {
-        secondRowDspCards.push({
+        secondRowPlatformCards.push({
           title: "NEXD",
           value: brl(0),
           subtitle: "Sem dados",
@@ -2593,17 +3266,18 @@ function HomeContent() {
     const hivestackPage = data.platform_pages.Hivestack;
     const hivestackStatus = data.platform_results.Hivestack?.status;
     if (hivestackPage) {
-      secondRowDspCards.push({
+      const hiveSpend = Number(hivestackPage.spend_brl ?? 0);
+      secondRowPlatformCards.push({
         title: "Hivestack",
-        value: brl(Number(hivestackPage.spend_brl ?? 0)),
-        subtitle: "Fonte BigQuery (BRL)",
+        value: brl(hiveSpend),
+        subtitle: hiveSpend <= 0 ? "Sem atividade no período" : "Consolidado em BRL",
         titleEmphasis: true,
         logoSrc: PLATFORM_LOGOS.Hivestack,
         platformKey: "Hivestack",
-        spendBrl: Number(hivestackPage.spend_brl ?? 0),
+        spendBrl: hiveSpend,
       });
     } else if (hivestackStatus === "error") {
-      secondRowDspCards.push({
+      secondRowPlatformCards.push({
         title: "Hivestack",
         value: "—",
         subtitle: data.platform_results.Hivestack?.message ?? "Falha ao carregar",
@@ -2614,7 +3288,7 @@ function HomeContent() {
         spendBrl: 0,
       });
     } else {
-      secondRowDspCards.push({
+      secondRowPlatformCards.push({
         title: "Hivestack",
         value: brl(0),
         subtitle: "Sem dados",
@@ -2627,9 +3301,12 @@ function HomeContent() {
       });
     }
 
-    const investedTotal = dashboardFilteredRows.reduce((sum, row) => sum + Number(row.investido ?? 0), 0);
+    const homeDspPlatformKpiCards = [...secondRowPlatformCards].sort(compareDspKpiCardsBySpendDesc);
 
-    const dspFilteredConsolidated = dashboardFilterOn
+    const investedBaseRows = hasDashboardScopeFilters ? dashboardFilteredRows : journeyRows;
+    const investedTotal = investedBaseRows.reduce((sum, row) => sum + Number(row.investido ?? 0), 0);
+
+    const dspFilteredConsolidated = hasDashboardScopeFilters
       ? data.dashboard.active_platforms.reduce((sum, p) => sum + (dspFiltered?.[p] ?? 0), 0)
       : data.total_brl;
     const IDEAL_TECH_COST_PCT = 12.5;
@@ -2640,147 +3317,175 @@ function HomeContent() {
     const consolidatedCard: {
       title: string;
       value: string;
-      subtitle: string;
+      subtitle?: string;
+      usdLine?: string;
       titleEmphasis: boolean;
       platformKey: string;
       spendBrl: number;
       variant: "premium";
+      summaryHighlight?: boolean;
     } = {
       title: "Consolidado",
-      value: brl(dashboardFilterOn ? dspFilteredConsolidated : data.total_brl),
-      subtitle: dashboardFilterOn
+      value: brl(hasDashboardScopeFilters ? dspFilteredConsolidated : data.total_brl),
+      subtitle: hasDashboardFilters
         ? "Soma das DSPs nos filtros selecionados · Nexd, Hivestack e Amazon não entram neste total"
-        : `USD 1 = R$ ${data.exchange_rate_usd_brl.toFixed(4)}`,
+        : undefined,
+      usdLine: hasDashboardScopeFilters
+        ? undefined
+        : `Câmbio: 1 USD = R$ ${data.exchange_rate_usd_brl.toLocaleString("pt-BR", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })}`,
       titleEmphasis: true,
       platformKey: GENERAL_BUDGET_KEY,
-      spendBrl: dashboardFilterOn ? dspFilteredConsolidated : data.total_brl,
+      spendBrl: hasDashboardScopeFilters ? dspFilteredConsolidated : data.total_brl,
       variant: "premium",
+      summaryHighlight: true,
     };
 
-    secondRowDspCards.push({
+    const homeInvestidoKpiCard = {
       title: "Investido",
       value: brl(investedTotal),
-      subtitle: dashboardFilterOn
+      subtitle: hasDashboardScopeFilters
         ? "Total investido das campanhas nos filtros selecionados"
         : "Total investido das campanhas ativas no período",
-      titleEmphasis: true,
-    });
+      titleEmphasis: true as const,
+      summaryHighlight: true as const,
+    };
 
-    secondRowDspCards.push({
+    const homeTechCostKpiCard = {
       title: "Tech Cost",
       value: techCostLabel,
       statusIndicator: {
         label: techCostPct === null ? "Sem base" : isTechCostWithinIdeal ? "Ideal" : "Acima",
         tone: techCostPct === null ? "neutral" : isTechCostWithinIdeal ? "success" : "danger",
-      },
+      } as const,
       subtitle:
         techCostPct === null
           ? "Sem investido para calcular"
           : (
-              <>
-                <span>
-                  Custo (<strong>{brl(dspFilteredConsolidated)}</strong>) sobre investido (
-                  <strong>{brl(investedTotal)}</strong>).
-                </span>
-                <span className="cardTechCostHint">Ideal: abaixo de {IDEAL_TECH_COST_PCT.toFixed(1).replace(".", ",")}%.</span>
-              </>
+              <div className="cardTechCostBreakdown">
+                <p className="cardTechCostBreakdownLine">
+                  Custo: <strong>{BRL_INTEGER_FORMATTER.format(dspFilteredConsolidated)}</strong>
+                </p>
+                <p className="cardTechCostBreakdownLine">
+                  Investido: <strong>{BRL_INTEGER_FORMATTER.format(investedTotal)}</strong>
+                </p>
+                <p className="cardTechCostBreakdownLine cardTechCostBreakdownLineHint">
+                  Ideal:{" "}
+                  <strong>
+                    &lt; {IDEAL_TECH_COST_PCT.toFixed(1).replace(".", ",")}%
+                  </strong>
+                </p>
+              </div>
             ),
-      titleEmphasis: true,
-    });
+      titleEmphasis: true as const,
+    };
 
     return (
       <>
-        <section className="panel panelSub filterPanelCard">
-          <h3>Filtros do dashboard</h3>
-          <p className="muted filterPanelHint">
-            Os filtros recalculam cards e gráficos de DSP. Com filtros ativos, NEXD é ocultada para
-            evitar leitura ambígua; o&nbsp;consolidado filtrado soma apenas DSPs.
-          </p>
-          <div className="filterToolbar">
-            <MultiSelectFilter
-              id="filter-client"
-              label="Cliente"
-              options={clients}
-              value={clientFilter}
-              onChange={setClientFilter}
-              placeholder="Todos os clientes"
-              disabledOptions={disabledClientOptions}
-            />
-            <MultiSelectFilter
-              id="filter-cs"
-              label="CS (Account Management)"
-              options={csFilterOptions}
-              value={csFilter}
-              onChange={setCsFilter}
-              placeholder="Todos os CS"
-              showAvatar
-              disabledOptions={disabledCsOptions}
-            />
-            <MultiSelectFilter
-              id="filter-feature"
-              label="Feature"
-              options={[...FEATURE_OPTIONS]}
-              value={featureFilter}
-              onChange={setFeatureFilter}
-              placeholder="Todas as features"
-              disabledOptions={disabledFeatureOptions}
-            />
-            <MultiSelectFilter
-              id="filter-campaign-type"
-              label="Produto Vendido"
-              options={productFilterOptions}
-              value={campaignTypeFilter}
-              onChange={setCampaignTypeFilter}
-              placeholder="Todos os produtos vendidos"
-              disabledOptions={disabledCampaignTypeOptions}
-            />
-            <MultiSelectFilter
-              id="filter-campaign"
-              label="Campanha"
-              options={campaignFilterOptions}
-              value={campaignFilter}
-              onChange={setCampaignFilter}
-              placeholder="Todas as campanhas"
-              disabledOptions={disabledCampaignOptions}
-            />
-            <MultiSelectFilter
-              id="filter-campaign-status"
-              label="Status da campanha"
-              options={campaignStatusOptions}
-              value={campaignStatusFilter}
-              onChange={setCampaignStatusFilter}
-              placeholder="Todos os status"
-              disabledOptions={disabledCampaignStatusOptions}
-            />
-            <div className="filterField filterFieldCheckbox">
-              <span className="filterFieldLabel">Visibilidade</span>
-              <label className="filterCheckboxField">
-                <input
-                  type="checkbox"
-                  checked={hideOutOfPeriodCampaigns}
-                  onChange={(event) => setHideOutOfPeriodCampaigns(event.target.checked)}
+        <section className="panel panelSub filterPanelCard filterPanelCardDashboard">
+          <button
+            type="button"
+            className="filterPanelHeader filterPanelHeaderToggle"
+            onClick={() => setIsDashboardFiltersExpanded((prev) => !prev)}
+            aria-expanded={isDashboardFiltersExpanded}
+            aria-controls="dashboard-filter-content"
+            aria-label={
+              isDashboardFiltersExpanded
+                ? "Ocultar filtros do dashboard"
+                : "Mostrar filtros do dashboard"
+            }
+          >
+            <span className="filterPanelHeaderTitleBlock">
+              <span className="filterPanelTitleRow" role="heading" aria-level={3}>
+                <FilterLinesIcon />
+                Filtros do dashboard
+              </span>
+            </span>
+            <span className="filterPanelHeaderActions">
+              <span className="filterPanelActiveCount">
+                Filtros ({activeDashboardFilterCount.toLocaleString("pt-BR")})
+              </span>
+              <span className="filterPanelToggleChevron" aria-hidden="true">
+                <FilterPanelDrawerChevron expanded={isDashboardFiltersExpanded} />
+              </span>
+            </span>
+          </button>
+          {isDashboardFiltersExpanded ? (
+            <div id="dashboard-filter-content" className="filterPanelBody">
+              <div className="filterToolbar filterToolbarDashboard">
+                <MultiSelectFilter
+                  id="filter-client"
+                  label="Cliente"
+                  options={clients}
+                  value={clientFilter}
+                  onChange={setClientFilter}
+                  placeholder="Todos os clientes"
+                  disabledOptions={disabledClientOptions}
+                  compact
                 />
-                <span>Ocultar campanhas fora do mês vigente</span>
-              </label>
+                <MultiSelectFilter
+                  id="filter-cs"
+                  label="CS"
+                  options={csFilterOptions}
+                  value={csFilter}
+                  onChange={setCsFilter}
+                  placeholder="Todos os CS"
+                  showAvatar
+                  disabledOptions={disabledCsOptions}
+                  compact
+                />
+                <MultiSelectFilter
+                  id="filter-campaign-type"
+                  label="Produto"
+                  options={productFilterOptions}
+                  value={campaignTypeFilter}
+                  onChange={setCampaignTypeFilter}
+                  placeholder="Todos os produtos"
+                  disabledOptions={disabledCampaignTypeOptions}
+                  compact
+                />
+                <MultiSelectFilter
+                  id="filter-feature"
+                  label="Feature"
+                  options={[...FEATURE_OPTIONS]}
+                  value={featureFilter}
+                  onChange={setFeatureFilter}
+                  placeholder="Todas as features"
+                  disabledOptions={disabledFeatureOptions}
+                  compact
+                />
+                <MultiSelectFilter
+                  id="filter-campaign"
+                  label="Campanha"
+                  options={campaignFilterOptions}
+                  value={campaignFilter}
+                  onChange={setCampaignFilter}
+                  placeholder="Todas as campanhas"
+                  disabledOptions={disabledCampaignOptions}
+                  compact
+                />
+                <MultiSelectFilter
+                  id="filter-campaign-status"
+                  label="Status"
+                  options={campaignStatusOptions}
+                  value={campaignStatusFilter}
+                  onChange={setCampaignStatusFilter}
+                  placeholder="Todos os status"
+                  disabledOptions={disabledCampaignStatusOptions}
+                  compact
+                />
+              </div>
+              <div className="filterPanelFooterBar">
+                {hasDashboardFilters ? (
+                  <button type="button" className="filterPanelClearAllButton" onClick={clearDashboardFilters}>
+                    Limpar tudo
+                  </button>
+                ) : null}
+              </div>
             </div>
-            {hasDashboardFilters || hideOutOfPeriodCampaigns ? (
-              <button
-                type="button"
-                className="button buttonGhost buttonSmall filterClearButton"
-                onClick={() => {
-                  setClientFilter([]);
-                  setCsFilter([]);
-                  setFeatureFilter([]);
-                  setCampaignTypeFilter([]);
-                  setCampaignFilter([]);
-                  setCampaignStatusFilter([]);
-                  setHideOutOfPeriodCampaigns(false);
-                }}
-              >
-                Limpar filtros
-              </button>
-            ) : null}
-          </div>
+          ) : null}
         </section>
 
         <section className="gridCards homeDspRow">
@@ -2789,112 +3494,136 @@ function HomeContent() {
               key={`${card.title}-${card.badge ?? "nobadge"}`}
               {...card}
               budget={
-                dashboardFilterOn || !card.platformKey
+                hasDashboardFilters || !card.platformKey
                   ? undefined
-                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0)
+                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0, {
+                      preferDisplayedSpend: hasDashboardScopeFilters,
+                    })
               }
             />
           ))}
         </section>
-        <section className="gridCards homeSummaryRow">
-          {secondRowDspCards.map((card) => (
+        <section className="gridCards homeDspPlatformsRow" aria-label="DSPs adicionais">
+          {homeDspPlatformKpiCards.map((card) => (
             <KpiCard
               key={`${card.title}-${card.badge ?? "nobadge"}`}
               {...card}
               budget={
-                dashboardFilterOn || !card.platformKey
+                hasDashboardFilters || !card.platformKey
                   ? undefined
-                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0)
+                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0, {
+                      preferDisplayedSpend: hasDashboardScopeFilters,
+                    })
               }
             />
           ))}
+        </section>
+        <section className="gridCards homeSummaryRow" aria-label="Totais do período">
+          <KpiCard key="dashboard-investido" {...homeInvestidoKpiCard} />
+          <KpiCard key="dashboard-tech-cost" {...homeTechCostKpiCard} />
           <KpiCard
             key={`${consolidatedCard.title}-${consolidatedCard.variant ?? "default"}`}
             {...consolidatedCard}
             budget={
-              dashboardFilterOn || !consolidatedCard.platformKey
+              hasDashboardFilters || !consolidatedCard.platformKey
                 ? undefined
-                : getBudgetForPlatform(consolidatedCard.platformKey, consolidatedCard.spendBrl ?? 0)
+                : getBudgetForPlatform(consolidatedCard.platformKey, consolidatedCard.spendBrl ?? 0, {
+                    preferDisplayedSpend: hasDashboardScopeFilters,
+                  })
             }
           />
         </section>
-        <section className="gridCards homeAlertsRow">
-          <div
-            className={`card alertNavCard alertSignalCard ${
-              data.attention.no_token_rows.length > 0 ? "alertSignalCardWarning" : "alertSignalCardSafe"
-            }`}
-          >
-            <button
-              className="cardTextButton alertCardTextButton"
-              type="button"
-              onClick={() => router.push("/lines-sem-token")}
-            >
-              <span>Ver mais</span>
-              <EyeIcon />
-            </button>
-            <p className="alertSignalBadge">
-              {data.attention.no_token_rows.length > 0 ? "Atenção necessária" : "Sem alerta"}
-            </p>
-            <p className="cardTitle">Lines sem token</p>
-            <p className="cardValue">{data.attention.no_token_rows.length.toLocaleString("pt-BR")}</p>
-            <p className="cardSubtitle">
-              {brl(data.attention.no_token_total_brl)} sem possibilidade de cruzamento
-            </p>
+        <section className="homeAlertsSection" aria-labelledby="home-dashboard-alerts-heading">
+          <div className="homeAlertsSectionHeader">
+            <h2 id="home-dashboard-alerts-heading" className="homeAlertsSectionTitle">
+              <span aria-hidden="true">{"\u26A0\uFE0F"}</span> Alertas
+            </h2>
           </div>
-          <div
-            className={`card alertNavCard alertSignalCard ${
-              data.attention.out_of_period_rows.length > 0 ? "alertSignalCardDanger" : "alertSignalCardSafe"
-            }`}
-          >
-            <button
-              className="cardTextButton alertCardTextButton"
-              type="button"
-              onClick={() => router.push("/gasto-fora-mes-vigente")}
+          <div className="gridCards homeAlertsRow">
+            <div
+              className={`card alertNavCard alertSignalCard ${
+                homeNoTokenAlertCount > 0 ? "alertSignalCardWarning" : "alertSignalCardSafe"
+              }`}
             >
-              <span>Ver mais</span>
-              <EyeIcon />
-            </button>
-            <p className="alertSignalBadge">
-              {data.attention.out_of_period_rows.length > 0 ? "Risco de vigência" : "Sem alerta"}
-            </p>
-            <p className="cardTitle">Gastos fora do mês</p>
-            <p className="cardValue">{data.attention.out_of_period_rows.length.toLocaleString("pt-BR")}</p>
-            <p className="cardSubtitle">Total impactado: {brl(data.attention.out_of_period_total_brl)}</p>
+              <p className="alertSignalBadge">
+                {homeNoTokenAlertCount > 0 ? "Atenção necessária" : "Sem alerta"}
+              </p>
+              <p className="cardValue alertNavCardValueLead">
+                {homeNoTokenAlertCount.toLocaleString("pt-BR")}
+              </p>
+              <p className="alertNavCardLabel">Lines sem token</p>
+              <p className="cardSubtitle alertNavCardImpact">
+                {brl(homeNoTokenAlertTotal)} impactados
+              </p>
+              <button
+                type="button"
+                className="alertCardDetailButton"
+                onClick={() => router.push("/lines-sem-token")}
+              >
+                Ver detalhes →
+              </button>
+            </div>
+            <div
+              className={`card alertNavCard alertSignalCard ${
+                homeOutOfPeriodAlertCount > 0 ? "alertSignalCardDanger" : "alertSignalCardSafe"
+              }`}
+            >
+              <p className="alertSignalBadge">
+                {homeOutOfPeriodAlertCount > 0 ? "Risco de vigência" : "Sem alerta"}
+              </p>
+              <p className="cardValue alertNavCardValueLead">
+                {homeOutOfPeriodAlertCount.toLocaleString("pt-BR")}
+              </p>
+              <p className="alertNavCardLabel">Gastos fora do mês</p>
+              <p className="cardSubtitle alertNavCardImpact">
+                {brl(homeOutOfPeriodAlertTotal)} impactados
+              </p>
+              <button
+                type="button"
+                className="alertCardDetailButton"
+                onClick={() => router.push("/gasto-fora-mes-vigente")}
+              >
+                Ver detalhes →
+              </button>
+            </div>
           </div>
         </section>
 
-        <section className="gridTwo">
+        <section className="gridTwo gridTwoCharts">
           <div className="panel panelChart">
-            <div className="panelHeading">
-              <div>
-                <h2>Gasto por plataforma</h2>
-                <p>Comparativo do mês corrente por DSP</p>
+            <div className="chartBlockHeading">
+              <div className="chartBlockHeadingTop">
+                <h2 className="chartBlockTitle">Gasto por plataforma</h2>
+                <div className="chartBlockExport" role="group" aria-label="Exportar gasto por plataforma">
+                  <button
+                    type="button"
+                    className="button buttonGhost buttonSmall chartExportButton"
+                    aria-label="Copiar gasto por plataforma como CSV"
+                    onClick={() =>
+                      copyObjectsAsCsv(
+                        "gasto por plataforma",
+                        chartData.map((entry) => ({
+                          plataforma: entry.platform,
+                          gasto_brl: entry.spend_brl.toFixed(2),
+                          pct_total:
+                            periodTotalSpend > 0 ? ((entry.spend_brl / periodTotalSpend) * 100).toFixed(2) : "0.00",
+                        }))
+                      )
+                    }
+                  >
+                    CSV
+                  </button>
+                  <button
+                    type="button"
+                    className="button buttonGhost buttonSmall chartExportButton"
+                    aria-label="Exportar gráfico de gasto por plataforma como PNG"
+                    onClick={() => exportChartAsPng(spendByPlatformChartRef.current, "gasto por plataforma")}
+                  >
+                    PNG
+                  </button>
+                </div>
               </div>
-              <div className="panelHeadingActions">
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall"
-                  onClick={() =>
-                    copyObjectsAsCsv(
-                      "gasto por plataforma",
-                      chartData.map((entry) => ({
-                        plataforma: entry.platform,
-                        gasto_brl: entry.spend_brl.toFixed(2),
-                        pct_total: periodTotalSpend > 0 ? ((entry.spend_brl / periodTotalSpend) * 100).toFixed(2) : "0.00",
-                      }))
-                    )
-                  }
-                >
-                  Copiar dados CSV
-                </button>
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall"
-                  onClick={() => exportChartAsPng(spendByPlatformChartRef.current, "gasto por plataforma")}
-                >
-                  Exportar PNG
-                </button>
-              </div>
+              <p className="chartBlockSubtitle">Valores absolutos (R$)</p>
             </div>
             {!chartData.length ? (
               <p className="alertInfo">Nenhum gasto em DSP com os filtros selecionados.</p>
@@ -2903,18 +3632,29 @@ function HomeContent() {
               className="chartWrap"
               ref={spendByPlatformChartRef}
               role="img"
-              aria-label={`Gráfico de gasto por plataforma no período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
+              aria-label={`Gasto por plataforma em valores absolutos (reais), período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
             >
               <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={barChartData} layout="vertical">
-                  <defs>
-                    <linearGradient id="platformBarGradient" x1="0" y1="0" x2="1" y2="0">
-                      <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.95} />
-                      <stop offset="100%" stopColor="#22c55e" stopOpacity={0.95} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="#334155" strokeDasharray="2 4" opacity={0.45} />
-                  <XAxis type="number" stroke="#94a3b8" tickFormatter={formatCurrencyAxisTick} />
+                <BarChart
+                  data={barChartData}
+                  layout="vertical"
+                  margin={{ top: 6, right: 58, bottom: 6, left: 2 }}
+                >
+                  <CartesianGrid
+                    vertical
+                    horizontal={false}
+                    stroke="rgba(148, 163, 184, 0.07)"
+                    strokeDasharray="2 10"
+                  />
+                  <XAxis
+                    type="number"
+                    stroke="rgba(148, 163, 184, 0.28)"
+                    tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
+                    tickFormatter={formatCurrencyAxisTick}
+                    tickCount={4}
+                    tickLine={false}
+                    axisLine={false}
+                  />
                   <YAxis
                     type="category"
                     dataKey="platform"
@@ -2924,11 +3664,35 @@ function HomeContent() {
                     axisLine={false}
                     tick={<PlatformYAxisTick />}
                   />
-                  <Tooltip content={<NumberTooltip totalValue={periodTotalSpend} />} />
-                  <Bar dataKey="spend_brl" name="Gasto" barSize={20} radius={[0, 10, 10, 0]}>
-                    {barChartData.map((entry) => (
-                      <Cell key={entry.platform} fill={entry.color ?? "url(#platformBarGradient)"} />
-                    ))}
+                  <Tooltip
+                    shared
+                    content={<NumberTooltip totalValue={periodTotalSpend} />}
+                    cursor={{ fill: "rgba(15, 23, 42, 0.28)", stroke: "none" }}
+                    offset={{ x: 18, y: 4 }}
+                    allowEscapeViewBox={{ x: false, y: true }}
+                    animationDuration={120}
+                  />
+                  <Bar
+                    dataKey="spend_brl"
+                    name="Gasto"
+                    barSize={20}
+                    radius={[0, 10, 10, 0]}
+                    label={{
+                      position: "right",
+                      fill: "#e2e8f0",
+                      fontSize: 11,
+                      fontWeight: 650,
+                      formatter: (label) => {
+                        const raw = Array.isArray(label) ? label[label.length - 1] : label;
+                        const n = typeof raw === "number" ? raw : Number(raw);
+                        return Number.isFinite(n) ? formatCurrencyAxisTick(n) : "";
+                      },
+                    }}
+                  >
+                    {barChartData.map((entry) => {
+                      const fill = entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b";
+                      return <Cell key={entry.platform} fill={fill} />;
+                    })}
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -2937,36 +3701,39 @@ function HomeContent() {
           </div>
 
           <div className="panel panelChart">
-            <div className="panelHeading">
-              <div>
-                <h2>Distribuição</h2>
-                <p>Participação de investimento</p>
+            <div className="chartBlockHeading">
+              <div className="chartBlockHeadingTop">
+                <h2 className="chartBlockTitle">Distribuição</h2>
+                <div className="chartBlockExport" role="group" aria-label="Exportar distribuição de investimento">
+                  <button
+                    type="button"
+                    className="button buttonGhost buttonSmall chartExportButton"
+                    aria-label="Copiar distribuição de investimento como CSV"
+                    onClick={() =>
+                      copyObjectsAsCsv(
+                        "distribuição de investimento",
+                        chartData.map((entry) => ({
+                          plataforma: entry.platform,
+                          gasto_brl: entry.spend_brl.toFixed(2),
+                          pct_total:
+                            periodTotalSpend > 0 ? ((entry.spend_brl / periodTotalSpend) * 100).toFixed(2) : "0.00",
+                        }))
+                      )
+                    }
+                  >
+                    CSV
+                  </button>
+                  <button
+                    type="button"
+                    className="button buttonGhost buttonSmall chartExportButton"
+                    aria-label="Exportar gráfico de distribuição como PNG"
+                    onClick={() => exportChartAsPng(distributionChartRef.current, "distribuição de investimento")}
+                  >
+                    PNG
+                  </button>
+                </div>
               </div>
-              <div className="panelHeadingActions">
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall"
-                  onClick={() =>
-                    copyObjectsAsCsv(
-                      "distribuição de investimento",
-                      chartData.map((entry) => ({
-                        plataforma: entry.platform,
-                        gasto_brl: entry.spend_brl.toFixed(2),
-                        pct_total: periodTotalSpend > 0 ? ((entry.spend_brl / periodTotalSpend) * 100).toFixed(2) : "0.00",
-                      }))
-                    )
-                  }
-                >
-                  Copiar dados CSV
-                </button>
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall"
-                  onClick={() => exportChartAsPng(distributionChartRef.current, "distribuição de investimento")}
-                >
-                  Exportar PNG
-                </button>
-              </div>
+              <p className="chartBlockSubtitle">% do total investido</p>
             </div>
             {!chartData.length ? (
               <p className="alertInfo">Nenhum gasto em DSP com os filtros selecionados.</p>
@@ -2975,17 +3742,30 @@ function HomeContent() {
               className="chartWrap"
               ref={distributionChartRef}
               role="img"
-              aria-label={`Gráfico de distribuição de gasto por plataforma no período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
+              aria-label={`Distribuição percentual do gasto por plataforma em relação ao total investido, período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
             >
               {shouldFallbackPieChart ? (
                 <div className="chartFallback">
                   <p className="chartFallbackTitle">Distribuição muito concentrada para donut.</p>
                   <p className="chartFallbackSubtitle">Mostrando proporções em barras para leitura mais clara.</p>
                   <div className="chartFallbackList">
-                    {chartData.map((entry) => {
+                    {chartData.map((entry, idx) => {
                       const pct = periodTotalSpend > 0 ? (entry.spend_brl / periodTotalSpend) * 100 : 0;
+                      const isDominant = idx === 0;
+                      const isHi =
+                        distributionHighlightPlatform !== null &&
+                        distributionHighlightPlatform === entry.platform;
+                      const dim =
+                        distributionHighlightPlatform !== null &&
+                        distributionHighlightPlatform !== entry.platform;
                       return (
-                        <div key={entry.platform} className="chartFallbackItem">
+                        <div
+                          key={entry.platform}
+                          className={`chartFallbackItem${isDominant ? " chartFallbackItemDominant" : ""}${isHi ? " chartFallbackItemHighlight" : ""}`}
+                          onMouseEnter={() => setDistributionHighlightPlatform(entry.platform)}
+                          onMouseLeave={() => setDistributionHighlightPlatform(null)}
+                          style={{ opacity: dim ? 0.35 : 1 }}
+                        >
                           <div className="chartFallbackItemHeader">
                             <span>{entry.platform}</span>
                             <span>{pct.toFixed(1)}%</span>
@@ -2993,7 +3773,10 @@ function HomeContent() {
                           <div className="chartFallbackBarTrack">
                             <div
                               className="chartFallbackBarFill"
-                              style={{ width: `${Math.min(100, Math.max(0, pct))}%`, backgroundColor: entry.color }}
+                              style={{
+                                width: `${Math.min(100, Math.max(0, pct))}%`,
+                                backgroundColor: entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b",
+                              }}
                             />
                           </div>
                         </div>
@@ -3002,34 +3785,105 @@ function HomeContent() {
                   </div>
                 </div>
               ) : (
-                <ResponsiveContainer width="100%" height={260}>
-                  <PieChart>
-                    <Pie
-                      data={chartData}
-                      dataKey="spend_brl"
-                      nameKey="platform"
-                      innerRadius={55}
-                      outerRadius={92}
-                      paddingAngle={2}
-                      stroke="rgba(15, 23, 42, 0.9)"
-                      strokeWidth={2}
-                      label={({ percent }) => (percent && percent >= 0.08 ? `${(percent * 100).toFixed(0)}%` : "")}
-                      labelLine={false}
-                    >
-                      {chartData.map((entry) => (
-                        <Cell key={entry.platform} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <text x="50%" y="46%" textAnchor="middle" dominantBaseline="middle" className="chartDonutLabel">
-                      Total período
-                    </text>
-                    <text x="50%" y="56%" textAnchor="middle" dominantBaseline="middle" className="chartDonutValue">
-                      {formatDonutCenterValue(periodTotalSpend)}
-                    </text>
-                    <Legend content={<PlatformLegend />} verticalAlign="bottom" align="center" />
-                    <Tooltip content={<NumberTooltip totalValue={periodTotalSpend} />} />
-                  </PieChart>
-                </ResponsiveContainer>
+                <div className="chartDistributionSplit">
+                  <div className="chartDistributionPie">
+                    <ResponsiveContainer width="100%" height={260}>
+                      <PieChart>
+                        <Pie
+                          data={chartData}
+                          dataKey="spend_brl"
+                          nameKey="platform"
+                          innerRadius={66}
+                          outerRadius={102}
+                          paddingAngle={2}
+                          stroke="rgba(28, 38, 47, 0.9)"
+                          strokeWidth={2}
+                          label={false}
+                          onMouseEnter={(_entry, index) => {
+                            const row = chartData[index];
+                            if (row?.platform) setDistributionHighlightPlatform(row.platform);
+                          }}
+                          onMouseLeave={() => setDistributionHighlightPlatform(null)}
+                        >
+                          {chartData.map((entry) => {
+                            const fill = entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b";
+                            const dim =
+                              distributionHighlightPlatform !== null &&
+                              distributionHighlightPlatform !== entry.platform;
+                            return (
+                              <Cell
+                                key={entry.platform}
+                                fill={fill}
+                                fillOpacity={dim ? 0.3 : 1}
+                                stroke={dim ? "rgba(28, 38, 47, 0.35)" : "rgba(28, 38, 47, 0.9)"}
+                              />
+                            );
+                          })}
+                        </Pie>
+                        <text
+                          x="50%"
+                          y="39%"
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                          className="chartDonutInvestidoLabel"
+                        >
+                          Total
+                        </text>
+                        <text
+                          x="50%"
+                          y="46%"
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                          className="chartDonutInvestidoLabel"
+                        >
+                          investido
+                        </text>
+                        <text
+                          x="50%"
+                          y="58%"
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                          className="chartDonutInvestidoValue"
+                        >
+                          {formatDonutCenterValue(periodTotalSpend)}
+                        </text>
+                        <Tooltip content={<NumberTooltip totalValue={periodTotalSpend} />} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <aside className="chartDistributionPctList" aria-label="Percentual por plataforma">
+                    {chartData.map((entry, idx) => {
+                      const pct = periodTotalSpend > 0 ? (entry.spend_brl / periodTotalSpend) * 100 : 0;
+                      const isDominant = idx === 0;
+                      const isHi =
+                        distributionHighlightPlatform !== null &&
+                        distributionHighlightPlatform === entry.platform;
+                      const dim =
+                        distributionHighlightPlatform !== null &&
+                        distributionHighlightPlatform !== entry.platform;
+                      const fill = entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b";
+                      return (
+                        <div
+                          key={entry.platform}
+                          className={`chartDistributionPctRow${isDominant ? " chartDistributionPctRowDominant" : ""}${isHi ? " chartDistributionPctRowHighlight" : ""}`}
+                          onMouseEnter={() => setDistributionHighlightPlatform(entry.platform)}
+                          onMouseLeave={() => setDistributionHighlightPlatform(null)}
+                          style={{ opacity: dim ? 0.38 : 1 }}
+                        >
+                          <span className="chartDistributionPctName">
+                            <span
+                              className="chartDistributionPctSwatch"
+                              style={{ backgroundColor: fill }}
+                              aria-hidden
+                            />
+                            {entry.platform}
+                          </span>
+                          <span className="chartDistributionPctValue">{pct.toFixed(1)}%</span>
+                        </div>
+                      );
+                    })}
+                  </aside>
+                </div>
               )}
             </div>
             )}
@@ -3037,43 +3891,45 @@ function HomeContent() {
         </section>
 
         <section className="panel panelChart">
-          <div className="panelHeading">
-            <div>
-              <h2>Custo dia a dia</h2>
-              <p>Evolução diária por plataforma</p>
+          <div className="chartBlockHeading">
+            <div className="chartBlockHeadingTop">
+              <h2 className="chartBlockTitle">Custo dia a dia</h2>
+              <div className="chartBlockExport" role="group" aria-label="Exportar custo dia a dia">
+                <button
+                  type="button"
+                  className="button buttonGhost buttonSmall chartExportButton"
+                  aria-label="Copiar custo dia a dia como CSV"
+                  onClick={() =>
+                    copyObjectsAsCsv(
+                      "custo dia a dia",
+                      dailyChartRows.map((row) => {
+                        const baseRow: Record<string, string | number> = {
+                          data: formatDateBr(String(row.date)),
+                          total_brl: Number(row.total ?? 0).toFixed(2),
+                        };
+                        for (const platform of dailyChartPlatforms) {
+                          baseRow[`${platform}_brl`] = Number(row[platform] ?? 0).toFixed(2);
+                        }
+                        return baseRow;
+                      })
+                    )
+                  }
+                >
+                  CSV
+                </button>
+                <button
+                  type="button"
+                  className="button buttonGhost buttonSmall chartExportButton"
+                  aria-label="Exportar gráfico de custo dia a dia como PNG"
+                  onClick={() => exportChartAsPng(dailyCostChartRef.current, "custo dia a dia")}
+                >
+                  PNG
+                </button>
+              </div>
             </div>
-            <div className="panelHeadingActions">
-              <button
-                type="button"
-                className="button buttonGhost buttonSmall"
-                onClick={() =>
-                  copyObjectsAsCsv(
-                    "custo dia a dia",
-                    data.dashboard.daily.map((row) => {
-                      const baseRow: Record<string, string | number> = {
-                        data: formatDateBr(String(row.date)),
-                        total_brl: Number(row.total ?? 0).toFixed(2),
-                      };
-                      for (const platform of dailyChartPlatforms) {
-                        baseRow[`${platform}_brl`] = Number(row[platform] ?? 0).toFixed(2);
-                      }
-                      return baseRow;
-                    })
-                  )
-                }
-              >
-                Copiar dados CSV
-              </button>
-              <button
-                type="button"
-                className="button buttonGhost buttonSmall"
-                onClick={() => exportChartAsPng(dailyCostChartRef.current, "custo dia a dia")}
-              >
-                Exportar PNG
-              </button>
-            </div>
+            <p className="chartBlockSubtitle">Evolução diária por plataforma</p>
           </div>
-          {!data.dashboard.daily.length ? (
+          {!dailyChartRows.length ? (
             <p className="alertInfo">Sem série diária disponível neste período.</p>
           ) : !hasDailyVariation ? (
             <p className="alertInfo">Sem variação diária neste período.</p>
@@ -3085,43 +3941,76 @@ function HomeContent() {
               aria-label={`Gráfico de custo diário por plataforma no período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
             >
               <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={data.dashboard.daily}>
-                  <CartesianGrid stroke="#334155" strokeDasharray="2 4" opacity={0.45} />
+                <LineChart data={dailyChartRows}>
+                  <CartesianGrid
+                    vertical
+                    horizontal={false}
+                    stroke="rgba(148, 163, 184, 0.07)"
+                    strokeDasharray="2 10"
+                  />
                   <XAxis
                     dataKey="date"
-                    stroke="#94a3b8"
+                    stroke="rgba(148, 163, 184, 0.28)"
+                    tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
                     tickFormatter={(value) => formatDateBr(String(value))}
+                    tickCount={6}
                     tickLine={false}
                     axisLine={false}
                   />
                   <YAxis
-                    stroke="#94a3b8"
+                    stroke="rgba(148, 163, 184, 0.28)"
+                    tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
                     tickFormatter={formatCurrencyAxisTick}
+                    tickCount={4}
                     tickLine={false}
                     axisLine={false}
                   />
-                  <Tooltip content={<NumberTooltip />} labelFormatter={(label) => formatDateBr(String(label))} />
-                  <Legend content={<PlatformLegend />} />
-                  {dailyChartPlatforms.map((platform) => (
-                    <Line
-                      key={platform}
-                      type="monotone"
-                      dataKey={platform}
-                      stroke={PLATFORM_COLORS[platform] ?? "#6366f1"}
-                      strokeWidth={2.5}
-                      dot={false}
-                      activeDot={{ r: 5, strokeWidth: 2, stroke: "#0f172a" }}
-                    />
-                  ))}
-                  <Line
-                    type="monotone"
-                    dataKey="total"
-                    stroke="#e2e8f0"
-                    strokeWidth={2.5}
-                    strokeDasharray="4 4"
-                    dot={false}
-                    activeDot={{ r: 5, strokeWidth: 2, stroke: "#0f172a" }}
+                  <Tooltip
+                    shared
+                    content={<NumberTooltip labelFormatter={(label) => formatDateBr(String(label))} />}
+                    cursor={{ fill: "rgba(15, 23, 42, 0.28)", stroke: "none" }}
+                    offset={{ x: 18, y: 4 }}
+                    allowEscapeViewBox={{ x: false, y: true }}
+                    animationDuration={120}
                   />
+                  <Legend
+                    content={
+                      <DailyCostLegend
+                        entries={dailyChartLegendPayload}
+                        activeKey={dailyCostFocusedSeries}
+                        onToggle={(seriesKey) =>
+                          setDailyCostFocusedSeries((current) => (current === seriesKey ? null : seriesKey))
+                        }
+                      />
+                    }
+                  />
+                  {dailyChartPlatforms.map((platform) => {
+                    if (dailyCostFocusedSeries !== null && dailyCostFocusedSeries !== platform) {
+                      return null;
+                    }
+                    return (
+                      <Line
+                        key={platform}
+                        type="monotone"
+                        dataKey={platform}
+                        stroke={PLATFORM_COLORS[platform] ?? "#4e1e9c"}
+                        strokeWidth={2.5}
+                        dot={false}
+                        activeDot={{ r: 5, strokeWidth: 2, stroke: "#1c262f" }}
+                      />
+                    );
+                  })}
+                  {dailyCostFocusedSeries === null || dailyCostFocusedSeries === "total" ? (
+                    <Line
+                      type="monotone"
+                      dataKey="total"
+                      stroke="#e2e8f0"
+                      strokeWidth={2.5}
+                      strokeDasharray="4 4"
+                      dot={false}
+                      activeDot={{ r: 5, strokeWidth: 2, stroke: "#1c262f" }}
+                    />
+                  ) : null}
                 </LineChart>
               </ResponsiveContainer>
             </div>
@@ -3156,28 +4045,117 @@ function HomeContent() {
 
           {data.journey_status === "error" ? (
             <p className="alertError">Erro ao ler planilha: {data.journey_message ?? "erro desconhecido"}</p>
-          ) : !campaignRows.length ? (
+          ) : !sortedCampaignRows.length ? (
             <p className="alertInfo">Nenhum token com gasto no mês corrente encontrado nas plataformas.</p>
           ) : (
             <div className="tableWrap">
               <table>
                 <thead>
                   <tr>
-                    <th>Token</th>
-                    <th>Cliente</th>
-                    <th>Campanha</th>
-                    <th>Account Management</th>
-                    <th>Status</th>
-                    <th>Investido</th>
+                    <th>
+                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("token")}>
+                        <span>Token</span>
+                        <span>{campaignJourneySortIndicator("token")}</span>
+                      </button>
+                    </th>
+                    <th>
+                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("cliente")}>
+                        <span>Cliente</span>
+                        <span>{campaignJourneySortIndicator("cliente")}</span>
+                      </button>
+                    </th>
+                    <th>
+                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("campanha")}>
+                        <span>Campanha</span>
+                        <span>{campaignJourneySortIndicator("campanha")}</span>
+                      </button>
+                    </th>
+                    <th>
+                      <button
+                        type="button"
+                        className="stackSortButton"
+                        onClick={() => toggleCampaignJourneySort("account_management")}
+                      >
+                        <span>Account Management</span>
+                        <span>{campaignJourneySortIndicator("account_management")}</span>
+                      </button>
+                    </th>
+                    <th>
+                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("status")}>
+                        <span>Status</span>
+                        <span>{campaignJourneySortIndicator("status")}</span>
+                      </button>
+                    </th>
+                    <th>
+                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("investido")}>
+                        <span>Investido</span>
+                        <span>{campaignJourneySortIndicator("investido")}</span>
+                      </button>
+                    </th>
                     {data.dashboard.active_platforms.map((platform) => (
-                      <th key={platform}>{platform}</th>
+                      <th key={platform}>
+                        <button
+                          type="button"
+                          className="stackSortButton"
+                          onClick={() => toggleCampaignJourneySort(`platform:${platform}`)}
+                        >
+                          <span>{platform}</span>
+                          <span>{campaignJourneySortIndicator(`platform:${platform}`)}</span>
+                        </button>
+                      </th>
                     ))}
-                    <th>Total Plataformas</th>
-                    <th>% Investido</th>
+                    <th>
+                      <button
+                        type="button"
+                        className="stackSortButton"
+                        onClick={() => toggleCampaignJourneySort("total_plataformas")}
+                      >
+                        <span>Total Plataformas</span>
+                        <span>{campaignJourneySortIndicator("total_plataformas")}</span>
+                      </button>
+                    </th>
+                    <th>
+                      <button
+                        type="button"
+                        className="stackSortButton"
+                        onClick={() => toggleCampaignJourneySort("pct_investido")}
+                      >
+                        <span>% Investido</span>
+                        <span>{campaignJourneySortIndicator("pct_investido")}</span>
+                      </button>
+                    </th>
+                    <th>
+                      <button
+                        type="button"
+                        className="stackSortButton"
+                        onClick={() => toggleCampaignJourneySort("campaign_start")}
+                      >
+                        <span>
+                          Start&nbsp;date
+                          <br />
+                          campanha
+                        </span>
+                        <span>{campaignJourneySortIndicator("campaign_start")}</span>
+                      </button>
+                    </th>
+                    <th>
+                      <button
+                        type="button"
+                        className="stackSortButton"
+                        onClick={() => toggleCampaignJourneySort("campaign_end")}
+                      >
+                        <span>
+                          End&nbsp;date
+                          <br />
+                          campanha
+                        </span>
+                        <span>{campaignJourneySortIndicator("campaign_end")}</span>
+                      </button>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
-                  {campaignRows.map((row, index) => (
+                  {sortedCampaignRows.map((row, index) => (
                     <tr
                       key={`${row.token}-${row.campanha}-${index}`}
                       className="campaignJourneyRow"
@@ -3234,6 +4212,8 @@ function HomeContent() {
                       ))}
                       <td>{brl(row.total_plataformas)}</td>
                       <td>{row.pct_investido.toFixed(1)}%</td>
+                      <td>{row.campaign_start ? formatDateBr(row.campaign_start) : "—"}</td>
+                      <td>{row.campaign_end ? formatDateBr(row.campaign_end) : "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -3257,20 +4237,20 @@ function HomeContent() {
       const usedPct = Math.max(0, Math.min(100, cap > 0 ? (impressions / cap) * 100 : 0));
       const remainingImpressions = Math.max(0, cap - impressions);
       const remainingPct = Math.max(0, 100 - usedPct);
-      const progressColor = usedPct >= 80 ? "#ef4444" : usedPct >= 60 ? "#f59e0b" : "#3b82f6";
+      const progressColor = usedPct >= 80 ? "#f5272b" : usedPct >= 60 ? "#edd900" : "#3397b9";
       const nexdFormatPieData = (page.layouts ?? [])
         .map((row, index) => ({
           name: row.layout,
           value: Number(row.estimated_cost_brl ?? 0),
           color: [
-            "#3b82f6",
-            "#06b6d4",
-            "#8b5cf6",
-            "#22c55e",
-            "#f59e0b",
-            "#ef4444",
-            "#14b8a6",
-            "#a855f7",
+            "#3397b9",
+            "#018376",
+            "#4e1e9c",
+            "#4cb050",
+            "#246c84",
+            "#edd900",
+            "#536872",
+            "#8fd4ea",
           ][index % 8],
         }))
         .filter((row) => row.value > 0);
@@ -3317,7 +4297,7 @@ function HomeContent() {
                   display: "flex",
                   justifyContent: "space-between",
                   gap: "12px",
-                  color: "#9fb0c8",
+                  color: "#a8b8c0",
                   fontSize: "0.95rem",
                 }}
               >
@@ -3380,7 +4360,7 @@ function HomeContent() {
                         innerRadius={62}
                         outerRadius={96}
                         paddingAngle={2}
-                        stroke="rgba(15, 23, 42, 0.7)"
+                        stroke="rgba(28, 38, 47, 0.7)"
                         strokeWidth={1}
                       >
                         {nexdFormatPieData.map((entry) => (
@@ -3448,7 +4428,7 @@ function HomeContent() {
         filteredTotalGasto,
       } = detailedPlatformDerived;
       const lineDetailFiltersActive =
-        dashboardFilterOn || stackAdaptSearch.trim() !== "" || dspLinesOnlyWithoutToken;
+        hasDashboardScopeFilters || hasDashboardFilters || stackAdaptSearch.trim() !== "" || dspLinesOnlyWithoutToken;
       const budget = getBudgetForPlatform(platformName, page.spend_brl);
       const handleExportDetailedLines = () => {
         const headers = [
@@ -3478,110 +4458,123 @@ function HomeContent() {
 
       return (
         <>
-          <section className="panel panelSub filterPanelCard">
-            <h3>Filtros do dashboard</h3>
-            <p className="muted filterPanelHint">
-              Os mesmos filtros da home (Cliente, CS, Feature, Produto Vendido, Campanha e Status). Eles
-              refinam os cards, os contadores e a tabela desta DSP; a busca e o chip
-              &quot;só sem token&quot; continuam valendo por cima.
-            </p>
-            <div className="filterToolbar">
-              <MultiSelectFilter
-                id={`dsp-filter-client-${platformName}`}
-                label="Cliente"
-                options={clients}
-                value={clientFilter}
-                onChange={setClientFilter}
-                placeholder="Todos os clientes"
-                disabledOptions={disabledClientOptions}
-              />
-              <MultiSelectFilter
-                id={`dsp-filter-cs-${platformName}`}
-                label="CS (Account Management)"
-                options={csFilterOptions}
-                value={csFilter}
-                onChange={setCsFilter}
-                placeholder="Todos os CS"
-                showAvatar
-                disabledOptions={disabledCsOptions}
-              />
-              <MultiSelectFilter
-                id={`dsp-filter-feature-${platformName}`}
-                label="Feature"
-                options={[...FEATURE_OPTIONS]}
-                value={featureFilter}
-                onChange={setFeatureFilter}
-                placeholder="Todas as features"
-                disabledOptions={disabledFeatureOptions}
-              />
-              <MultiSelectFilter
-                id={`dsp-filter-campaign-type-${platformName}`}
-                label="Produto Vendido"
-                options={productFilterOptions}
-                value={campaignTypeFilter}
-                onChange={setCampaignTypeFilter}
-                placeholder="Todos os produtos vendidos"
-                disabledOptions={disabledCampaignTypeOptions}
-              />
-              <MultiSelectFilter
-                id={`dsp-filter-campaign-${platformName}`}
-                label="Campanha"
-                options={campaignFilterOptions}
-                value={campaignFilter}
-                onChange={setCampaignFilter}
-                placeholder="Todas as campanhas"
-                disabledOptions={disabledCampaignOptions}
-              />
-              <MultiSelectFilter
-                id={`dsp-filter-campaign-status-${platformName}`}
-                label="Status da campanha"
-                options={campaignStatusOptions}
-                value={campaignStatusFilter}
-                onChange={setCampaignStatusFilter}
-                placeholder="Todos os status"
-                disabledOptions={disabledCampaignStatusOptions}
-              />
-              <div className="filterField filterFieldCheckbox">
-                <span className="filterFieldLabel">Visibilidade</span>
-                <label className="filterCheckboxField">
-                  <input
-                    type="checkbox"
-                    checked={hideOutOfPeriodCampaigns}
-                    onChange={(event) => setHideOutOfPeriodCampaigns(event.target.checked)}
+          <section className="panel panelSub filterPanelCard filterPanelCardDashboard">
+            <button
+              type="button"
+              className="filterPanelHeader filterPanelHeaderToggle"
+              onClick={() => setIsDashboardFiltersExpanded((prev) => !prev)}
+              aria-expanded={isDashboardFiltersExpanded}
+              aria-controls={`dsp-dashboard-filter-content-${platformName}`}
+              aria-label={
+                isDashboardFiltersExpanded
+                  ? "Ocultar filtros do dashboard"
+                  : "Mostrar filtros do dashboard"
+              }
+            >
+              <span className="filterPanelHeaderTitleBlock">
+                <span className="filterPanelTitleRow" role="heading" aria-level={3}>
+                  <FilterLinesIcon />
+                  Filtros do dashboard
+                </span>
+              </span>
+              <span className="filterPanelHeaderActions">
+                <span className="filterPanelActiveCount">
+                  Filtros ({activeDashboardFilterCount.toLocaleString("pt-BR")})
+                </span>
+                <span className="filterPanelToggleChevron" aria-hidden="true">
+                  <FilterPanelDrawerChevron expanded={isDashboardFiltersExpanded} />
+                </span>
+              </span>
+            </button>
+            {isDashboardFiltersExpanded ? (
+              <div id={`dsp-dashboard-filter-content-${platformName}`} className="filterPanelBody">
+                <div className="filterToolbar filterToolbarDashboard">
+                  <MultiSelectFilter
+                    id={`dsp-filter-client-${platformName}`}
+                    label="Cliente"
+                    options={clients}
+                    value={clientFilter}
+                    onChange={setClientFilter}
+                    placeholder="Todos os clientes"
+                    disabledOptions={disabledClientOptions}
+                    compact
                   />
-                  <span>Ocultar campanhas fora do mês vigente</span>
-                </label>
+                  <MultiSelectFilter
+                    id={`dsp-filter-cs-${platformName}`}
+                    label="CS"
+                    options={csFilterOptions}
+                    value={csFilter}
+                    onChange={setCsFilter}
+                    placeholder="Todos os CS"
+                    showAvatar
+                    disabledOptions={disabledCsOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id={`dsp-filter-campaign-type-${platformName}`}
+                    label="Produto"
+                    options={productFilterOptions}
+                    value={campaignTypeFilter}
+                    onChange={setCampaignTypeFilter}
+                    placeholder="Todos os produtos"
+                    disabledOptions={disabledCampaignTypeOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id={`dsp-filter-feature-${platformName}`}
+                    label="Feature"
+                    options={[...FEATURE_OPTIONS]}
+                    value={featureFilter}
+                    onChange={setFeatureFilter}
+                    placeholder="Todas as features"
+                    disabledOptions={disabledFeatureOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id={`dsp-filter-campaign-${platformName}`}
+                    label="Campanha"
+                    options={campaignFilterOptions}
+                    value={campaignFilter}
+                    onChange={setCampaignFilter}
+                    placeholder="Todas as campanhas"
+                    disabledOptions={disabledCampaignOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id={`dsp-filter-campaign-status-${platformName}`}
+                    label="Status"
+                    options={campaignStatusOptions}
+                    value={campaignStatusFilter}
+                    onChange={setCampaignStatusFilter}
+                    placeholder="Todos os status"
+                    disabledOptions={disabledCampaignStatusOptions}
+                    compact
+                  />
+                </div>
+                <div className="filterPanelFooterBar">
+                  {hasDashboardFilters ? (
+                    <button type="button" className="filterPanelClearAllButton" onClick={clearDashboardFilters}>
+                      Limpar tudo
+                    </button>
+                  ) : null}
+                </div>
               </div>
-              {hasDashboardFilters || hideOutOfPeriodCampaigns ? (
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall filterClearButton"
-                  onClick={() => {
-                    setClientFilter([]);
-                    setCsFilter([]);
-                    setFeatureFilter([]);
-                    setCampaignTypeFilter([]);
-                    setCampaignFilter([]);
-                    setCampaignStatusFilter([]);
-                    setHideOutOfPeriodCampaigns(false);
-                  }}
-                >
-                  Limpar filtros
-                </button>
-              ) : null}
-            </div>
+            ) : null}
           </section>
 
           <section className="gridCards">
             <KpiCard
               title={platformName}
               value={brl(lineDetailFiltersActive ? filteredTotalGasto : page.spend_brl)}
+              usdLine={
+                !lineDetailFiltersActive && page.currency === "USD"
+                  ? `USD ${(page.spend_usd ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+                  : undefined
+              }
               subtitle={
                 lineDetailFiltersActive
                   ? "Subtotal em BRL das lines exibidas na tabela (após filtros e busca)."
-                  : page.currency === "USD"
-                    ? `USD ${(page.spend_usd ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
-                    : "Consolidado no período"
+                  : "Consolidado no período"
               }
               titleEmphasis
               logoSrc={PLATFORM_LOGOS[platformName]}
@@ -4013,7 +5006,7 @@ function HomeContent() {
                       innerRadius={55}
                       outerRadius={92}
                       paddingAngle={2}
-                      stroke="rgba(15, 23, 42, 0.9)"
+                      stroke="rgba(28, 38, 47, 0.9)"
                       strokeWidth={2}
                     >
                       {noTokenPieChartData.map((entry) => (
@@ -4221,7 +5214,7 @@ function HomeContent() {
                       innerRadius={55}
                       outerRadius={92}
                       paddingAngle={2}
-                      stroke="rgba(15, 23, 42, 0.9)"
+                      stroke="rgba(28, 38, 47, 0.9)"
                       strokeWidth={2}
                     >
                       {outOfPeriodPieChartData.map((entry) => (
@@ -4241,10 +5234,6 @@ function HomeContent() {
 
         <section className="panel panelSub filterPanelCard">
           <h3>Filtros do dashboard</h3>
-          <p className="muted filterPanelHint">
-            Os mesmos filtros da home, DSPS e DeepDive. Eles refinam os cards e a tabela desta tela;
-            a busca e o chip de DSP continuam valendo por cima.
-          </p>
           <div className="filterToolbar">
             <MultiSelectFilter
               id="out-filter-client"
@@ -4522,9 +5511,15 @@ function HomeContent() {
   return (
     <main className="appLayout">
       <aside className="sidebar">
-        <div>
-          <p className="sidebarTitle">Painel de Custos</p>
-          <p className="sidebarSubtitle">{periodRangeLabel}</p>
+        <div className="sidebarBrand">
+          <Image
+            src="/hypr-logo-white.png"
+            alt="HYPR"
+            width={188}
+            height={48}
+            className="sidebarBrandLogo"
+            priority
+          />
         </div>
         <nav className="sidebarNav" aria-label="Navegacao principal">
           <section className="sidebarGroup" aria-label="Dsps">
@@ -4556,77 +5551,129 @@ function HomeContent() {
       </aside>
 
       <section className="content">
-        <header className="header">
-          <div className="headerMain">
-            <div>
-              {resolvedActivePage === "Dashboard" ? (
-                <p className="welcomeMessage">Olá, {userDisplayName}</p>
-              ) : null}
-              <h1>{NAV_LABELS[resolvedActivePage]}</h1>
-              <p className="muted">{periodRangeLabel}</p>
+        <div className="platformTopBar">
+          <div className="platformTopBarLeft">
+            <div className="platformTopBarSummary">
+              <p className="platformTopBarPeriod">{periodHeroLabel}</p>
+              <p className="platformTopBarPeriodRange">{periodRangeCompactLabel}</p>
             </div>
-            <label className="monthFilterControl">
-              <span className="monthFilterLabel">Período de análise</span>
-              <select
-                value={selectedViewMode}
-                onChange={(event) => {
-                  const nextMode = event.target.value as AnalysisViewMode;
-                  setSelectedViewMode(nextMode);
-                  setSelectedMonthKey((prev) => {
-                    if (nextMode === "year") {
-                      if (isValidYearKey(prev)) return prev;
-                      return currentYearKey;
-                    }
-                    if (isValidMonthKey(prev)) return prev;
-                    return currentMonthKey;
-                  });
-                }}
-                aria-label="Selecionar período de análise"
-              >
-                {ANALYSIS_VIEW_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="monthFilterControl">
-              <span className="monthFilterLabel">{selectedViewMode === "year" ? "Ano de análise" : "Mês de análise"}</span>
-              <select
-                value={selectedMonthKey}
-                onChange={(event) => setSelectedMonthKey(event.target.value)}
-                aria-label={selectedViewMode === "year" ? "Selecionar ano de análise" : "Selecionar mês de análise"}
-              >
-                {periodOptions.map((monthKey) => (
-                  <option key={monthKey} value={monthKey}>
-                    {selectedViewMode === "year" ? monthKey : formatMonthKeyLabel(monthKey)}
-                  </option>
-                ))}
-              </select>
-            </label>
           </div>
-          <div className="headerActions">
-            <div className="headerUserButtonWrap">
-              <UserButton />
+          <div className="platformTopBarRight">
+            <div className="platformTopBarFiltersColumn" ref={snapshotInfoWrapRef}>
+              <div className="platformTopBarFiltersInfoRow">
+                <button
+                  type="button"
+                  className="platformSnapshotInfoButton"
+                  aria-expanded={snapshotInfoOpen}
+                  aria-controls="snapshot-info-popover"
+                  onClick={() => setSnapshotInfoOpen((open) => !open)}
+                  aria-label="Ver informações da última atualização dos dados"
+                >
+                  i
+                </button>
+                {snapshotInfoOpen ? (
+                  <div
+                    id="snapshot-info-popover"
+                    className="platformSnapshotInfoPopover"
+                    role="dialog"
+                    aria-label="Última atualização"
+                  >
+                    <div className="platformTopBarSnapshot platformTopBarSnapshotPopover">
+                      <div className="platformTopBarSnapshotHeader">
+                        <p className={`platformTopBarSnapshotLabel ${isRefreshRunning ? "platformTopBarSnapshotLabelLoading" : ""}`}>
+                          {isRefreshRunning ? "Atualizando dados..." : "Última atualização"}
+                        </p>
+                        {!isRefreshRunning ? (
+                          <span className={`platformStatusBadge platformStatusBadge${snapshotStatus.tone}`}>
+                            <span className={`platformStatusDot platformStatusDot${snapshotStatus.tone}`} aria-hidden="true" />
+                            <span>{snapshotStatus.label}</span>
+                          </span>
+                        ) : null}
+                      </div>
+                      {isRefreshRunning ? (
+                        <>
+                          <p className="platformTopBarSnapshotRunningMeta">Iniciado há {formatDuration(refreshElapsedSeconds)}</p>
+                          <p className="platformTopBarSnapshotSecondary">
+                            Tempo médio:{" "}
+                            {refreshMetrics?.sample_size ? formatDuration(refreshMetrics.avg_duration_seconds) : "sem histórico suficiente"}
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="platformTopBarSnapshotPrimary">
+                            {displayedSnapshotAt ? formatDateTime(displayedSnapshotAt).replace(", ", " • ") : "—"}
+                          </p>
+                          <p className="platformTopBarSnapshotSecondary">
+                            {formatAge(displayedSnapshotAt) || "Atualização pendente"}
+                            {" • "}
+                            Tempo médio:{" "}
+                            {refreshMetrics?.sample_size ? formatDuration(refreshMetrics.avg_duration_seconds) : "sem histórico suficiente"}
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+              <div className="platformTopBarFilters">
+                <label className="monthFilterControl">
+                  <span className="monthFilterLabel">Período</span>
+                  <select
+                    value={selectedViewMode}
+                    disabled={isRefreshRunning}
+                    onChange={(event) => {
+                      const nextMode = event.target.value as AnalysisViewMode;
+                      setSelectedViewMode(nextMode);
+                      setSelectedMonthKey((prev) => {
+                        if (nextMode === "year") {
+                          if (isValidYearKey(prev)) return prev;
+                          return currentYearKey;
+                        }
+                        if (isValidMonthKey(prev)) return prev;
+                        return currentMonthKey;
+                      });
+                      const el = event.currentTarget;
+                      requestAnimationFrame(() => el.blur());
+                    }}
+                    aria-label="Selecionar período de análise"
+                  >
+                    {ANALYSIS_VIEW_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="monthFilterControl">
+                  <span className="monthFilterLabel">{selectedViewMode === "year" ? "Ano" : "Mês"}</span>
+                  <select
+                    value={selectedMonthKey}
+                    disabled={isRefreshRunning}
+                    onChange={(event) => {
+                      setSelectedMonthKey(event.target.value);
+                      const el = event.currentTarget;
+                      requestAnimationFrame(() => el.blur());
+                    }}
+                    aria-label={selectedViewMode === "year" ? "Selecionar ano de análise" : "Selecionar mês de análise"}
+                  >
+                    {periodOptions.map((monthKey) => (
+                      <option key={monthKey} value={monthKey}>
+                        {selectedViewMode === "year" ? monthKey : capitalizeFirst(formatMonthKeyLabel(monthKey))}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             </div>
-            <button className="button" onClick={handleRefresh} disabled={isValidating || isRefreshRunning}>
-              <ReloadIcon spinning={isValidating || isRefreshRunning} />
-              <span>{isValidating || isRefreshRunning ? "Atualizando na fonte..." : "Forçar atualização na fonte"}</span>
-            </button>
-            {isRefreshRunning ? (
-              <p className="headerRefreshState">Atualização em andamento • iniciado há {formatDuration(refreshElapsedSeconds)}</p>
-            ) : null}
-            <p className="headerSnapshotPrimary">
-              Última atualização exibida: {displayedSnapshotAt ? formatDateTime(displayedSnapshotAt) : "—"}
-            </p>
-            <p className="headerSnapshotSecondary">
-              {formatAge(displayedSnapshotAt) || "Atualização pendente"}
-              {" • "}
-              Tempo médio ({refreshMetrics?.window_hours ?? 24}h):{" "}
-              {refreshMetrics?.sample_size ? formatDuration(refreshMetrics.avg_duration_seconds) : "sem histórico suficiente"}
-            </p>
+            <div className="platformTopBarActions">
+              <button className="button buttonRefreshPrimary" onClick={handleRefresh} disabled={isValidating || isRefreshRunning}>
+                <ReloadIcon spinning={isValidating || isRefreshRunning} />
+                <span>{isValidating || isRefreshRunning ? "Atualizando…" : "Atualizar dados"}</span>
+              </button>
+            </div>
           </div>
-        </header>
+        </div>
+        <hr className="contentSectionDivider" aria-hidden="true" />
 
         {dashboardLoadFailed ? (
           <div className="contentErrorWrap">

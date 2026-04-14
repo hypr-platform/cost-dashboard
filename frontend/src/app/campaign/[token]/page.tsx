@@ -54,11 +54,14 @@ type CampaignLineRow = {
 };
 
 const PLATFORM_COLORS: Record<string, string> = {
-  "StackAdapt": "#3b82f6",
+  StackAdapt: "#2563eb",
   DV360: "#22c55e",
-  Xandr: "#ef4444",
-  "Amazon DSP": "#f59e0b",
-  Nexd: "#89cff0",
+  Xandr: "#dc2626",
+  "Amazon DSP": "#f97316",
+  Amazon: "#f97316",
+  Nexd: "#7dd3fc",
+  NEXD: "#7dd3fc",
+  Hivestack: "#ec4899",
 };
 
 const PLATFORM_LOGOS: Record<string, string> = {
@@ -169,7 +172,7 @@ function getCampaignReferenceWhatsAppUrl(
 async function downloadElementPng(element: HTMLElement, filename: string) {
   const canvas = await html2canvas(element, {
     scale: 2,
-    backgroundColor: "#0b1220",
+    backgroundColor: "#1e2a33",
     useCORS: true,
     allowTaint: true,
     logging: false,
@@ -357,7 +360,7 @@ export default function CampaignDetailPage() {
         fullLabel: row.line,
         gasto: row.gasto,
         platform: row.platform,
-        color: PLATFORM_COLORS[row.platform] ?? "#6366f1",
+        color: PLATFORM_COLORS[row.platform] ?? "#4e1e9c",
       })),
     [lineRows]
   );
@@ -376,7 +379,7 @@ export default function CampaignDetailPage() {
       .sort((a, b) => b.gasto - a.gasto)
       .map((item) => ({
         ...item,
-        color: PLATFORM_COLORS[item.platform] ?? "#6366f1",
+        color: PLATFORM_COLORS[item.platform] ?? "#4e1e9c",
       }));
   }, [lineRows]);
 
@@ -633,7 +636,7 @@ export default function CampaignDetailPage() {
                 <div className="chartWrap chartWrapSmall">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={spendByDsp} layout="vertical" margin={{ top: 8, right: 12, left: 8, bottom: 8 }}>
-                      <CartesianGrid stroke="#334155" strokeDasharray="3 4" opacity={0.45} />
+                      <CartesianGrid stroke="rgba(83, 104, 114, 0.55)" strokeDasharray="3 4" opacity={0.45} />
                       <XAxis
                         type="number"
                         stroke="#94a3b8"
@@ -711,7 +714,7 @@ export default function CampaignDetailPage() {
                         innerRadius={52}
                         outerRadius={92}
                         paddingAngle={2}
-                        stroke="rgba(15, 23, 42, 0.92)"
+                        stroke="rgba(28, 38, 47, 0.92)"
                         strokeWidth={2}
                       >
                         {spendByDsp.map((entry) => (
@@ -775,7 +778,7 @@ export default function CampaignDetailPage() {
               <div className="chartWrap" style={{ height: Math.max(280, chartData.length * 36) }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chartData} layout="vertical" margin={{ top: 8, right: 18, left: 8, bottom: 8 }}>
-                    <CartesianGrid stroke="#334155" strokeDasharray="3 4" opacity={0.42} />
+                    <CartesianGrid stroke="rgba(83, 104, 114, 0.55)" strokeDasharray="3 4" opacity={0.42} />
                     <XAxis
                       type="number"
                       stroke="#94a3b8"
@@ -857,7 +860,7 @@ export default function CampaignDetailPage() {
                 <div className="chartWrap chartWrapTall">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={timelineData}>
-                      <CartesianGrid stroke="#334155" strokeDasharray="3 4" opacity={0.45} />
+                      <CartesianGrid stroke="rgba(83, 104, 114, 0.55)" strokeDasharray="3 4" opacity={0.45} />
                       <XAxis
                         dataKey="date"
                         stroke="#94a3b8"
@@ -881,7 +884,7 @@ export default function CampaignDetailPage() {
                           stroke={platformItem.color}
                           strokeWidth={2.4}
                           dot={false}
-                          activeDot={{ r: 5, strokeWidth: 2, stroke: "#0f172a" }}
+                          activeDot={{ r: 5, strokeWidth: 2, stroke: "#1c262f" }}
                         />
                       ))}
                       <Line
@@ -891,7 +894,7 @@ export default function CampaignDetailPage() {
                         strokeWidth={2.2}
                         strokeDasharray="4 4"
                         dot={false}
-                        activeDot={{ r: 5, strokeWidth: 2, stroke: "#0f172a" }}
+                        activeDot={{ r: 5, strokeWidth: 2, stroke: "#1c262f" }}
                       />
                     </LineChart>
                   </ResponsiveContainer>

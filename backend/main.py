@@ -3,6 +3,7 @@ import re
 import logging
 from datetime import date
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import FastAPI, Query
 from fastapi import HTTPException
@@ -11,6 +12,7 @@ from dotenv import load_dotenv
 
 from backend.budget_store import init_budget_store
 from backend.dashboard_service import (
+    build_filtered_daily_series,
     get_cached_dashboard_data,
     get_dashboard_data,
     get_refresh_metrics,
@@ -75,6 +77,23 @@ def _normalize_token(value: str | None) -> str:
     return (value or "").strip().upper()
 
 
+def _parse_csv_query_param(value: str | None) -> list[str]:
+    if not value:
+        return []
+    items: list[str] = []
+    for raw in value.split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        try:
+            decoded = unquote(token).strip()
+        except Exception:
+            decoded = token
+        if decoded:
+            items.append(decoded)
+    return items
+
+
 @app.get("/api/budget-target")
 def budget_target(
     month: str = Query(..., description="Formato YYYY-MM"),
@@ -101,11 +120,35 @@ def dashboard_data(
     start: date | None = Query(default=None),
     end: date | None = Query(default=None),
     force_refresh: bool = Query(default=False),
+    clients: str | None = Query(default=None),
+    cs: str | None = Query(default=None),
+    campaigns: str | None = Query(default=None),
+    campaign_status: str | None = Query(default=None),
+    features: str | None = Query(default=None),
+    tipo: str | None = Query(default=None),
 ):
     if start is not None and end is not None and start > end:
         raise HTTPException(status_code=422, detail="`start` deve ser menor ou igual a `end`.")
     try:
-        return get_dashboard_data(start=start, end=end, force_refresh=force_refresh)
+        payload = get_dashboard_data(start=start, end=end, force_refresh=force_refresh)
+        daily_filtered = build_filtered_daily_series(
+            payload,
+            clients=_parse_csv_query_param(clients),
+            cs=_parse_csv_query_param(cs),
+            campaigns=_parse_csv_query_param(campaigns),
+            campaign_status=_parse_csv_query_param(campaign_status),
+            features=_parse_csv_query_param(features),
+            campaign_types=_parse_csv_query_param(tipo),
+            include_out_of_period=False,
+        )
+        dashboard = payload.get("dashboard") or {}
+        return {
+            **payload,
+            "dashboard": {
+                **dashboard,
+                "daily_filtered": daily_filtered,
+            },
+        }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception:

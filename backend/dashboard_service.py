@@ -71,6 +71,48 @@ def _iso(d: date | None) -> str | None:
     return d.isoformat() if d else None
 
 
+def _invested_for_selected_period(
+    invested_total: float | int | None,
+    campaign_start: date | None,
+    campaign_end: date | None,
+    period_start: date,
+    period_end: date,
+) -> float:
+    """
+    Prorrateia o investido total da campanha para o período selecionado
+    usando distribuição linear por dias de vigência.
+
+    Regras:
+    - Sem investido válido => 0.
+    - Sem vigência completa (start/end) => mantém investido total (fallback).
+    - Sem interseção com período => 0.
+    """
+    try:
+        invested = float(invested_total or 0.0)
+    except Exception:
+        return 0.0
+    if invested <= 0:
+        return 0.0
+
+    if campaign_start is None or campaign_end is None:
+        return invested
+    if campaign_start > campaign_end:
+        return invested
+
+    campaign_days = (campaign_end - campaign_start).days + 1
+    if campaign_days <= 0:
+        return invested
+
+    overlap_start = max(campaign_start, period_start)
+    overlap_end = min(campaign_end, period_end)
+    if overlap_start > overlap_end:
+        return 0.0
+
+    overlap_days = (overlap_end - overlap_start).days + 1
+    prorated = invested * (overlap_days / campaign_days)
+    return max(0.0, min(invested, prorated))
+
+
 def _month_key_from_date(value: date) -> str:
     return value.strftime("%Y-%m")
 
@@ -171,6 +213,205 @@ def _refresh_metadata(payload: dict[str, Any], snapshot_at: str, source: str) ->
     meta["cache_ttl_seconds"] = _cache_ttl_seconds()
     out["_meta"] = meta
     return out
+
+
+def _features_from_line_name(line_name: str) -> set[str]:
+    normalized = (
+        str(line_name or "")
+        .upper()
+        .strip()
+        .replace("Á", "A")
+        .replace("À", "A")
+        .replace("Ã", "A")
+        .replace("Â", "A")
+        .replace("É", "E")
+        .replace("Ê", "E")
+        .replace("Í", "I")
+        .replace("Ó", "O")
+        .replace("Õ", "O")
+        .replace("Ô", "O")
+        .replace("Ú", "U")
+        .replace("Ç", "C")
+    )
+    features: set[str] = set()
+    if "RMNFISICO" in normalized:
+        features.add("RMN Físico")
+    if "SURVEY" in normalized:
+        features.add("Survey")
+    if "TOPICS" in normalized:
+        features.add("Topics")
+    if "PDOOH" in normalized:
+        features.add("P-DOOH")
+    if "DOWNLOADED_APPS" in normalized:
+        features.add("Downloaded Apps")
+    return features
+
+
+def _has_campaign_token(token: Any) -> bool:
+    value = str(token or "").strip()
+    return value not in {"", "—"}
+
+
+def _row_cs_label(row: dict[str, Any]) -> str:
+    value = str(row.get("account_management", "") or "").strip()
+    return value or "Sem CS"
+
+
+def _row_matches_campaign_products(produto_vendido: Any, selected_products: set[str]) -> bool:
+    if not selected_products:
+        return True
+    normalized = str(produto_vendido or "").strip()
+    return normalized in selected_products
+
+
+def _sum_platform_totals(rows: list[dict[str, Any]], active_platforms: list[str]) -> dict[str, float]:
+    sums: dict[str, float] = {platform: 0.0 for platform in active_platforms}
+    for row in rows:
+        for platform in active_platforms:
+            sums[platform] += float(row.get(platform, 0.0) or 0.0)
+    return sums
+
+
+def build_filtered_daily_series(
+    payload: dict[str, Any],
+    *,
+    clients: list[str] | None = None,
+    cs: list[str] | None = None,
+    campaigns: list[str] | None = None,
+    campaign_status: list[str] | None = None,
+    features: list[str] | None = None,
+    campaign_types: list[str] | None = None,
+    include_out_of_period: bool = False,
+) -> list[dict[str, Any]]:
+    dashboard = payload.get("dashboard") or {}
+    campaign_rows = list(dashboard.get("campaign_journey_rows") or [])
+    daily_rows = list(dashboard.get("daily") or [])
+    active_platforms = [str(p) for p in (dashboard.get("active_platforms") or [])]
+    if not campaign_rows or not daily_rows or not active_platforms:
+        return daily_rows
+
+    clients_set = {str(value).strip() for value in (clients or []) if str(value).strip()}
+    cs_set = {str(value).strip() for value in (cs or []) if str(value).strip()}
+    campaigns_set = {str(value).strip() for value in (campaigns or []) if str(value).strip()}
+    status_set = {str(value).strip() for value in (campaign_status or []) if str(value).strip()}
+    feature_set = {str(value).strip() for value in (features or []) if str(value).strip()}
+    campaign_type_set = {str(value).strip() for value in (campaign_types or []) if str(value).strip()}
+    has_dashboard_filters = bool(clients_set or cs_set or campaigns_set or status_set or feature_set or campaign_type_set)
+    has_scope_filters = has_dashboard_filters or (not include_out_of_period)
+    if not has_scope_filters:
+        return daily_rows
+
+    token_features_by_token: dict[str, set[str]] = {}
+    platform_pages = payload.get("platform_pages") or {}
+    for page in platform_pages.values():
+        if not isinstance(page, dict):
+            continue
+        rows = page.get("rows") or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            token = str(row.get("token") or "").strip()
+            if not _has_campaign_token(token):
+                continue
+            row_features = _features_from_line_name(str(row.get("line") or ""))
+            if not row_features:
+                continue
+            existing = token_features_by_token.setdefault(token, set())
+            existing.update(row_features)
+
+    out_of_period_spend_by_token_platform: dict[str, dict[str, float]] = {}
+    attention = payload.get("attention") or {}
+    for row in attention.get("out_of_period_rows") or []:
+        if not isinstance(row, dict):
+            continue
+        token = str(row.get("token") or "").strip()
+        platform = str(row.get("platform") or "").strip()
+        if not _has_campaign_token(token) or not platform:
+            continue
+        by_platform = out_of_period_spend_by_token_platform.setdefault(token, {})
+        by_platform[platform] = by_platform.get(platform, 0.0) + float(row.get("gasto", 0.0) or 0.0)
+
+    adjusted_rows: list[dict[str, Any]] = []
+    if include_out_of_period:
+        adjusted_rows = [dict(row) for row in campaign_rows if isinstance(row, dict)]
+    else:
+        for source_row in campaign_rows:
+            if not isinstance(source_row, dict):
+                continue
+            row = dict(source_row)
+            token = str(row.get("token") or "").strip()
+            if _has_campaign_token(token):
+                platform_adjustments = out_of_period_spend_by_token_platform.get(token, {})
+                changed = False
+                for platform in active_platforms:
+                    adjust = float(platform_adjustments.get(platform, 0.0) or 0.0)
+                    if adjust <= 0:
+                        continue
+                    current_spend = float(row.get(platform, 0.0) or 0.0)
+                    next_spend = max(0.0, current_spend - adjust)
+                    if next_spend != current_spend:
+                        row[platform] = next_spend
+                        changed = True
+                if changed:
+                    recomputed_total = sum(float(row.get(platform, 0.0) or 0.0) for platform in active_platforms)
+                    row["total_plataformas"] = recomputed_total
+                    invested = float(row.get("investido", 0.0) or 0.0)
+                    row["pct_investido"] = (recomputed_total / invested * 100.0) if invested > 0 else 0.0
+            adjusted_rows.append(row)
+
+    scoped_rows = [row for row in adjusted_rows if float(row.get("total_plataformas", 0.0) or 0.0) > 0.0]
+    filtered_rows = scoped_rows
+    if has_dashboard_filters:
+        next_rows: list[dict[str, Any]] = []
+        for row in scoped_rows:
+            if clients_set and str(row.get("cliente", "") or "").strip() not in clients_set:
+                continue
+            if cs_set and _row_cs_label(row) not in cs_set:
+                continue
+            if campaigns_set and str(row.get("campanha", "") or "").strip() not in campaigns_set:
+                continue
+            if status_set and str(row.get("status", "") or "").strip() not in status_set:
+                continue
+            if feature_set:
+                token = str(row.get("token", "") or "").strip()
+                if not _has_campaign_token(token):
+                    continue
+                token_features = token_features_by_token.get(token, set())
+                if not (token_features & feature_set):
+                    continue
+            if not _row_matches_campaign_products(row.get("produto_vendido"), campaign_type_set):
+                continue
+            next_rows.append(row)
+        filtered_rows = next_rows
+
+    baseline_totals = _sum_platform_totals(campaign_rows, active_platforms)
+    filtered_totals = _sum_platform_totals(filtered_rows, active_platforms)
+    scale_by_platform: dict[str, float] = {}
+    for platform in active_platforms:
+        baseline = float(baseline_totals.get(platform, 0.0) or 0.0)
+        filtered = float(filtered_totals.get(platform, 0.0) or 0.0)
+        if baseline <= 0:
+            scale_by_platform[platform] = 0.0
+        else:
+            ratio = filtered / baseline
+            scale_by_platform[platform] = min(1.0, max(0.0, ratio))
+
+    filtered_daily: list[dict[str, Any]] = []
+    for source_row in daily_rows:
+        if not isinstance(source_row, dict):
+            continue
+        day = str(source_row.get("date") or "")
+        row: dict[str, Any] = {"date": day, "total": 0.0}
+        for platform in active_platforms:
+            base_value = float(source_row.get(platform, 0.0) or 0.0)
+            value = base_value * scale_by_platform.get(platform, 0.0)
+            row[platform] = value
+            row["total"] += value
+        if float(row["total"]) > 0.0:
+            filtered_daily.append(row)
+    return filtered_daily
 
 
 def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -354,14 +595,23 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
         campaign = all_campaigns.get(token)
         if not campaign:
             continue
+        campaign_invested_period = _invested_for_selected_period(
+            campaign.get("investido", 0.0),
+            campaign.get("start"),
+            campaign.get("end"),
+            start,
+            end,
+        )
         row = {
             "token": token,
             "cliente": campaign.get("cliente", ""),
             "campanha": campaign.get("campanha", ""),
+            "campaign_start": _iso(campaign.get("start")),
+            "campaign_end": _iso(campaign.get("end")),
             "produto_vendido": campaign.get("produto_vendido", ""),
             "account_management": campaign.get("account_management", ""),
             "status": "Ativa" if _is_campaign_active(campaign, today) else "Encerrada",
-            "investido": campaign.get("investido", 0.0),
+            "investido": campaign_invested_period,
         }
         total_platforms = 0.0
         for platform_name in active_platforms:
@@ -370,7 +620,7 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
             total_platforms += spend
         if total_platforms == 0:
             continue
-        investido = campaign.get("investido", 0.0) or 0.0
+        investido = campaign_invested_period
         row["total_plataformas"] = total_platforms
         row["pct_investido"] = (total_platforms / investido * 100) if investido > 0 else 0.0
         campaign_rows.append(row)
@@ -387,7 +637,17 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
             token = extract_token_from_line(line.get("name", ""))
             campaign = all_campaigns.get(token) if token else None
             spend_brl = _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate)
-            investido = campaign.get("investido") if campaign else None
+            investido = (
+                _invested_for_selected_period(
+                    campaign.get("investido"),
+                    campaign.get("start"),
+                    campaign.get("end"),
+                    start,
+                    end,
+                )
+                if campaign
+                else None
+            )
             pct_invest = (spend_brl / investido * 100) if investido and investido > 0 else None
             rows.append(
                 {
