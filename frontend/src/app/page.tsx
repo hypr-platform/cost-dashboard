@@ -865,15 +865,15 @@ function PlatformLegend({ payload }: { payload?: PlatformLegendEntry[] }) {
 
 function DailyCostLegend({
   entries,
-  activeKey,
+  activeKeys,
   onToggle,
 }: {
   entries: PlatformLegendEntry[];
-  activeKey: string | null;
+  activeKeys: string[];
   onToggle: (seriesKey: string) => void;
 }) {
   if (!entries.length) return null;
-  const hasFilter = activeKey !== null;
+  const hasFilter = activeKeys.length > 0;
   return (
     <div className="chartLegend chartLegendFilterable">
       {entries.map((entry) => {
@@ -881,7 +881,8 @@ function DailyCostLegend({
         const seriesKey = name === "Total" ? "total" : name;
         const displayName = seriesKey === "total" ? "Total" : name;
         const logoSrc = PLATFORM_LOGOS[displayName];
-        const isActive = !hasFilter || activeKey === seriesKey;
+        const isSelected = activeKeys.includes(seriesKey);
+        const isActive = !hasFilter || isSelected;
         return (
           <button
             key={`${seriesKey}-${entry.color ?? "no-color"}`}
@@ -890,9 +891,9 @@ function DailyCostLegend({
               isActive ? "chartLegendItemFilterOn" : "chartLegendItemFilterOff"
             }`}
             onClick={() => onToggle(seriesKey)}
-            aria-pressed={activeKey === seriesKey}
+            aria-pressed={isSelected}
             aria-label={
-              activeKey === seriesKey
+              isSelected
                 ? `Remover filtro de ${displayName}`
                 : `Filtrar gráfico por ${displayName}`
             }
@@ -1430,6 +1431,21 @@ function ReloadIcon({ spinning = false }: { spinning?: boolean }) {
   );
 }
 
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" className="buttonIcon">
+      <path
+        d="M12 4v10m0 0 4-4m-4 4-4-4M5 18h14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function FilterPanelDrawerChevron({ expanded }: { expanded: boolean }) {
   return (
     <svg
@@ -1649,6 +1665,7 @@ function HomeContent() {
   });
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
+  const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
   const [refreshPhase, setRefreshPhase] = useState<RefreshPhase>("idle");
   const [refreshRunStartedAt, setRefreshRunStartedAt] = useState<number | null>(null);
   const [refreshElapsedSeconds, setRefreshElapsedSeconds] = useState(0);
@@ -1659,7 +1676,7 @@ function HomeContent() {
   const [isDspsMenuExpanded, setIsDspsMenuExpanded] = useState(true);
   const [isDashboardFiltersExpanded, setIsDashboardFiltersExpanded] = useState(false);
   const [snapshotInfoOpen, setSnapshotInfoOpen] = useState(false);
-  const [dailyCostFocusedSeries, setDailyCostFocusedSeries] = useState<string | null>(null);
+  const [dailyCostFocusedSeries, setDailyCostFocusedSeries] = useState<string[]>([]);
   /** Hover no donut ou na legenda lateral (Distribuição): destaca fatia + linha. */
   const [distributionHighlightPlatform, setDistributionHighlightPlatform] = useState<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -2180,9 +2197,9 @@ function HomeContent() {
   );
   useEffect(() => {
     setDailyCostFocusedSeries((current) => {
-      if (!current) return null;
+      if (!current.length) return current;
       const allowed = new Set<string>(["total", ...dailyChartPlatforms]);
-      return allowed.has(current) ? current : null;
+      return current.filter((seriesKey) => allowed.has(seriesKey));
     });
   }, [dailyChartPlatforms]);
   const routeMatch = useMemo<{ page: NavKey; known: boolean }>(() => {
@@ -2529,6 +2546,12 @@ function HomeContent() {
   }, [toast]);
 
   useEffect(() => {
+    if (!copiedFieldKey) return;
+    const timeoutId = setTimeout(() => setCopiedFieldKey(null), 1200);
+    return () => clearTimeout(timeoutId);
+  }, [copiedFieldKey]);
+
+  useEffect(() => {
     if (!isRefreshRunning || !refreshRunStartedAt) return;
     const updateElapsed = () => {
       setRefreshElapsedSeconds(Math.max(0, Math.floor((Date.now() - refreshRunStartedAt) / 1000)));
@@ -2646,12 +2669,14 @@ function HomeContent() {
 
   const copyToClipboard = async (value: string, label: string) => {
     const normalized = value.trim();
-    if (!normalized || normalized === "—") return;
+    if (!normalized || normalized === "—") return false;
     try {
       await navigator.clipboard.writeText(normalized);
       showToast(`${label} copiado.`);
+      return true;
     } catch {
       showToast(`Nao foi possivel copiar ${label.toLowerCase()}.`, "error");
+      return false;
     }
   };
 
@@ -2720,6 +2745,9 @@ function HomeContent() {
     if (stackAdaptSort.key !== key) return "↕";
     return stackAdaptSort.direction === "asc" ? "↑" : "↓";
   };
+
+  const stackSortButtonClass = (key: StackAdaptSortKey) =>
+    `stackSortButton ${stackAdaptSort.key === key ? "stackSortButtonActive" : ""}`;
 
   const toggleAttentionNoTokenSort = (key: AttentionNoTokenSortKey) => {
     setAttentionNoTokenSort((prev) => {
@@ -3611,7 +3639,10 @@ function HomeContent() {
                       )
                     }
                   >
-                    CSV
+                    <span className="buttonLabelWithIcon">
+                      <DownloadIcon />
+                      CSV
+                    </span>
                   </button>
                   <button
                     type="button"
@@ -3721,7 +3752,10 @@ function HomeContent() {
                       )
                     }
                   >
-                    CSV
+                    <span className="buttonLabelWithIcon">
+                      <DownloadIcon />
+                      CSV
+                    </span>
                   </button>
                   <button
                     type="button"
@@ -3915,7 +3949,10 @@ function HomeContent() {
                     )
                   }
                 >
-                  CSV
+                  <span className="buttonLabelWithIcon">
+                    <DownloadIcon />
+                    CSV
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -3977,15 +4014,19 @@ function HomeContent() {
                     content={
                       <DailyCostLegend
                         entries={dailyChartLegendPayload}
-                        activeKey={dailyCostFocusedSeries}
+                        activeKeys={dailyCostFocusedSeries}
                         onToggle={(seriesKey) =>
-                          setDailyCostFocusedSeries((current) => (current === seriesKey ? null : seriesKey))
+                          setDailyCostFocusedSeries((current) =>
+                            current.includes(seriesKey)
+                              ? current.filter((value) => value !== seriesKey)
+                              : [...current, seriesKey]
+                          )
                         }
                       />
                     }
                   />
                   {dailyChartPlatforms.map((platform) => {
-                    if (dailyCostFocusedSeries !== null && dailyCostFocusedSeries !== platform) {
+                    if (dailyCostFocusedSeries.length > 0 && !dailyCostFocusedSeries.includes(platform)) {
                       return null;
                     }
                     return (
@@ -4000,7 +4041,7 @@ function HomeContent() {
                       />
                     );
                   })}
-                  {dailyCostFocusedSeries === null || dailyCostFocusedSeries === "total" ? (
+                  {dailyCostFocusedSeries.length === 0 || dailyCostFocusedSeries.includes("total") ? (
                     <Line
                       type="monotone"
                       dataKey="total"
@@ -4021,7 +4062,10 @@ function HomeContent() {
           <div className="tableHeader">
             <h2>Jornada de Campanhas</h2>
             <button type="button" className="button buttonGhost buttonSmall" onClick={handleExportCampaignJourney}>
-              Exportar CSV
+              <span className="buttonLabelWithIcon">
+                <DownloadIcon />
+                CSV
+              </span>
             </button>
           </div>
           <div className="filterChips">
@@ -4417,6 +4461,14 @@ function HomeContent() {
     }
 
     const rows = page.rows ?? [];
+    const renderTokenValue = (token: string | null | undefined) => {
+      if (hasCampaignToken(token)) return token;
+      return (
+        <span title="Sem token" aria-label="Sem token">
+          —
+        </span>
+      );
+    };
     const isDetailedLinePlatform = ["StackAdapt", "DV360", "Xandr"].includes(platformName);
     if (isDetailedLinePlatform) {
       const rowsForPlatform = platformName === resolvedActivePage ? filteredDetailedPlatformRows : rows;
@@ -4571,18 +4623,14 @@ function HomeContent() {
                   ? `USD ${(page.spend_usd ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
                   : undefined
               }
-              subtitle={
-                lineDetailFiltersActive
-                  ? "Subtotal em BRL das lines exibidas na tabela (após filtros e busca)."
-                  : "Consolidado no período"
-              }
+              subtitle={undefined}
               titleEmphasis
               logoSrc={PLATFORM_LOGOS[platformName]}
               budget={budget}
             />
             <div className="card platformStatCard">
-              <p className="cardTitle">Lines ativas</p>
               <p className="cardValue">{rowsForPlatform.length.toLocaleString("pt-BR")}</p>
+              <p className="cardTitle">Lines ativas</p>
               <p className="cardSubtitle">{rowsWithToken.toLocaleString("pt-BR")} com token identificado</p>
             </div>
             <button
@@ -4592,15 +4640,15 @@ function HomeContent() {
               aria-label="Alternar filtro: mostrar só lines sem token na tabela abaixo"
               onClick={() => setDspLinesOnlyWithoutToken((prev) => !prev)}
             >
-              <p className="cardTitle">Lines sem token</p>
               <p className="cardValue">{rowsWithoutToken.toLocaleString("pt-BR")}</p>
+              <p className="cardTitle">Sem token</p>
               <p className="cardSubtitle">
                 {rowsWithoutToken > 0 ? "Requer atenção imediata para auditoria" : "Todas as lines com token identificado"}
               </p>
             </button>
             <div className="card platformStatCard">
-              <p className="cardTitle">Campanhas ativas</p>
               <p className="cardValue">{activeCampaignsCount.toLocaleString("pt-BR")}</p>
+              <p className="cardTitle">Campanhas ativas</p>
               <p className="cardSubtitle">Com gasto no período selecionado</p>
             </div>
           </section>
@@ -4611,36 +4659,39 @@ function HomeContent() {
             <section className="card stackDetailCard">
               <div className="stackDetailHeader">
                 <div>
-                  <p className="cardTitle">Detalhamento de lines</p>
+                  <p className="cardTitle">Lines</p>
                 </div>
                 <div className="stackDetailHeaderActions stackDetailHeaderActionsColumn">
                   <div className="tableTopActions">
                     <button type="button" className="button buttonGhost buttonSmall" onClick={handleExportDetailedLines}>
-                      Exportar CSV
+                      <span className="buttonLabelWithIcon">
+                        <DownloadIcon />
+                        CSV
+                      </span>
                     </button>
                   </div>
                   <div className="stackDetailFilterInline">
-                    <button
-                      type="button"
-                      className={`chip chipDspFilter ${dspLinesOnlyWithoutToken ? "chipDspFilterOn" : ""}`}
-                      aria-pressed={dspLinesOnlyWithoutToken}
-                      onClick={() => setDspLinesOnlyWithoutToken((prev) => !prev)}
-                    >
+                    <label className="filterInlineToggle filterInlineToggleDashboard">
+                      <input
+                        type="checkbox"
+                        checked={dspLinesOnlyWithoutToken}
+                        onChange={(event) => setDspLinesOnlyWithoutToken(event.target.checked)}
+                      />
                       Só lines sem token
-                    </button>
+                    </label>
                     <input
                       className="stackSearchInput"
                       type="search"
                       value={stackAdaptSearch}
                       onChange={(event) => setStackAdaptSearch(event.target.value)}
-                      placeholder="Buscar por id, token, cliente e campanha"
+                      placeholder="Buscar line, token ou cliente"
                       aria-label={`Buscar lines da ${platformName}`}
                     />
                   </div>
                 </div>
               </div>
               <p className="stackDetailCounter">
-                {sortedRows.length.toLocaleString("pt-BR")} linha(s) encontrada(s) • Total: {brl(filteredTotalGasto)}
+                {sortedRows.length.toLocaleString("pt-BR")} lines analisadas • {brl(filteredTotalGasto)} no período
               </p>
               <div className="tableWrap">
                 <table className="stackDetailTable">
@@ -4657,52 +4708,64 @@ function HomeContent() {
                   </colgroup>
                   <thead>
                     <tr>
-                      <th>
-                        <button type="button" className="stackSortButton" onClick={() => toggleStackAdaptSort("line")}>
+                      <th className={stackAdaptSort.key === "line" ? "stackThSorted" : undefined}>
+                        <button type="button" className={stackSortButtonClass("line")} onClick={() => toggleStackAdaptSort("line")}>
                           <span>Line</span>
-                          <span>{stackSortIndicator("line")}</span>
+                          <span className="stackSortIndicator">{stackSortIndicator("line")}</span>
                         </button>
                       </th>
-                      <th>
-                        <button type="button" className="stackSortButton" onClick={() => toggleStackAdaptSort("token")}>
+                      <th className={stackAdaptSort.key === "token" ? "stackThSorted" : undefined}>
+                        <button type="button" className={stackSortButtonClass("token")} onClick={() => toggleStackAdaptSort("token")}>
                           <span>Token</span>
-                          <span>{stackSortIndicator("token")}</span>
+                          <span className="stackSortIndicator">{stackSortIndicator("token")}</span>
                         </button>
                       </th>
-                      <th>
-                        <button type="button" className="stackSortButton" onClick={() => toggleStackAdaptSort("cliente")}>
+                      <th className={stackAdaptSort.key === "cliente" ? "stackThSorted" : undefined}>
+                        <button type="button" className={stackSortButtonClass("cliente")} onClick={() => toggleStackAdaptSort("cliente")}>
                           <span>Cliente</span>
-                          <span>{stackSortIndicator("cliente")}</span>
+                          <span className="stackSortIndicator">{stackSortIndicator("cliente")}</span>
                         </button>
                       </th>
-                      <th>
-                        <button type="button" className="stackSortButton" onClick={() => toggleStackAdaptSort("campanha")}>
+                      <th className={stackAdaptSort.key === "campanha" ? "stackThSorted" : undefined}>
+                        <button type="button" className={stackSortButtonClass("campanha")} onClick={() => toggleStackAdaptSort("campanha")}>
                           <span>Campanha</span>
-                          <span>{stackSortIndicator("campanha")}</span>
+                          <span className="stackSortIndicator">{stackSortIndicator("campanha")}</span>
                         </button>
                       </th>
-                      <th>
-                        <button type="button" className="stackSortButton" onClick={() => toggleStackAdaptSort("gasto")}>
+                      <th
+                        className={
+                          stackAdaptSort.key === "gasto"
+                            ? "stackThSorted stackThFinancial stackThNumeric"
+                            : "stackThFinancial stackThNumeric"
+                        }
+                      >
+                        <button type="button" className={stackSortButtonClass("gasto")} onClick={() => toggleStackAdaptSort("gasto")}>
                           <span>Gasto</span>
-                          <span>{stackSortIndicator("gasto")}</span>
+                          <span className="stackSortIndicator">{stackSortIndicator("gasto")}</span>
                         </button>
                       </th>
-                      <th>
-                        <button type="button" className="stackSortButton" onClick={() => toggleStackAdaptSort("investido")}>
+                      <th
+                        className={
+                          stackAdaptSort.key === "investido"
+                            ? "stackThSorted stackThFinancial stackThNumeric"
+                            : "stackThFinancial stackThNumeric"
+                        }
+                      >
+                        <button type="button" className={stackSortButtonClass("investido")} onClick={() => toggleStackAdaptSort("investido")}>
                           <span>Investido</span>
-                          <span>{stackSortIndicator("investido")}</span>
+                          <span className="stackSortIndicator">{stackSortIndicator("investido")}</span>
                         </button>
                       </th>
-                      <th>
-                        <button type="button" className="stackSortButton" onClick={() => toggleStackAdaptSort("pct_invest")}>
+                      <th className={stackAdaptSort.key === "pct_invest" ? "stackThSorted stackThNumeric" : "stackThNumeric"}>
+                        <button type="button" className={stackSortButtonClass("pct_invest")} onClick={() => toggleStackAdaptSort("pct_invest")}>
                           <span>% budget</span>
-                          <span>{stackSortIndicator("pct_invest")}</span>
+                          <span className="stackSortIndicator">{stackSortIndicator("pct_invest")}</span>
                         </button>
                       </th>
-                      <th>
-                        <button type="button" className="stackSortButton" onClick={() => toggleStackAdaptSort("total")}>
+                      <th className={stackAdaptSort.key === "total" ? "stackThSorted stackThNumeric" : "stackThNumeric"}>
+                        <button type="button" className={stackSortButtonClass("total")} onClick={() => toggleStackAdaptSort("total")}>
                           <span>Total</span>
-                          <span>{stackSortIndicator("total")}</span>
+                          <span className="stackSortIndicator">{stackSortIndicator("total")}</span>
                         </button>
                       </th>
                       <th>Account Management</th>
@@ -4732,15 +4795,21 @@ function HomeContent() {
                             <button
                               type="button"
                               className="copyIconButton"
+                              title="Copiar line"
                               aria-label={`Copiar line ${row.line}`}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                void copyToClipboard(row.line, "Line");
+                                void (async () => {
+                                  const copied = await copyToClipboard(row.line, "Line");
+                                  if (copied) setCopiedFieldKey(`line-${index}`);
+                                })();
                               }}
                             >
-                              ⧉
+                              {copiedFieldKey === `line-${index}` ? "✓" : "⧉"}
                             </button>
-                            <span>{row.line}</span>
+                            <span className="stackLineValue" title={row.line}>
+                              {row.line}
+                            </span>
                           </div>
                         </td>
                         <td className="stackTokenCell">
@@ -4748,24 +4817,34 @@ function HomeContent() {
                             <button
                               type="button"
                               className="copyIconButton"
+                              title="Copiar token"
                               aria-label={`Copiar token ${row.token}`}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                void copyToClipboard(row.token, "Token");
+                                void (async () => {
+                                  const copied = await copyToClipboard(row.token, "Token");
+                                  if (copied) setCopiedFieldKey(`token-${index}`);
+                                })();
                               }}
                               disabled={!row.token || row.token === "—"}
                             >
-                              ⧉
+                              {copiedFieldKey === `token-${index}` ? "✓" : "⧉"}
                             </button>
-                            <span>{row.token}</span>
+                            <span>{renderTokenValue(row.token)}</span>
                           </div>
                         </td>
                         <td>{row.cliente}</td>
                         <td>{row.campanha}</td>
-                        <td className="stackNumericCell stackGastoCell">{brl(row.gasto)}</td>
-                        <td className="stackNumericCell">{row.investido ? brl(row.investido) : "—"}</td>
-                        <td className="stackNumericCell">{row.pct_invest !== null ? `${row.pct_invest.toFixed(1)}%` : "—"}</td>
-                        <td className="stackNumericCell">
+                        <td className="stackNumericCell stackNumericCellRight stackNumericCellFinancial stackGastoCell">
+                          {brl(row.gasto)}
+                        </td>
+                        <td className="stackNumericCell stackNumericCellRight stackNumericCellFinancial">
+                          {row.investido ? brl(row.investido) : "—"}
+                        </td>
+                        <td className="stackNumericCell stackNumericCellRight">
+                          {row.pct_invest !== null ? `${row.pct_invest.toFixed(1)}%` : "—"}
+                        </td>
+                        <td className="stackNumericCell stackNumericCellRight">
                           {filteredTotalGasto > 0 ? `${((row.gasto / filteredTotalGasto) * 100).toFixed(1)}%` : "0.0%"}
                         </td>
                         <td className="stackAccountManagerCell">
@@ -4848,18 +4927,21 @@ function HomeContent() {
           <>
             <div className="tableTopActions">
               <button type="button" className="button buttonGhost buttonSmall" onClick={handleExportSimpleDspRows}>
-                Exportar CSV
+                <span className="buttonLabelWithIcon">
+                  <DownloadIcon />
+                  CSV
+                </span>
               </button>
             </div>
             <div className="stackDetailHeaderActions dspPanelTableToolbar">
-              <button
-                type="button"
-                className={`chip chipDspFilter ${dspLinesOnlyWithoutToken ? "chipDspFilterOn" : ""}`}
-                aria-pressed={dspLinesOnlyWithoutToken}
-                onClick={() => setDspLinesOnlyWithoutToken((prev) => !prev)}
-              >
+              <label className="filterInlineToggle filterInlineToggleDashboard">
+                <input
+                  type="checkbox"
+                  checked={dspLinesOnlyWithoutToken}
+                  onChange={(event) => setDspLinesOnlyWithoutToken(event.target.checked)}
+                />
                 Só lines sem token
-              </button>
+              </label>
             </div>
             {!simpleDspTableRows.length ? (
               <p className="alertInfo">Nenhuma line encontrada para o filtro ativo.</p>
@@ -4872,9 +4954,9 @@ function HomeContent() {
                       <th>Token</th>
                       <th>Cliente</th>
                       <th>Campanha</th>
-                      <th>Gasto</th>
-                      <th>Investido</th>
-                      <th>% budget</th>
+                      <th className="stackThNumeric stackThFinancial">Gasto</th>
+                      <th className="stackThNumeric stackThFinancial">Investido</th>
+                      <th className="stackThNumeric">% budget</th>
                       <th>Account Management</th>
                     </tr>
                   </thead>
@@ -4897,13 +4979,19 @@ function HomeContent() {
                           }
                         }}
                       >
-                        <td>{row.line}</td>
-                        <td>{row.token}</td>
+                        <td>
+                          <span className="stackLineValue" title={row.line}>
+                            {row.line}
+                          </span>
+                        </td>
+                        <td>{renderTokenValue(row.token)}</td>
                         <td>{row.cliente}</td>
                         <td>{row.campanha}</td>
-                        <td>{brl(row.gasto)}</td>
-                        <td>{row.investido ? brl(row.investido) : "—"}</td>
-                        <td>{row.pct_invest !== null ? `${row.pct_invest.toFixed(1)}%` : "—"}</td>
+                        <td className="stackNumericCellRight stackNumericCellFinancial">{brl(row.gasto)}</td>
+                        <td className="stackNumericCellRight stackNumericCellFinancial">
+                          {row.investido ? brl(row.investido) : "—"}
+                        </td>
+                        <td className="stackNumericCellRight">{row.pct_invest !== null ? `${row.pct_invest.toFixed(1)}%` : "—"}</td>
                         <td className="stackAccountManagerCell">
                           {row.account_management && row.account_management !== "—" ? (
                             <span className="accountManagerCell">
@@ -5035,7 +5123,10 @@ function HomeContent() {
               <div className="stackDetailHeaderSearchColumn">
                 <div className="tableTopActions">
                   <button type="button" className="button buttonGhost buttonSmall" onClick={handleExportNoToken}>
-                    Exportar CSV
+                    <span className="buttonLabelWithIcon">
+                      <DownloadIcon />
+                      CSV
+                    </span>
                   </button>
                 </div>
                 <input
@@ -5320,7 +5411,10 @@ function HomeContent() {
               <div className="stackDetailHeaderSearchColumn">
                 <div className="tableTopActions">
                   <button type="button" className="button buttonGhost buttonSmall" onClick={handleExportOutOfPeriod}>
-                    Exportar CSV
+                    <span className="buttonLabelWithIcon">
+                      <DownloadIcon />
+                      CSV
+                    </span>
                   </button>
                 </div>
                 <input
