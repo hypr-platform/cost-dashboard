@@ -1,0 +1,150 @@
+.authContainer {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.authPanel {
+  max-width: 460px;
+  width: 100%;
+}
+
+.authButton {
+  margin-top: 16px;
+  width: 100%;
+}
+
+.clerkWrap {
+  margin-top: 16px;
+}
+
+.authSignInContainer {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  max-width: none;
+  padding: 24px;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 20% 66%, rgba(245, 39, 43, 0.2) 0%, rgba(245, 39, 43, 0) 30%),
+    radial-gradient(circle at 43% 72%, rgba(237, 217, 0, 0.16) 0%, rgba(237, 217, 0, 0) 28%),
+    radial-gradient(circle at 61% 52%, rgba(51, 151, 185, 0.26) 0%, rgba(51, 151, 185, 0) 34%),
+    radial-gradient(circle at 73% 74%, rgba(1, 131, 118, 0.2) 0%, rgba(1, 131, 118, 0) 30%),
+    radial-gradient(circle at 85% 35%, rgba(36, 108, 132, 0.2) 0%, rgba(36, 108, 132, 0) 26%),
+    linear-gradient(135deg, #1c262f 0%, #18232b 40%, #141c22 100%);
+}
+
+.authSignInContainer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 64%, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0) 42%),
+    radial-gradient(circle at 50% 50%, rgba(28, 38, 47, 0.38), rgba(28, 38, 47, 0.78));
+  backdrop-filter: blur(18px);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.authSignInGlow {
+  position: absolute;
+  width: min(720px, 92vw);
+  height: min(720px, 92vw);
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -58%);
+  background:
+    radial-gradient(circle at 50% 45%, rgba(51, 151, 185, 0.28) 0%, rgba(36, 108, 132, 0.12) 32%, transparent 68%),
+    radial-gradient(circle at 62% 62%, rgba(1, 131, 118, 0.1) 0%, transparent 62%);
+  filter: blur(8px);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.authSignInShell {
+  width: 100%;
+  max-width: min(420px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+}
+
+.authSignInClerkWrap {
+  margin-top: 0;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.authSignInClerkWrap .authClerkRootBox {
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.authSignInClerkWrap .authClerkCard {
+  background: #1e2a33;
+  width: 100%;
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow: 0 18px 38px rgba(28, 38, 47, 0.5);
+}
+
+.authSignInClerkWrap .authClerkCardInner {
+  background: #1e2a33;
+}
+
+.authSignInClerkWrap .authClerkHeaderTitle {
+  color: #f8fafc;
+}
+
+.authSignInClerkWrap .authClerkHeaderSubtitle {
+  color: #94a3b8;
+}
+
+.authSignInClerkWrap .authClerkSocialButton {
+  border-radius: 10px;
+  border: 1px solid rgba(100, 116, 139, 0.6);
+  background: #111c30;
+  color: #e2e8f0;
+  transition: all 0.16s ease;
+}
+
+.authSignInClerkWrap .authClerkSocialButton:hover {
+  border-color: rgba(143, 212, 234, 0.6);
+  background: #16233d;
+  box-shadow: 0 2px 14px rgba(36, 108, 132, 0.18);
+}
+
+.authSignInClerkWrap .authClerkSocialButtonText {
+  color: #f8fafc;
+  font-weight: 600;
+}
+
+.authSignInClerkWrap .authClerkPrimaryButton {
+  background: linear-gradient(180deg, #3397b9, #246c84);
+  color: #f8fafc;
+  border: 1px solid rgba(143, 212, 234, 0.35);
+  border-radius: 10px;
+}
+
+.authSignInClerkWrap .authClerkDividerText {
+  color: #94a3b8;
+}
+
+.authSignInClerkWrap .authClerkFooterText {
+  color: #94a3b8;
+}
+
+.authSignInClerkWrap .authClerkFooterLink {
+  color: #8fd4ea;
+  font-weight: 600;
+}
+

@@ -3,6 +3,8 @@ import { ClerkProvider } from "@clerk/nextjs";
 import { Geist_Mono, Montserrat } from "next/font/google";
 import { clerkLocalizationPtBr } from "@/lib/clerkLocalization";
 import "./globals.css";
+import "@/features/auth/styles/auth.css";
+import "@/features/dashboard/styles/dashboard.css";
 
 const montserrat = Montserrat({
   variable: "--font-geist-sans",
