@@ -75,6 +75,7 @@ type StackAdaptSortDirection = "asc" | "desc";
 type AttentionNoTokenSortKey = "platform" | "line" | "gasto";
 type AttentionOutOfPeriodSortKey = "platform" | "token" | "cliente" | "campanha" | "account_management" | "vigencia" | "gasto";
 type AttentionSortDirection = "asc" | "desc";
+type NexdFormatSortKey = "layout" | "pct_imp" | "impressions" | "creatives" | "per_creative" | "estimated_cost_brl";
 type CampaignJourneySortKey =
   | "token"
   | "cliente"
@@ -667,6 +668,279 @@ function formatDateBrShort(value: string | null | undefined): string {
   return match ? match[1] : full;
 }
 
+/** Impressões em texto curto (ex.: 4,9 mi) para cabeçalhos e destaques Nexd */
+function formatImpressionsCompactPt(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mi`;
+  if (n >= 10_000) return `${Math.round(n / 1_000).toLocaleString("pt-BR")} mil`;
+  return n.toLocaleString("pt-BR");
+}
+
+/** Cap em leitura curta (ex.: 10M, 4,9M, 500 mil) — linha de contexto Nexd. */
+function formatNexdCapSizePt(cap: number): string {
+  if (!Number.isFinite(cap) || cap <= 0) return "0";
+  if (cap >= 1_000_000) {
+    const m = cap / 1_000_000;
+    const s = Number.isInteger(m) ? String(m) : m.toLocaleString("pt-BR", { maximumFractionDigits: 1 });
+    return `${s}M`;
+  }
+  if (cap >= 10_000) {
+    return `${Math.round(cap / 1_000).toLocaleString("pt-BR")} mil`;
+  }
+  return cap.toLocaleString("pt-BR");
+}
+
+/** Mês abreviado pt-BR (ex.: "mar" → "Mar"). */
+function nexdMonthAbbrPt(d: Date): string {
+  const raw = d.toLocaleDateString("pt-BR", { month: "short" }).replace(/\./g, "").trim();
+  return capitalizeFirst(raw);
+}
+
+/** Linha curta tipo "Mar–Abr" ou "Mar '25–Abr '26". */
+function formatNexdPeriodMonthRangeUltraPt(isoStart: string, isoEnd: string): string {
+  const s = new Date(String(isoStart).slice(0, 10));
+  const e = new Date(String(isoEnd).slice(0, 10));
+  if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) return "";
+  const ms = s.getMonth();
+  const ys = s.getFullYear();
+  const me = e.getMonth();
+  const ye = e.getFullYear();
+  if (ms === me && ys === ye) return `${nexdMonthAbbrPt(s)} ${ys}`;
+  if (ys === ye) return `${nexdMonthAbbrPt(s)}–${nexdMonthAbbrPt(e)}`;
+  const y2 = (y: number) => String(y).slice(-2);
+  return `${nexdMonthAbbrPt(s)} '${y2(ys)}–${nexdMonthAbbrPt(e)} '${y2(ye)}`;
+}
+
+function nexdParseIsoDateLocal(iso: string): Date | null {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}/.test(String(iso))) return null;
+  const [y, m, d] = String(iso).slice(0, 10).split("-").map(Number);
+  const x = new Date(y, m - 1, d);
+  if (Number.isNaN(x.getTime())) return null;
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+function nexdInclusiveDaysLocal(a: Date, b: Date): number {
+  return Math.floor((b.getTime() - a.getTime()) / 86400000) + 1;
+}
+
+/**
+ * % do cap ao fim do período, extrapolando o ritmo atual (uso% / fração de tempo já decorrida).
+ * `null` no início do período (poucos dias) para evitar leitura instável.
+ */
+/** Dias decorridos no período, total de dias e dias restantes (hoje → fim), para ritmo e textos temporais. */
+function nexdPeriodPacingContext(periodStartIso: string, periodEndIso: string): {
+  elapsedDays: number;
+  totalDays: number;
+  daysLeftInPeriod: number;
+} | null {
+  const s = nexdParseIsoDateLocal(periodStartIso);
+  const e = nexdParseIsoDateLocal(periodEndIso);
+  if (!s || !e || e.getTime() < s.getTime()) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (today.getTime() < s.getTime()) return null;
+  const refEnd = today.getTime() > e.getTime() ? e : today;
+  const elapsedDays = nexdInclusiveDaysLocal(s, refEnd);
+  const totalDays = nexdInclusiveDaysLocal(s, e);
+  const daysLeftInPeriod = today.getTime() > e.getTime() ? 0 : nexdInclusiveDaysLocal(today, e);
+  return { elapsedDays, totalDays, daysLeftInPeriod };
+}
+
+function nexdDateToIsoLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function nexdForecastEndPeriodCapPct(
+  periodStartIso: string,
+  periodEndIso: string,
+  usedPct: number
+): { forecastPct: number } | null {
+  const s = nexdParseIsoDateLocal(periodStartIso);
+  const e = nexdParseIsoDateLocal(periodEndIso);
+  if (!s || !e || e.getTime() < s.getTime()) return null;
+  const totalDays = nexdInclusiveDaysLocal(s, e);
+  if (totalDays < 1) return null;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (today.getTime() < s.getTime()) return null;
+
+  const refEnd = today.getTime() > e.getTime() ? e : today;
+  const elapsedDays = nexdInclusiveDaysLocal(s, refEnd);
+  const timeFracEarly = elapsedDays / totalDays;
+  if (today.getTime() <= e.getTime() && elapsedDays < 3 && timeFracEarly < 0.12) {
+    return null;
+  }
+
+  const timeFrac = Math.max(timeFracEarly, 1e-6);
+  const forecastPct = Math.min(300, Math.max(0, usedPct / timeFrac));
+  return { forecastPct };
+}
+
+function truncateChars(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 1))}…`;
+}
+
+type NexdCapTone = "ok" | "warn" | "risk" | "neutral";
+
+function nexdCapConsumptionStatus(usedPct: number): { tone: NexdCapTone; label: string; helper: string } {
+  if (usedPct >= 80) {
+    return {
+      tone: "risk",
+      label: "Risco de estourar o cap",
+      helper: "Consumo muito próximo do limite mensal contratado.",
+    };
+  }
+  if (usedPct >= 60) {
+    return {
+      tone: "warn",
+      label: "Atenção ao cap",
+      helper: "Ritmo elevado — vale acompanhar o restante do mês.",
+    };
+  }
+  if (usedPct >= 35) {
+    return { tone: "neutral", label: "Ritmo moderado", helper: "Uso intermediário do pacote no período." };
+  }
+  return {
+    tone: "ok",
+    label: "Saudável",
+    helper: "Ainda há folga confortável em relação ao cap mensal.",
+  };
+}
+
+/**
+ * % do cap esperado **hoje** com ritmo uniforme no **período selecionado** (início → fim),
+ * usando a mesma fração de tempo que a previsão (`elapsedDays / totalDays` × 100).
+ * Evita comparar 50% usado com “100% esperado” só porque o fim do período cai no último dia do mês.
+ */
+function nexdLinearExpectedCapPctForPeriod(periodStartIso: string | undefined, periodEndIso: string | undefined): number | null {
+  if (!periodStartIso || !periodEndIso) return null;
+  const s = nexdParseIsoDateLocal(periodStartIso);
+  const e = nexdParseIsoDateLocal(periodEndIso);
+  if (!s || !e || e.getTime() < s.getTime()) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (today.getTime() < s.getTime()) return null;
+  const refEnd = today.getTime() > e.getTime() ? e : today;
+  const totalDays = nexdInclusiveDaysLocal(s, e);
+  if (totalDays < 1) return null;
+  const elapsedDays = nexdInclusiveDaysLocal(s, refEnd);
+  return (elapsedDays / totalDays) * 100;
+}
+
+type NexdPaceVsCalendar = "above" | "below" | "on";
+
+function nexdPaceVsExpected(
+  usedPct: number,
+  periodStartIso: string | undefined,
+  periodEndIso: string | undefined
+): {
+  expectedPct: number | null;
+  vs: NexdPaceVsCalendar;
+} {
+  const expectedPct = nexdLinearExpectedCapPctForPeriod(periodStartIso, periodEndIso);
+  if (expectedPct == null) {
+    return { expectedPct: null, vs: "on" };
+  }
+  const diff = usedPct - expectedPct;
+  if (diff > 15) {
+    return { expectedPct, vs: "above" };
+  }
+  if (diff < -15) {
+    return { expectedPct, vs: "below" };
+  }
+  return { expectedPct, vs: "on" };
+}
+
+/** Tendência alinhada à previsão (evita contradizer o alerta de >100%). */
+function nexdCapTrendBodyCoherent(forecastRounded: number | null, vs: NexdPaceVsCalendar): string {
+  if (forecastRounded != null) {
+    if (forecastRounded > 100) return "Ritmo atual tende a fechar acima do cap contratado.";
+    if (forecastRounded < 100) return "Não vai consumir todo o cap.";
+    return "No limite do cap ao fechar o período.";
+  }
+  if (vs === "below") return "Não vai consumir todo o cap.";
+  if (vs === "above") return "Pode apertar o cap antes do fim.";
+  return "Em linha com o calendário do mês.";
+}
+
+/** Excesso sobre 100% do cap, para leitura direta (ex.: 0,7%). */
+function nexdForecastExcessPctPt(forecastPct: number): string {
+  const over = forecastPct - 100;
+  if (over <= 0) return "0%";
+  if (over < 10) return `${over.toFixed(1).replace(".", ",")}%`;
+  return `${Math.round(over)}%`;
+}
+
+/** Linha única: previsão + excesso, sem repetir “vai ultrapassar”. */
+function nexdForecastDetailLinePt(forecastPct: number): string {
+  const rounded = Math.round(forecastPct);
+  return `Previsão: ${rounded}% (excesso de ${nexdForecastExcessPctPt(forecastPct)})`;
+}
+
+/** Cor da barra de uso Nexd: previsão e risco real pesam mais que o verde “folga”. */
+function nexdCapBarFillClass(usedPct: number, forecastRounded: number | null): string {
+  if (forecastRounded != null) {
+    if (forecastRounded > 100) return forecastRounded >= 115 ? "budgetProgressFillOver" : "budgetProgressFillWarn";
+    if (forecastRounded >= 95) return "budgetProgressFillWarn";
+  }
+  if (usedPct >= 80) return "budgetProgressFillOver";
+  if (usedPct >= 60) return "budgetProgressFillWarn";
+  return "budgetProgressFillOk";
+}
+
+/** Alinha rótulos “Hoje” / “Esperado” ao longo da barra sem estourar as bordas. */
+function nexdCapUsageBarFlyLabelStyle(pct: number): CSSProperties {
+  const p = Math.min(100, Math.max(0, pct));
+  if (p <= 10) return { left: "0%", transform: "translateX(0)" };
+  if (p >= 90) return { left: "100%", transform: "translateX(-100%)" };
+  return { left: `${p}%`, transform: "translateX(-50%)" };
+}
+
+function nexdCapBarVisualTone(fillClass: string): "ok" | "warn" | "risk" {
+  if (fillClass.includes("Over")) return "risk";
+  if (fillClass.includes("Warn")) return "warn";
+  return "ok";
+}
+
+function nexdPaceCalendarHintPt(vs: NexdPaceVsCalendar): string {
+  if (vs === "below") return "↓ abaixo do esperado";
+  if (vs === "above") return "↑ acima do esperado";
+  return "≈ alinhado ao esperado";
+}
+
+/** Ritmo/emoji do resumo Nexd: se a previsão fecha >100%, sobe alerta em vez de “moderado” + “alinhado”. */
+function nexdNexdSummaryRhythmPresentation(
+  usedPct: number,
+  paceVs: { expectedPct: number | null; vs: NexdPaceVsCalendar },
+  forecastRounded: number | null
+): { tone: NexdCapTone; label: string; emoji: string; paceHint: string | null } {
+  const base = nexdCapConsumptionStatus(usedPct);
+  if (forecastRounded != null && forecastRounded > 100) {
+    const tone: NexdCapTone = forecastRounded >= 115 ? "risk" : "warn";
+    return {
+      tone,
+      label: "Alerta — fechamento acima do cap",
+      emoji: tone === "risk" ? "🔴" : "⚠️",
+      paceHint: null,
+    };
+  }
+  const emoji =
+    base.tone === "risk" ? "🔴" : base.tone === "warn" ? "🟡" : base.tone === "neutral" ? "🟡" : "🟢";
+  return {
+    tone: base.tone,
+    label: base.label,
+    emoji,
+    paceHint: paceVs.expectedPct != null ? nexdPaceCalendarHintPt(paceVs.vs) : null,
+  };
+}
+
 function csvEscape(value: string | number | null | undefined): string {
   const normalized = String(value ?? "");
   if (!normalized.includes('"') && !normalized.includes(",") && !normalized.includes("\n")) {
@@ -1006,6 +1280,11 @@ function KpiCard({
   variant,
   href,
   metric,
+  metrics,
+  nexdSummary,
+  nexdSpendSecondary,
+  nexdTrendLine,
+  nexdFoldDetails,
   summaryHighlight,
 }: {
   title: string;
@@ -1013,8 +1292,24 @@ function KpiCard({
   subtitle?: ReactNode;
   /** Linha secundária em USD (menor peso visual que o valor em BRL). */
   usdLine?: string | null;
+  /** Nexd: gasto em BRL/USD abaixo do KPI principal (% do cap), sem competir com o título. */
+  nexdSpendSecondary?: { brl: string; usd?: string | null } | null;
+  /** Nexd: uma linha de tendência entre o KPI e os detalhes colapsáveis. */
+  nexdTrendLine?: string | null;
+  /** Nexd: métricas + bloco de ritmo ficam dentro de &lt;details&gt;. */
+  nexdFoldDetails?: boolean;
   /** Métrica extra label + valor (ex.: NEXD — Impressões). */
   metric?: { label: string; value: string };
+  /** Várias métricas; se definido, tem precedência sobre `metric`. `label` omitido = linha única (ex.: % do cap). */
+  metrics?: Array<{ label?: string; value: string }>;
+  /** Resumo Nexd: ritmo do cap + leitura vs linear + previsão compacta. */
+  nexdSummary?: {
+    rhythmEmoji: string;
+    rhythmLabel: string;
+    rhythmTone: NexdCapTone;
+    paceHint: string | null;
+    forecastLeft?: { line: string; hot: boolean } | null;
+  };
   badge?: string;
   badgeTone?: "soon";
   statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
@@ -1046,6 +1341,60 @@ function KpiCard({
   };
 
   const hasSubtitle = subtitle !== undefined && subtitle !== null && subtitle !== false && subtitle !== "";
+  const resolvedMetrics =
+    metrics && metrics.length > 0
+      ? metrics
+      : metric
+        ? [{ label: metric.label, value: metric.value }]
+        : [];
+  const hasMetricBlocks = resolvedMetrics.length > 0;
+  const showMetricsAboveFold = hasMetricBlocks && !nexdFoldDetails;
+
+  const metricsBlock = resolvedMetrics.map((m, idx) => {
+    const labelTrim = m.label != null ? String(m.label).trim() : "";
+    if (labelTrim) {
+      return (
+        <div key={`m-${idx}`} className="cardMetricBlock">
+          <p className="cardMetricLabel">{labelTrim}</p>
+          <p className="cardMetricValue">{m.value}</p>
+        </div>
+      );
+    }
+    return (
+      <p key={`m-${idx}`} className="cardKpiContextLine">
+        {m.value}
+      </p>
+    );
+  });
+
+  const nexdSummaryBlock = nexdSummary ? (
+    <div className={`cardNexdSummary cardNexdSummary--${nexdSummary.rhythmTone}`}>
+      <p
+        className="cardNexdSummaryRhythm"
+        role="status"
+        title={nexdSummary.rhythmLabel}
+        aria-label={`${nexdSummary.rhythmLabel}`}
+      >
+        <span className="cardNexdSummaryRhythmEmoji" aria-hidden="true">
+          {nexdSummary.rhythmEmoji}
+        </span>
+        <span>{nexdSummary.rhythmLabel}</span>
+      </p>
+      {nexdSummary.paceHint ? (
+        <p className="cardNexdSummaryPace muted" aria-label={nexdSummary.paceHint}>
+          {nexdSummary.paceHint}
+        </p>
+      ) : null}
+      {nexdSummary.forecastLeft ? (
+        <p
+          className={`cardNexdForecastLeft${nexdSummary.forecastLeft.hot ? " cardNexdForecastLeft--hot" : ""}`}
+          aria-label={nexdSummary.forecastLeft.line}
+        >
+          {nexdSummary.forecastLeft.line}
+        </p>
+      ) : null}
+    </div>
+  ) : null;
 
   return (
     <div
@@ -1098,18 +1447,40 @@ function KpiCard({
         ) : null}
       </div>
       <div className="cardKpiPrimary">
-        <p className="cardValue">{value}</p>
-        {usdLine ? <p className="cardUsdLine">{usdLine}</p> : null}
+        <p className={`cardValue${nexdSpendSecondary ? " cardValueNexdCapLead" : ""}`}>{value}</p>
+        {nexdSpendSecondary ? (
+          <div className="cardNexdSpendSecondary">
+            <p className="cardNexdSpendSecondaryBrl">{nexdSpendSecondary.brl}</p>
+            {nexdSpendSecondary.usd ? <p className="cardNexdSpendSecondaryUsd">{nexdSpendSecondary.usd}</p> : null}
+          </div>
+        ) : usdLine ? (
+          <p className="cardUsdLine">{usdLine}</p>
+        ) : null}
       </div>
-      {metric ? (
-        <div className="cardMetricBlock">
-          <p className="cardMetricLabel">{metric.label}</p>
-          <p className="cardMetricValue">{metric.value}</p>
-        </div>
+      {nexdTrendLine ? (
+        <p className="cardNexdTrendLine muted" role="status">
+          {nexdTrendLine}
+        </p>
       ) : null}
+      {showMetricsAboveFold ? metricsBlock : null}
+      {nexdFoldDetails && (hasMetricBlocks || nexdSummaryBlock) ? (
+        <details className="cardNexdDetails">
+          <summary className="cardNexdDetailsSummary">Detalhes do pacote</summary>
+          <div className="cardNexdDetailsBody">
+            {nexdSummaryBlock}
+            {hasMetricBlocks ? metricsBlock : null}
+          </div>
+        </details>
+      ) : (
+        nexdSummaryBlock
+      )}
       {hasSubtitle ? (
         <div
-          className={`cardSubtitle ${usdLine || metric ? "cardSubtitleAfterUsd" : ""}`}
+          className={`cardSubtitle ${
+            usdLine || nexdSpendSecondary || showMetricsAboveFold || nexdTrendLine || nexdFoldDetails
+              ? "cardSubtitleAfterUsd"
+              : ""
+          }`}
         >
           {subtitle}
         </div>
@@ -1482,6 +1853,38 @@ function FilterLinesIcon() {
   );
 }
 
+function SearchEmptyStateIllustration() {
+  return (
+    <svg viewBox="0 0 24 24" width="44" height="44" aria-hidden="true" className="tableEmptyStateSvg">
+      <circle cx="11" cy="11" r="6.75" fill="none" stroke="currentColor" strokeWidth="1.65" />
+      <path d="M20 20l-4.35-4.35" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function DspLinesNoDataEmptyState() {
+  return (
+    <div className="tableEmptyState tableEmptyStateStandalone" role="status">
+      <p className="tableEmptyStateTitle">Nenhuma line cadastrada ainda</p>
+    </div>
+  );
+}
+
+function DspLinesFilteredEmptyState({ onClearFilters }: { onClearFilters: () => void }) {
+  return (
+    <div className="tableEmptyState tableEmptyStateInTable" role="status">
+      <div className="tableEmptyStateIconWrap" aria-hidden="true">
+        <SearchEmptyStateIllustration />
+      </div>
+      <p className="tableEmptyStateTitle">Nenhum resultado com os filtros aplicados</p>
+      <p className="tableEmptyStateSubtitle">Tente ajustar ou remover os filtros aplicados.</p>
+      <button type="button" className="button buttonGhost tableEmptyStateClearButton" onClick={onClearFilters}>
+        Limpar filtros
+      </button>
+    </div>
+  );
+}
+
 function EyeIcon() {
   return (
     <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" className="cardTextButtonEyeIcon">
@@ -1602,6 +2005,7 @@ function SessionLoading({ message }: { message: string }) {
 }
 
 function HomeContent() {
+  const JOURNEY_RETURN_ANCHOR_KEY = "campaignJourneyReturnAnchor";
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -1637,6 +2041,10 @@ function HomeContent() {
     key: CampaignJourneySortKey;
     direction: AttentionSortDirection;
   }>({ key: "total_plataformas", direction: "desc" });
+  const [nexdFormatSort, setNexdFormatSort] = useState<{
+    key: NexdFormatSortKey;
+    direction: AttentionSortDirection;
+  }>({ key: "impressions", direction: "desc" });
   const [clientFilter, setClientFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CLIENTS)));
   const [csFilter, setCsFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CS)));
   const [campaignFilter, setCampaignFilter] = useState<string[]>(() => parseCsvList(searchParams.get(URL_PARAM_CAMPAIGNS)));
@@ -1675,7 +2083,11 @@ function HomeContent() {
   const [refreshHasSeenRunning, setRefreshHasSeenRunning] = useState(false);
   const [isDspsMenuExpanded, setIsDspsMenuExpanded] = useState(true);
   const [isDashboardFiltersExpanded, setIsDashboardFiltersExpanded] = useState(false);
+  const [isJourneyFiltersExpanded, setIsJourneyFiltersExpanded] = useState(false);
+  const [isJourneyBreakdownExpanded, setIsJourneyBreakdownExpanded] = useState(false);
   const [snapshotInfoOpen, setSnapshotInfoOpen] = useState(false);
+  /** Nexd — tabela “Por campanha”: expandir além do top N. */
+  const [nexdCampaignTableShowAll, setNexdCampaignTableShowAll] = useState(false);
   const [dailyCostFocusedSeries, setDailyCostFocusedSeries] = useState<string[]>([]);
   /** Hover no donut ou na legenda lateral (Distribuição): destaca fatia + linha. */
   const [distributionHighlightPlatform, setDistributionHighlightPlatform] = useState<string | null>(null);
@@ -1879,6 +2291,39 @@ function HomeContent() {
   }, [currentMonthKey, currentYearKey, searchParams]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storedReturnUrl = window.sessionStorage.getItem(JOURNEY_RETURN_ANCHOR_KEY);
+    if (!storedReturnUrl) return;
+    const storedUrl = new URL(storedReturnUrl, window.location.origin);
+    if (storedUrl.pathname !== window.location.pathname) return;
+    const currentWithoutHash = `${window.location.pathname}${window.location.search}`;
+    const desiredWithoutHash = `${storedUrl.pathname}${storedUrl.search}`;
+    if (currentWithoutHash !== desiredWithoutHash) {
+      router.replace(`${desiredWithoutHash}${storedUrl.hash}`, { scroll: false });
+      return;
+    }
+    if (storedUrl.hash && window.location.hash !== storedUrl.hash) {
+      window.history.replaceState(window.history.state, "", `${desiredWithoutHash}${storedUrl.hash}`);
+    }
+    const scrollToJourney = () => {
+      const target = document.getElementById("jornada-campanhas");
+      if (target) {
+        target.scrollIntoView({ block: "start", behavior: "auto" });
+      }
+      window.sessionStorage.removeItem(JOURNEY_RETURN_ANCHOR_KEY);
+    };
+    const raf = window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(scrollToJourney);
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [pathname, router, searchParams, JOURNEY_RETURN_ANCHOR_KEY]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.sessionStorage.getItem(JOURNEY_RETURN_ANCHOR_KEY)) {
+      // Enquanto há retorno pendente da Jornada, pausa o sync padrão de query para evitar disputa.
+      return;
+    }
+
     const nextParams = new URLSearchParams(searchParams.toString());
     const setQueryValue = (key: string, value: string | null) => {
       if (!value) {
@@ -1911,7 +2356,8 @@ function HomeContent() {
     const currentQuery = searchParams.toString();
     const nextQuery = nextParams.toString();
     if (currentQuery === nextQuery) return;
-    router.replace(`${pathname}${nextQuery ? `?${nextQuery}` : ""}`, { scroll: false });
+    const currentHash = typeof window !== "undefined" ? window.location.hash : "";
+    router.replace(`${pathname}${nextQuery ? `?${nextQuery}` : ""}${currentHash}`, { scroll: false });
   }, [
     attentionNoTokenDspFilters,
     attentionNoTokenSearch,
@@ -2062,6 +2508,11 @@ function HomeContent() {
     setCampaignFilter([]);
     setCampaignStatusFilter([]);
   }, []);
+  const clearDspLineTableFilters = useCallback(() => {
+    clearDashboardFilters();
+    setStackAdaptSearch("");
+    setDspLinesOnlyWithoutToken(false);
+  }, [clearDashboardFilters]);
   const rowMatchesDashboardFilters = useCallback(
     (
       row: JourneyRow,
@@ -2272,6 +2723,12 @@ function HomeContent() {
     });
     return rows;
   }, [campaignJourneySort, campaignRows]);
+  const campaignJourneySummary = useMemo(() => {
+    const investedTotal = sortedCampaignRows.reduce((sum, row) => sum + Number(row.investido ?? 0), 0);
+    const activeCount = sortedCampaignRows.filter((row) => String(row.status ?? "").trim().toLowerCase() === "ativa").length;
+    const endedCount = sortedCampaignRows.filter((row) => String(row.status ?? "").trim().toLowerCase() === "encerrada").length;
+    return { investedTotal, activeCount, endedCount };
+  }, [sortedCampaignRows]);
 
   const csFilterOptions = useMemo(() => {
     return [...new Set(journeyRows.map(rowCsLabel))].sort((a, b) => a.localeCompare(b, "pt-BR"));
@@ -2812,6 +3269,43 @@ function HomeContent() {
     return campaignJourneySort.direction === "asc" ? "↑" : "↓";
   };
 
+  const campaignJourneySortButtonClass = (key: CampaignJourneySortKey) =>
+    `stackSortButton ${campaignJourneySort.key === key ? "stackSortButtonActive" : ""}`;
+
+  const toggleNexdFormatSort = (key: NexdFormatSortKey) => {
+    setNexdFormatSort((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
+      }
+      return { key, direction: key === "layout" ? "asc" : "desc" };
+    });
+  };
+
+  const nexdFormatSortIndicator = (key: NexdFormatSortKey) => {
+    if (nexdFormatSort.key !== key) return "↕";
+    return nexdFormatSort.direction === "asc" ? "↑" : "↓";
+  };
+
+  const nexdFormatSortButtonClass = (key: NexdFormatSortKey) =>
+    `stackSortButton ${nexdFormatSort.key === key ? "stackSortButtonActive" : ""}`;
+
+  const campaignStatusBadgeClass = (status: string) => {
+    const normalized = status.trim().toLowerCase();
+    if (normalized === "ativa") return "campaignStatusBadge campaignStatusBadgeSuccess";
+    if (normalized === "encerrada") return "campaignStatusBadge campaignStatusBadgeDanger";
+    return "campaignStatusBadge campaignStatusBadgeNeutral";
+  };
+
+  const campaignBudgetSpentPct = (row: JourneyRow) => {
+    const raw = Number(row.pct_investido ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  };
+
+  const campaignBudgetProgressFillPct = (row: JourneyRow) => {
+    const pct = campaignBudgetSpentPct(row);
+    return Math.max(0, Math.min(100, pct));
+  };
+
   const detailedPlatformName = ["StackAdapt", "DV360", "Xandr", "Hivestack"].includes(resolvedActivePage)
     ? resolvedActivePage
     : null;
@@ -3115,6 +3609,17 @@ function HomeContent() {
 
   const renderDashboardPage = () => {
     if (!data) return null;
+    const navigateToCampaignFromJourney = (token: string) => {
+      if (typeof window !== "undefined") {
+        const pathWithQuery = `${window.location.pathname}${window.location.search}`;
+        const anchoredPath = `${pathWithQuery}#jornada-campanhas`;
+        window.sessionStorage.setItem(JOURNEY_RETURN_ANCHOR_KEY, anchoredPath);
+        if (window.location.hash !== "#jornada-campanhas") {
+          window.history.replaceState(window.history.state, "", anchoredPath);
+        }
+      }
+      router.push(routeForCampaign(token, resolvedActivePage));
+    };
     const handleExportCampaignJourney = () => {
       const headers = [
         "Token",
@@ -3221,6 +3726,17 @@ function HomeContent() {
       subtitle?: ReactNode;
       usdLine?: string;
       metric?: { label: string; value: string };
+      metrics?: Array<{ label?: string; value: string }>;
+      nexdSpendSecondary?: { brl: string; usd?: string | null };
+      nexdTrendLine?: string | null;
+      nexdFoldDetails?: boolean;
+      nexdSummary?: {
+        rhythmEmoji: string;
+        rhythmLabel: string;
+        rhythmTone: NexdCapTone;
+        paceHint: string | null;
+        forecastLeft?: { line: string; hot: boolean } | null;
+      };
       badge?: string;
       badgeTone?: "soon";
       statusIndicator?: { label: string; tone: "success" | "danger" | "neutral" };
@@ -3249,16 +3765,39 @@ function HomeContent() {
     if (!hasDashboardFilters) {
       if (nexdPage) {
         const impressions = Math.round(Number(nexdPage.impressions ?? 0));
+        const cap = Number(nexdPage.cap ?? 0) || 1;
+        const usedCapPct = Math.max(0, Math.min(100, (impressions / cap) * 100));
+        const paceVsHome = nexdPaceVsExpected(usedCapPct, data.period.start, data.period.end);
+        const nexdForecastHome = nexdForecastEndPeriodCapPct(data.period.start, data.period.end, usedCapPct);
+        const frHome = nexdForecastHome ? Math.round(nexdForecastHome.forecastPct) : null;
+        const forecastHomeHot = frHome != null && frHome > 100;
+        const nexdSummaryRhythmHome = nexdNexdSummaryRhythmPresentation(usedCapPct, paceVsHome, frHome);
+        const nexdForecastLeftHome =
+          nexdForecastHome != null && frHome != null && !forecastHomeHot
+            ? {
+                line: `Previsão: ~${frHome}% do cap`,
+                hot: false,
+              }
+            : null;
         secondRowPlatformCards.push({
           title: "NEXD",
-          value: brl(Number(nexdPage.spend_brl ?? 0)),
-          usdLine:
-            nexdPage.spend_usd != null && Number.isFinite(Number(nexdPage.spend_usd))
-              ? `USD ${Number(nexdPage.spend_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
-              : undefined,
-          metric: {
-            label: "Impressões",
-            value: impressions.toLocaleString("pt-BR"),
+          value: `${usedCapPct.toFixed(1).replace(".", ",")}% usado`,
+          nexdSpendSecondary: {
+            brl: brl(Number(nexdPage.spend_brl ?? 0)),
+            usd:
+              nexdPage.spend_usd != null && Number.isFinite(Number(nexdPage.spend_usd))
+                ? `USD ${Number(nexdPage.spend_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+                : undefined,
+          },
+          nexdTrendLine: forecastHomeHot ? null : nexdCapTrendBodyCoherent(frHome, paceVsHome.vs),
+          metrics: [{ label: "Impressões", value: impressions.toLocaleString("pt-BR") }],
+          nexdFoldDetails: true,
+          nexdSummary: {
+            rhythmEmoji: nexdSummaryRhythmHome.emoji,
+            rhythmLabel: nexdSummaryRhythmHome.label,
+            rhythmTone: nexdSummaryRhythmHome.tone,
+            paceHint: nexdSummaryRhythmHome.paceHint,
+            forecastLeft: nexdForecastLeftHome,
           },
           titleEmphasis: true,
           logoSrc: PLATFORM_LOGOS.Nexd,
@@ -4058,7 +4597,9 @@ function HomeContent() {
           )}
         </section>
 
-        <section className="panel panelChart">
+        <hr className="homeChartsJourneyDivider" aria-hidden="true" />
+
+        <section id="jornada-campanhas" className="card stackDetailCard">
           <div className="tableHeader">
             <h2>Jornada de Campanhas</h2>
             <button type="button" className="button buttonGhost buttonSmall" onClick={handleExportCampaignJourney}>
@@ -4068,134 +4609,241 @@ function HomeContent() {
               </span>
             </button>
           </div>
-          <div className="filterChips">
-            {clients.map((client) => {
-              const selected = clientFilter.includes(client);
-              return (
-                <button
-                  key={client}
-                  className={`chip ${selected ? "chipActive" : ""}`}
-                  onClick={() =>
-                    setClientFilter((prev) =>
-                      prev.includes(client) ? prev.filter((c) => c !== client) : [...prev, client]
-                    )
-                  }
-                >
-                  {client}
-                </button>
-              );
-            })}
-          </div>
+          <section className="panel panelSub filterPanelCard filterPanelCardDashboard journeyFilterCollapseCard">
+            <button
+              type="button"
+              className="filterPanelHeader filterPanelHeaderToggle"
+              onClick={() => setIsJourneyFiltersExpanded((prev) => !prev)}
+              aria-expanded={isJourneyFiltersExpanded}
+              aria-controls="journey-filter-content"
+              aria-label={isJourneyFiltersExpanded ? "Ocultar filtros da jornada" : "Mostrar filtros da jornada"}
+            >
+              <span className="filterPanelHeaderTitleBlock">
+                <span className="filterPanelTitleRow" role="heading" aria-level={3}>
+                  <FilterLinesIcon />
+                  Filtros da jornada
+                </span>
+              </span>
+              <span className="filterPanelHeaderActions">
+                <span className="filterPanelActiveCount">Filtros ({activeDashboardFilterCount.toLocaleString("pt-BR")})</span>
+                <span className="filterPanelToggleChevron" aria-hidden="true">
+                  <FilterPanelDrawerChevron expanded={isJourneyFiltersExpanded} />
+                </span>
+              </span>
+            </button>
+            {isJourneyFiltersExpanded ? (
+              <div id="journey-filter-content" className="filterPanelBody">
+                <div className="filterToolbar filterToolbarDashboard journeyFilterToolbar">
+                  <MultiSelectFilter
+                    id="journey-filter-client"
+                    label="Cliente"
+                    options={clients}
+                    value={clientFilter}
+                    onChange={setClientFilter}
+                    placeholder="Todos os clientes"
+                    disabledOptions={disabledClientOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id="journey-filter-cs"
+                    label="CS"
+                    options={csFilterOptions}
+                    value={csFilter}
+                    onChange={setCsFilter}
+                    placeholder="Todos os CS"
+                    showAvatar
+                    disabledOptions={disabledCsOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id="journey-filter-campaign-type"
+                    label="Produto"
+                    options={productFilterOptions}
+                    value={campaignTypeFilter}
+                    onChange={setCampaignTypeFilter}
+                    placeholder="Todos os produtos"
+                    disabledOptions={disabledCampaignTypeOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id="journey-filter-feature"
+                    label="Feature"
+                    options={[...FEATURE_OPTIONS]}
+                    value={featureFilter}
+                    onChange={setFeatureFilter}
+                    placeholder="Todas as features"
+                    disabledOptions={disabledFeatureOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id="journey-filter-campaign"
+                    label="Campanha"
+                    options={campaignFilterOptions}
+                    value={campaignFilter}
+                    onChange={setCampaignFilter}
+                    placeholder="Todas as campanhas"
+                    disabledOptions={disabledCampaignOptions}
+                    compact
+                  />
+                  <MultiSelectFilter
+                    id="journey-filter-campaign-status"
+                    label="Status"
+                    options={campaignStatusOptions}
+                    value={campaignStatusFilter}
+                    onChange={setCampaignStatusFilter}
+                    placeholder="Todos os status"
+                    disabledOptions={disabledCampaignStatusOptions}
+                    compact
+                  />
+                </div>
+              </div>
+            ) : null}
+          </section>
+          <section className="journeyTopSummary" aria-label="Resumo da jornada de campanhas">
+            <div className="journeyTopSummaryCard">
+              <p className="journeyTopSummaryLabel">Total investido</p>
+              <p className="journeyTopSummaryValue">{brl(campaignJourneySummary.investedTotal)}</p>
+            </div>
+            <div className="journeyTopSummaryCard">
+              <p className="journeyTopSummaryLabel">Campanhas ativas</p>
+              <p className="journeyTopSummaryValue">{campaignJourneySummary.activeCount.toLocaleString("pt-BR")}</p>
+            </div>
+            <div className="journeyTopSummaryCard">
+              <p className="journeyTopSummaryLabel">Campanhas encerradas</p>
+              <p className="journeyTopSummaryValue">{campaignJourneySummary.endedCount.toLocaleString("pt-BR")}</p>
+            </div>
+          </section>
 
           {data.journey_status === "error" ? (
             <p className="alertError">Erro ao ler planilha: {data.journey_message ?? "erro desconhecido"}</p>
           ) : !sortedCampaignRows.length ? (
             <p className="alertInfo">Nenhum token com gasto no mês corrente encontrado nas plataformas.</p>
           ) : (
-            <div className="tableWrap">
-              <table>
+            <div className="stackDetailTableWrap">
+              <p className="stackDetailCounter">
+                {sortedCampaignRows.length.toLocaleString("pt-BR")} lines analisadas •{" "}
+                {brl(sortedCampaignRows.reduce((sum, row) => sum + Number(row.investido ?? 0), 0))} investidos
+              </p>
+              <div className="journeyColumnGroups" role="group" aria-label="Controles da tabela">
+                <button
+                  type="button"
+                  className="journeyBreakdownToggle"
+                  onClick={() => setIsJourneyBreakdownExpanded((prev) => !prev)}
+                  aria-expanded={isJourneyBreakdownExpanded}
+                >
+                  {isJourneyBreakdownExpanded
+                    ? "Breakdown: ocultar"
+                    : `Breakdown: mostrar (${data.dashboard.active_platforms.length.toLocaleString("pt-BR")})`}
+                </button>
+              </div>
+              <div className="tableWrap">
+              <table className="campaignJourneyTable">
                 <thead>
                   <tr>
-                    <th>
-                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("token")}>
-                        <span>Token</span>
-                        <span>{campaignJourneySortIndicator("token")}</span>
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("cliente")}>
-                        <span>Cliente</span>
-                        <span>{campaignJourneySortIndicator("cliente")}</span>
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("campanha")}>
-                        <span>Campanha</span>
-                        <span>{campaignJourneySortIndicator("campanha")}</span>
-                      </button>
-                    </th>
-                    <th>
+                    <th className={campaignJourneySort.key === "cliente" ? "stackThSorted" : undefined}>
                       <button
                         type="button"
-                        className="stackSortButton"
+                        className={campaignJourneySortButtonClass("cliente")}
+                        onClick={() => toggleCampaignJourneySort("cliente")}
+                      >
+                        <span>Cliente</span>
+                        <span className="stackSortIndicator">{campaignJourneySortIndicator("cliente")}</span>
+                      </button>
+                    </th>
+                    <th className={campaignJourneySort.key === "campanha" ? "stackThSorted" : undefined}>
+                      <button
+                        type="button"
+                        className={campaignJourneySortButtonClass("campanha")}
+                        onClick={() => toggleCampaignJourneySort("campanha")}
+                      >
+                        <span>Campanha</span>
+                        <span className="stackSortIndicator">{campaignJourneySortIndicator("campanha")}</span>
+                      </button>
+                    </th>
+                    <th className={campaignJourneySort.key === "token" ? "stackThSorted" : undefined}>
+                      <button
+                        type="button"
+                        className={campaignJourneySortButtonClass("token")}
+                        onClick={() => toggleCampaignJourneySort("token")}
+                      >
+                        <span>Token</span>
+                        <span className="stackSortIndicator">{campaignJourneySortIndicator("token")}</span>
+                      </button>
+                    </th>
+                    <th className={campaignJourneySort.key === "account_management" ? "stackThSorted" : undefined}>
+                      <button
+                        type="button"
+                        className={campaignJourneySortButtonClass("account_management")}
                         onClick={() => toggleCampaignJourneySort("account_management")}
                       >
-                        <span>Account Management</span>
-                        <span>{campaignJourneySortIndicator("account_management")}</span>
+                        <span>Account Manager</span>
+                        <span className="stackSortIndicator">{campaignJourneySortIndicator("account_management")}</span>
                       </button>
                     </th>
-                    <th>
-                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("status")}>
-                        <span>Status</span>
-                        <span>{campaignJourneySortIndicator("status")}</span>
-                      </button>
-                    </th>
-                    <th>
-                      <button type="button" className="stackSortButton" onClick={() => toggleCampaignJourneySort("investido")}>
-                        <span>Investido</span>
-                        <span>{campaignJourneySortIndicator("investido")}</span>
-                      </button>
-                    </th>
-                    {data.dashboard.active_platforms.map((platform) => (
-                      <th key={platform}>
-                        <button
-                          type="button"
-                          className="stackSortButton"
-                          onClick={() => toggleCampaignJourneySort(`platform:${platform}`)}
-                        >
-                          <span>{platform}</span>
-                          <span>{campaignJourneySortIndicator(`platform:${platform}`)}</span>
-                        </button>
-                      </th>
-                    ))}
-                    <th>
+                    <th className={campaignJourneySort.key === "status" ? "stackThSorted" : undefined}>
                       <button
                         type="button"
-                        className="stackSortButton"
+                        className={campaignJourneySortButtonClass("status")}
+                        onClick={() => toggleCampaignJourneySort("status")}
+                      >
+                        <span>Status</span>
+                        <span className="stackSortIndicator">{campaignJourneySortIndicator("status")}</span>
+                      </button>
+                    </th>
+                    <th
+                      className={
+                        campaignJourneySort.key === "investido"
+                          ? "stackThSorted stackThFinancial stackThNumeric"
+                          : "stackThFinancial stackThNumeric"
+                      }
+                    >
+                      <button
+                        type="button"
+                        className={campaignJourneySortButtonClass("investido")}
+                        onClick={() => toggleCampaignJourneySort("investido")}
+                      >
+                        <span>Investido</span>
+                        <span className="stackSortIndicator">{campaignJourneySortIndicator("investido")}</span>
+                      </button>
+                    </th>
+                    <th
+                      className={
+                        campaignJourneySort.key === "total_plataformas"
+                          ? "stackThSorted stackThFinancial stackThNumeric"
+                          : "stackThFinancial stackThNumeric"
+                      }
+                    >
+                      <button
+                        type="button"
+                        className={campaignJourneySortButtonClass("total_plataformas")}
                         onClick={() => toggleCampaignJourneySort("total_plataformas")}
                       >
-                        <span>Total Plataformas</span>
-                        <span>{campaignJourneySortIndicator("total_plataformas")}</span>
+                        <span>Total mídia</span>
+                        <span className="stackSortIndicator">{campaignJourneySortIndicator("total_plataformas")}</span>
                       </button>
                     </th>
-                    <th>
-                      <button
-                        type="button"
-                        className="stackSortButton"
-                        onClick={() => toggleCampaignJourneySort("pct_investido")}
-                      >
-                        <span>% Investido</span>
-                        <span>{campaignJourneySortIndicator("pct_investido")}</span>
-                      </button>
-                    </th>
-                    <th>
-                      <button
-                        type="button"
-                        className="stackSortButton"
-                        onClick={() => toggleCampaignJourneySort("campaign_start")}
-                      >
-                        <span>
-                          Start&nbsp;date
-                          <br />
-                          campanha
-                        </span>
-                        <span>{campaignJourneySortIndicator("campaign_start")}</span>
-                      </button>
-                    </th>
-                    <th>
-                      <button
-                        type="button"
-                        className="stackSortButton"
-                        onClick={() => toggleCampaignJourneySort("campaign_end")}
-                      >
-                        <span>
-                          End&nbsp;date
-                          <br />
-                          campanha
-                        </span>
-                        <span>{campaignJourneySortIndicator("campaign_end")}</span>
-                      </button>
-                    </th>
+                    {isJourneyBreakdownExpanded
+                      ? data.dashboard.active_platforms.map((platform) => (
+                          <th
+                            key={platform}
+                            className={
+                              campaignJourneySort.key === `platform:${platform}`
+                                ? "stackThSorted stackThNumeric"
+                                : "stackThNumeric"
+                            }
+                          >
+                            <button
+                              type="button"
+                              className={campaignJourneySortButtonClass(`platform:${platform}`)}
+                              onClick={() => toggleCampaignJourneySort(`platform:${platform}`)}
+                            >
+                              <span>{platform}</span>
+                              <span className="stackSortIndicator">{campaignJourneySortIndicator(`platform:${platform}`)}</span>
+                            </button>
+                          </th>
+                        ))
+                      : null}
+                    <th className="journeyRowActionHeader" aria-label="Ação da linha" />
                   </tr>
                 </thead>
                 <tbody>
@@ -4205,17 +4853,37 @@ function HomeContent() {
                       className="campaignJourneyRow"
                       role="button"
                       tabIndex={0}
-                      onClick={() => router.push(routeForCampaign(row.token, resolvedActivePage))}
+                      title="Clique para ver detalhes da campanha"
+                      onClick={() => navigateToCampaignFromJourney(row.token)}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
-                          router.push(routeForCampaign(row.token, resolvedActivePage));
+                          navigateToCampaignFromJourney(row.token);
                         }
                       }}
                     >
-                      <td>{row.token}</td>
                       <td>{row.cliente}</td>
                       <td>{row.campanha}</td>
+                      <td className="stackTokenCell">
+                        <div className="copyCell">
+                          <button
+                            type="button"
+                            className="copyIconButton"
+                            title="Copiar token"
+                            aria-label={`Copiar token ${row.token}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void (async () => {
+                                const copied = await copyToClipboard(row.token, "Token");
+                                if (copied) setCopiedFieldKey(`journey-token-${index}`);
+                              })();
+                            }}
+                          >
+                            {copiedFieldKey === `journey-token-${index}` ? "✓" : "⧉"}
+                          </button>
+                          <span title={row.token}>{row.token}</span>
+                        </div>
+                      </td>
                       <td>
                         {String(row.account_management ?? "").trim() ? (
                           <span className="accountManagerCell">
@@ -4249,19 +4917,38 @@ function HomeContent() {
                           "—"
                         )}
                       </td>
-                      <td>{row.status}</td>
-                      <td>{brl(row.investido)}</td>
-                      {data.dashboard.active_platforms.map((platform) => (
-                        <td key={`${row.token}-${platform}`}>{brl(Number(row[platform] ?? 0))}</td>
-                      ))}
-                      <td>{brl(row.total_plataformas)}</td>
-                      <td>{row.pct_investido.toFixed(1)}%</td>
-                      <td>{row.campaign_start ? formatDateBr(row.campaign_start) : "—"}</td>
-                      <td>{row.campaign_end ? formatDateBr(row.campaign_end) : "—"}</td>
+                      <td>
+                        <span className={campaignStatusBadgeClass(String(row.status ?? ""))}>{row.status}</span>
+                      </td>
+                      <td className="stackNumericCellRight stackNumericCellFinancial">
+                        <div className="journeyInvestmentCell">
+                          <span className="journeyInvestmentValue">{brl(row.investido)}</span>
+                          <div className="journeyBudgetProgress" aria-hidden="true">
+                            <span
+                              className="journeyBudgetProgressFill"
+                              style={{ width: `${campaignBudgetProgressFillPct(row).toFixed(1)}%` }}
+                            />
+                          </div>
+                          <span className="journeyBudgetPct">{campaignBudgetSpentPct(row).toFixed(1)}% budget</span>
+                        </div>
+                      </td>
+                      <td className="stackNumericCellRight stackNumericCellFinancial">{brl(row.total_plataformas)}</td>
+                      {isJourneyBreakdownExpanded
+                        ? data.dashboard.active_platforms.map((platform) => (
+                            <td key={`${row.token}-${platform}`} className="stackNumericCellRight">
+                              {brl(Number(row[platform] ?? 0))}
+                            </td>
+                          ))
+                        : null}
+                      <td className="journeyRowActionCell" aria-hidden="true">
+                        <span className="journeyRowActionHint">Ver campanha</span>
+                        <span className="journeyRowActionIcon">→</span>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
             </div>
           )}
         </section>
@@ -4281,182 +4968,555 @@ function HomeContent() {
       const usedPct = Math.max(0, Math.min(100, cap > 0 ? (impressions / cap) * 100 : 0));
       const remainingImpressions = Math.max(0, cap - impressions);
       const remainingPct = Math.max(0, 100 - usedPct);
-      const progressColor = usedPct >= 80 ? "#f5272b" : usedPct >= 60 ? "#edd900" : "#3397b9";
-      const nexdFormatPieData = (page.layouts ?? [])
-        .map((row, index) => ({
-          name: row.layout,
-          value: Number(row.estimated_cost_brl ?? 0),
-          color: [
-            "#3397b9",
-            "#018376",
-            "#4e1e9c",
-            "#4cb050",
-            "#246c84",
-            "#edd900",
-            "#536872",
-            "#8fd4ea",
-          ][index % 8],
-        }))
-        .filter((row) => row.value > 0);
-      const nexdFormatPieTotal = nexdFormatPieData.reduce((sum, row) => sum + row.value, 0);
+      const paceVs = nexdPaceVsExpected(usedPct, periodStart, periodEnd);
+
+      const nexdCapContextLine = `Cap: ${formatNexdCapSizePt(cap)} · ${formatNexdPeriodMonthRangeUltraPt(periodStart, periodEnd)}`;
+
+      const nexdForecast = nexdForecastEndPeriodCapPct(periodStart, periodEnd, usedPct);
+      const nexdSignedGapPct = paceVs.expectedPct != null ? usedPct - paceVs.expectedPct : null;
+      const forecastRounded = nexdForecast ? Math.round(nexdForecast.forecastPct) : null;
+      const nexdSummaryRhythm = nexdNexdSummaryRhythmPresentation(usedPct, paceVs, forecastRounded);
+      const forecastHot = forecastRounded != null && forecastRounded > 100;
+      const forecastWarm = forecastRounded != null && forecastRounded >= 85 && !forecastHot;
+      const nexdTrendLine = nexdCapTrendBodyCoherent(forecastRounded, paceVs.vs);
+      const nexdForecastLeftKpi =
+        nexdForecast != null && forecastRounded != null && !forecastHot
+          ? {
+              line: `Previsão: ~${forecastRounded}% do cap`,
+              hot: false,
+            }
+          : null;
+      const nexdShowTrendStrip = !forecastHot;
+      const nexdTrendLineKpi = forecastHot ? null : nexdTrendLine;
+
+      const pacingCtx = nexdPeriodPacingContext(periodStart, periodEnd);
+      const dailyAvgImpressions =
+        pacingCtx && pacingCtx.elapsedDays >= 1 ? impressions / pacingCtx.elapsedDays : null;
+      const todayMidnight = new Date();
+      todayMidnight.setHours(0, 0, 0, 0);
+      const daysToExhaustAtCurrentPace =
+        dailyAvgImpressions != null && dailyAvgImpressions > 0 && remainingImpressions > 0
+          ? Math.ceil(remainingImpressions / dailyAvgImpressions)
+          : null;
+      const exhaustCal =
+        daysToExhaustAtCurrentPace != null
+          ? new Date(
+              todayMidnight.getFullYear(),
+              todayMidnight.getMonth(),
+              todayMidnight.getDate() + daysToExhaustAtCurrentPace
+            )
+          : null;
+      const periodEndD = nexdParseIsoDateLocal(periodEnd);
+      const showExhaustDate =
+        Boolean(
+          exhaustCal &&
+            periodEndD &&
+            exhaustCal.getTime() <= periodEndD.getTime() &&
+            usedPct < 100 &&
+            impressions > 0
+        ) && exhaustCal != null;
+
+      const nexdBarFillClassName = nexdCapBarFillClass(usedPct, forecastRounded);
+      const nexdBarTodayPct = Math.min(100, Math.max(0, usedPct));
+      const nexdBarExpectedPct =
+        paceVs.expectedPct != null ? Math.min(100, Math.max(0, paceVs.expectedPct)) : null;
+      const nexdBarVisualTone = nexdCapBarVisualTone(nexdBarFillClassName);
+
+      const layoutsSorted = [...(page.layouts ?? [])].sort((a, b) => b.impressions - a.impressions);
+
+      const campaignsSorted = [...(page.campaigns ?? [])].sort((a, b) => b.impressions - a.impressions);
+      const layoutsSortedForTable = [...layoutsSorted].sort((a, b) => {
+        const creativesA = Number(a.creatives ?? 0);
+        const creativesB = Number(b.creatives ?? 0);
+        const perCreativeA = creativesA > 0 ? a.impressions / creativesA : -1;
+        const perCreativeB = creativesB > 0 ? b.impressions / creativesB : -1;
+        const pctImpA = impressions > 0 ? (a.impressions / impressions) * 100 : 0;
+        const pctImpB = impressions > 0 ? (b.impressions / impressions) * 100 : 0;
+        const estimatedCostA = Number(a.estimated_cost_brl ?? 0);
+        const estimatedCostB = Number(b.estimated_cost_brl ?? 0);
+
+        let cmp = 0;
+        if (nexdFormatSort.key === "layout") {
+          cmp = a.layout.localeCompare(b.layout, "pt-BR", { sensitivity: "base" });
+        } else if (nexdFormatSort.key === "pct_imp") {
+          cmp = pctImpA - pctImpB;
+        } else if (nexdFormatSort.key === "impressions") {
+          cmp = a.impressions - b.impressions;
+        } else if (nexdFormatSort.key === "creatives") {
+          cmp = creativesA - creativesB;
+        } else if (nexdFormatSort.key === "per_creative") {
+          cmp = perCreativeA - perCreativeB;
+        } else {
+          cmp = estimatedCostA - estimatedCostB;
+        }
+        if (cmp === 0) {
+          return a.layout.localeCompare(b.layout, "pt-BR", { sensitivity: "base" });
+        }
+        return nexdFormatSort.direction === "asc" ? cmp : -cmp;
+      });
+      const NEXD_CAMPAIGN_TABLE_TOP = 5;
+      const tailNexdCampaigns = campaignsSorted.slice(NEXD_CAMPAIGN_TABLE_TOP);
+      const othersImpCamp = tailNexdCampaigns.reduce((s, c) => s + c.impressions, 0);
+      const othersPctCamp = impressions > 0 ? (othersImpCamp / impressions) * 100 : 0;
+      type NexdCampaignTableRow =
+        | { kind: "campaign"; row: (typeof campaignsSorted)[number]; displayIndex: number }
+        | { kind: "others"; count: number; impressions: number; pct: number };
+      const nexdCampaignTableRows: NexdCampaignTableRow[] = [];
+      if (nexdCampaignTableShowAll) {
+        campaignsSorted.forEach((row, displayIndex) => {
+          nexdCampaignTableRows.push({ kind: "campaign", row, displayIndex });
+        });
+      } else {
+        campaignsSorted.slice(0, NEXD_CAMPAIGN_TABLE_TOP).forEach((row, displayIndex) => {
+          nexdCampaignTableRows.push({ kind: "campaign", row, displayIndex });
+        });
+        if (tailNexdCampaigns.length > 0) {
+          nexdCampaignTableRows.push({
+            kind: "others",
+            count: tailNexdCampaigns.length,
+            impressions: othersImpCamp,
+            pct: othersPctCamp,
+          });
+        }
+      }
+
       return (
-        <section className="panel">
-          <h2>Nexd</h2>
-          <p className="muted nexdSummaryLine">{brl(page.spend_brl)} • {impressions.toLocaleString("pt-BR")} impressões</p>
-          <div className="panelSub" ref={nexdUsageChartRef}>
-            <div className="panelSubHeading">
-              <h3>Uso do pacote</h3>
+        <div className="nexdPlatformStack">
+          <div className="nexdSummaryCapRow">
+            <div
+              className="nexdHomeKpiWrap"
+              aria-label={`Resumo Nexd: ${usedPct.toFixed(1).replace(".", ",")}% do cap usado, gasto ${brl(Number(page.spend_brl ?? 0))}, ${Math.round(impressions).toLocaleString("pt-BR")} impressões, ${nexdSummaryRhythm.label}`}
+            >
+              <KpiCard
+                title="NEXD"
+                value={`${usedPct.toFixed(1).replace(".", ",")}% usado`}
+                nexdSpendSecondary={{
+                  brl: brl(Number(page.spend_brl ?? 0)),
+                  usd:
+                    page.spend_usd != null && Number.isFinite(Number(page.spend_usd))
+                      ? `USD ${Number(page.spend_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+                      : undefined,
+                }}
+                nexdTrendLine={nexdTrendLineKpi}
+                metrics={[{ label: "Impressões", value: Math.round(impressions).toLocaleString("pt-BR") }]}
+                nexdFoldDetails
+                nexdSummary={{
+                  rhythmEmoji: nexdSummaryRhythm.emoji,
+                  rhythmLabel: nexdSummaryRhythm.label,
+                  rhythmTone: nexdSummaryRhythm.tone,
+                  paceHint: nexdSummaryRhythm.paceHint,
+                  forecastLeft: nexdForecastLeftKpi,
+                }}
+                titleEmphasis
+                logoSrc={PLATFORM_LOGOS.Nexd}
+                budget={
+                  hasDashboardFilters
+                    ? undefined
+                    : getBudgetForPlatform("Nexd", Number(page.spend_brl ?? 0), {
+                        preferDisplayedSpend: hasDashboardScopeFilters,
+                      })
+                }
+              />
+            </div>
+
+            <section className="panel nexdCapPanel nexdPanelTight" ref={nexdUsageChartRef}>
+            <div className="nexdCapPanelHeading">
+              <h3 className="nexdSectionTitle">Uso do pacote</h3>
               <button
                 type="button"
-                className="button buttonGhost buttonSmall"
+                className="button buttonGhost buttonSmall chartExportButton"
+                aria-label="Exportar uso do pacote Nexd como PNG"
                 onClick={() => exportChartAsPng(nexdUsageChartRef.current, "nexd uso do pacote")}
               >
-                Exportar PNG
+                <span className="buttonLabelWithIcon">
+                  <DownloadIcon />
+                  PNG
+                </span>
               </button>
             </div>
-            <div style={{ padding: "8px 4px 4px" }}>
-              <div
-                style={{
-                  width: "100%",
-                  height: "18px",
-                  borderRadius: "999px",
-                  background: "rgba(148, 163, 184, 0.25)",
-                  overflow: "hidden",
-                }}
-                aria-label="Uso do pacote Nexd"
-              >
-                <div
-                  style={{
-                    width: `${usedPct.toFixed(2)}%`,
-                    height: "100%",
-                    borderRadius: "999px",
-                    background: progressColor,
-                    transition: "width 0.35s ease",
-                  }}
-                />
+            <p
+              className="nexdPeriodLine muted"
+              title={`Período: ${formatDateBr(periodStart)} — ${formatDateBr(periodEnd)} · cap ${cap.toLocaleString("pt-BR")} impressões`}
+              aria-label={`Cap ${cap.toLocaleString("pt-BR")} impressões, período de ${formatDateBr(periodStart)} a ${formatDateBr(periodEnd)}`}
+            >
+              {nexdCapContextLine}
+            </p>
+
+            <div
+              className="nexdCapUsageBarBlock"
+              role="group"
+              aria-label={
+                paceVs.expectedPct != null
+                  ? `Uso do cap: atual ${usedPct.toFixed(1)}%, esperado para hoje ${paceVs.expectedPct.toFixed(0)}%`
+                  : `Uso do cap: ${usedPct.toFixed(1)}%`
+              }
+            >
+              <div className={`nexdCapUsageBarVisual nexdCapUsageBarVisual--${nexdBarVisualTone}`}>
+                <div className="nexdCapUsageBarLabelLayer" aria-hidden="true">
+                  <span
+                    className="nexdCapUsageBarFlyLabel nexdCapUsageBarFlyLabel--today"
+                    style={nexdCapUsageBarFlyLabelStyle(nexdBarTodayPct)}
+                    title={`Consumo hoje: ${usedPct.toFixed(1)}% do cap`}
+                  >
+                    <span className="nexdCapUsageBarFlyLabelText">Hoje</span>
+                    <span className="nexdCapUsageBarFlyLabelPct">{usedPct.toFixed(1).replace(".", ",")}%</span>
+                  </span>
+                </div>
+                <div className="nexdCapUsageBarTrack">
+                  <div className="nexdCapUsageBarTrackInner" aria-hidden="true">
+                    <div
+                      className={`nexdCapUsageBarFill budgetProgressFill ${nexdBarFillClassName}`}
+                      style={{ width: `${nexdBarTodayPct}%`, transition: "width 0.35s ease" }}
+                    />
+                  </div>
+                  {nexdBarExpectedPct != null && paceVs.expectedPct != null ? (
+                    <span
+                      className="nexdCapUsageBarExpectedMarker"
+                      style={{ left: `${nexdBarExpectedPct}%` }}
+                      title={`Esperado: ${paceVs.expectedPct.toFixed(0)}%`}
+                    />
+                  ) : null}
+                </div>
+                {nexdBarExpectedPct != null && paceVs.expectedPct != null ? (
+                  <div className="nexdCapUsageBarExpectedBelowLayer" aria-hidden="true">
+                    <span
+                      className="nexdCapUsageBarFlyLabel nexdCapUsageBarFlyLabel--expected nexdCapUsageBarFlyLabel--expectedBelow"
+                      style={nexdCapUsageBarFlyLabelStyle(nexdBarExpectedPct)}
+                      title={`Esperado hoje: ${paceVs.expectedPct.toFixed(0)}% do cap (ritmo linear do período)`}
+                    >
+                      <span className="nexdCapUsageBarFlyLabelText">Esperado</span>
+                      <span className="nexdCapUsageBarFlyLabelPct">
+                        {paceVs.expectedPct.toFixed(0).replace(".", ",")}%
+                      </span>
+                    </span>
+                  </div>
+                ) : null}
               </div>
-              <div
-                style={{
-                  marginTop: "10px",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: "12px",
-                  color: "#a8b8c0",
-                  fontSize: "0.95rem",
-                }}
-              >
-                <span>{usedPct.toFixed(1)}% usado</span>
-                <span>{remainingPct.toFixed(1)}% restante</span>
+              <div className="nexdCapUsageBarLegend muted">
+                {paceVs.expectedPct != null ? (
+                  nexdSignedGapPct != null && Math.abs(nexdSignedGapPct) >= 0.05 ? (
+                    <span className="nexdCapUsageBarLegendGap">
+                      {paceVs.vs === "above"
+                        ? `${Math.abs(nexdSignedGapPct).toFixed(1).replace(".", ",")} pts acima do esperado`
+                        : paceVs.vs === "below"
+                          ? `${Math.abs(nexdSignedGapPct).toFixed(1).replace(".", ",")} pts abaixo do esperado`
+                          : "Próximo do esperado para a data"}
+                    </span>
+                  ) : (
+                    <span className="nexdCapUsageBarLegendHint">Hoje e esperado muito próximos no calendário.</span>
+                  )
+                ) : (
+                  <span>
+                    Uso <strong>{usedPct.toFixed(1).replace(".", ",")}%</strong> do cap
+                  </span>
+                )}
               </div>
             </div>
-            <p className="muted">
-              Cap: {cap.toLocaleString("pt-BR")} • Restam: {remainingImpressions.toLocaleString("pt-BR")}
-            </p>
+
+            {pacingCtx ? (
+              <div
+                className="nexdCapTemporalMetrics"
+                role="group"
+                aria-label={[
+                  `${pacingCtx.daysLeftInPeriod} dia${pacingCtx.daysLeftInPeriod === 1 ? "" : "s"} restantes no período`,
+                  dailyAvgImpressions != null && pacingCtx.elapsedDays >= 1
+                    ? `Média ${formatImpressionsCompactPt(Math.round(dailyAvgImpressions))} impressões por dia`
+                    : null,
+                  showExhaustDate && exhaustCal
+                    ? `Projeção de esgotamento do limite em ${formatDateBr(nexdDateToIsoLocal(exhaustCal))}`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              >
+                <div className="nexdCapTemporalMetric">
+                  <p className="nexdCapTemporalMetricLine">
+                    <span className="nexdCapTemporalMetricValue">{pacingCtx.daysLeftInPeriod}</span>{" "}
+                    <span className="nexdCapTemporalMetricRest">dias restantes</span>
+                  </p>
+                </div>
+                {dailyAvgImpressions != null && pacingCtx.elapsedDays >= 1 ? (
+                  <div className="nexdCapTemporalMetric">
+                    <p className="nexdCapTemporalMetricLine nexdCapTemporalMetricLine--tight">
+                      <span className="nexdCapTemporalMetricValue">
+                        {formatImpressionsCompactPt(Math.round(dailyAvgImpressions))}
+                      </span>
+                      <span className="nexdCapTemporalMetricPer">/dia</span>
+                      <span className="nexdCapTemporalMetricInlineMuted"> impressões</span>
+                    </p>
+                  </div>
+                ) : null}
+                {showExhaustDate && exhaustCal ? (
+                  <div className="nexdCapTemporalMetric">
+                    <p className="nexdCapTemporalMetricLine nexdCapTemporalMetricLine--tight">
+                      <span className="nexdCapTemporalMetricRest">Termina em </span>
+                      <span className="nexdCapTemporalMetricValue">
+                        {formatDateBrShort(nexdDateToIsoLocal(exhaustCal))}
+                      </span>
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            <details className="nexdCapMoreDetails">
+              <summary className="nexdCapMoreDetailsSummary">Números do pacote</summary>
+              <div className="nexdCapMoreDetailsBody muted">
+                <p className="nexdCapMoreDetailsLine">
+                  <strong>{remainingPct.toFixed(1).replace(".", ",")}%</strong> do cap ainda livre (
+                  {formatImpressionsCompactPt(remainingImpressions)} · {remainingImpressions.toLocaleString("pt-BR")}{" "}
+                  impressões)
+                </p>
+              </div>
+            </details>
+
+            {nexdForecast && forecastRounded != null ? (
+              <div
+                className={`nexdCapForecastSpotlight ${
+                  forecastHot
+                    ? "nexdCapForecastSpotlight--hot"
+                    : forecastWarm
+                      ? "nexdCapForecastSpotlight--warm"
+                      : "nexdCapForecastSpotlight--calm"
+                }`}
+                role="status"
+                title="Projeção pelo ritmo de consumo até aqui, estendida ao último dia do período."
+                aria-label={
+                  forecastHot
+                    ? `Vai estourar o limite. ${nexdForecastDetailLinePt(nexdForecast.forecastPct)}`
+                    : `Previsão de aproximadamente ${forecastRounded} por cento do cap consumido até o fim do período`
+                }
+              >
+                {!forecastHot ? (
+                  <span className="nexdCapForecastSpotlightEmoji" aria-hidden="true">
+                    {forecastWarm ? "🟡" : "🟢"}
+                  </span>
+                ) : (
+                  <span className="nexdCapForecastSpotlightEmoji" aria-hidden="true">
+                    ⚠️
+                  </span>
+                )}
+                <div className="nexdCapForecastSpotlightBody">
+                  <p className="nexdCapForecastSpotlightTitle">
+                    {forecastHot ? "Vai estourar o limite" : `Previsão: ~${forecastRounded}% do cap`}
+                  </p>
+                  <p className="nexdCapForecastSpotlightSub muted">
+                    {forecastHot
+                      ? nexdForecastDetailLinePt(nexdForecast.forecastPct)
+                      : "até o fim do período se mantiver o ritmo"}
+                  </p>
+                </div>
+              </div>
+            ) : null}
+
+            {nexdShowTrendStrip ? (
+              <p className="nexdPaceTrend nexdPaceTrend--strip">
+                <span className="nexdPaceTrendLead">Tendência:</span>{" "}
+                <span className="nexdPaceTrendBody">{nexdTrendLine}</span>
+              </p>
+            ) : null}
+          </section>
           </div>
 
-          <div className="panelSub">
-            <h3>Por campanha</h3>
-            <div className="tableWrap">
-              <table>
+          <section className="panel nexdPanelCard nexdPanelTight">
+            <h3 className="nexdSectionTitle">Por campanha</h3>
+            <div className="tableWrap nexdTableWrap">
+              <table className="nexdCampaignTable">
+                <colgroup>
+                  <col className="nexdCampaignColName" />
+                  <col className="nexdCampaignColDist" />
+                  <col className="nexdCampaignColImp" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Campanha</th>
-                    <th>Impressões</th>
-                    <th>% do total</th>
+                    <th>Distribuição</th>
+                    <th className="nexdThNumeric">Impressões</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(page.campaigns ?? []).map((row) => (
-                    <tr key={row.name}>
-                      <td>{row.name}</td>
-                      <td>{row.impressions.toLocaleString("pt-BR")}</td>
-                      <td>{impressions > 0 ? `${((row.impressions / impressions) * 100).toFixed(1)}%` : "0.0%"}</td>
+                  {campaignsSorted.length ? (
+                    nexdCampaignTableRows.map((entry) => {
+                      if (entry.kind === "others") {
+                        const pct = entry.pct;
+                        return (
+                          <tr key="__nexd_others_campaigns__" className="nexdCampaignRow nexdCampaignRowOthers">
+                            <td className="nexdCampaignNameCell nexdCampaignOthersName" title="Soma das demais campanhas">
+                              Outras campanhas
+                              <span className="nexdCampaignOthersCount muted"> ({entry.count})</span>
+                            </td>
+                            <td className="nexdInlineBarCell">
+                              <div className="nexdInlineBarContent">
+                                <div className="nexdInlineBarTrack nexdInlineBarTrack--muted" aria-hidden="true">
+                                  <div
+                                    className="nexdInlineBarFill nexdInlineBarFill--muted"
+                                    style={{ width: `${Math.min(100, pct)}%` }}
+                                  />
+                                </div>
+                                <span className="nexdInlineBarPct nexdInlineBarPct--muted">{pct.toFixed(1)}%</span>
+                              </div>
+                            </td>
+                            <td className="nexdTdNumeric nexdTdNumericSecondary">
+                              {entry.impressions.toLocaleString("pt-BR")}
+                            </td>
+                          </tr>
+                        );
+                      }
+                      const { row, displayIndex } = entry;
+                      const pct = impressions > 0 ? (row.impressions / impressions) * 100 : 0;
+                      const isDominant = displayIndex === 0 && row.impressions > 0;
+                      return (
+                        <tr
+                          key={row.name}
+                          className={isDominant ? "nexdCampaignRow nexdCampaignRowDominant" : "nexdCampaignRow"}
+                        >
+                          <td className="nexdCampaignNameCell" title={row.name}>
+                            {isDominant ? (
+                              <span className="nexdCampaignDominantBadge" aria-label="Campanha dominante">
+                                Dominante
+                              </span>
+                            ) : null}
+                            <span className="nexdCampaignNameText">{truncateChars(row.name, isDominant ? 36 : 42)}</span>
+                          </td>
+                          <td className="nexdInlineBarCell">
+                            <div className="nexdInlineBarContent">
+                              <div
+                                className={`nexdInlineBarTrack${isDominant ? " nexdInlineBarTrack--lead" : " nexdInlineBarTrack--muted"}`}
+                                aria-hidden="true"
+                              >
+                                <div
+                                  className={`nexdInlineBarFill${isDominant ? "" : " nexdInlineBarFill--muted"}`}
+                                  style={{ width: `${Math.min(100, pct)}%` }}
+                                />
+                              </div>
+                              <span className={`nexdInlineBarPct${isDominant ? " nexdInlineBarPct--lead" : " nexdInlineBarPct--muted"}`}>
+                                {pct.toFixed(1)}%
+                              </span>
+                            </div>
+                          </td>
+                          <td className="nexdTdNumeric nexdTdNumericSecondary">{row.impressions.toLocaleString("pt-BR")}</td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={3} className="nexdTableEmptyCell">
+                        Nenhuma campanha retornada para o período.
+                      </td>
                     </tr>
-                  ))}
+                  )}
                 </tbody>
               </table>
             </div>
-          </div>
+            {campaignsSorted.length > NEXD_CAMPAIGN_TABLE_TOP ? (
+              <div className="nexdCampaignTableActions">
+                {nexdCampaignTableShowAll ? (
+                  <button
+                    type="button"
+                    className="button buttonGhost buttonSmall"
+                    onClick={() => setNexdCampaignTableShowAll(false)}
+                  >
+                    Ver só as {NEXD_CAMPAIGN_TABLE_TOP} principais
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="button buttonGhost buttonSmall"
+                    onClick={() => setNexdCampaignTableShowAll(true)}
+                  >
+                    Ver todas ({campaignsSorted.length})
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </section>
 
           {(page.layouts ?? []).length ? (
-            <div className="panelSub">
-              <div className="panelSubHeading">
-                <div className="panelSubTitleWithInfo">
-                  <h3>Por formato</h3>
-                  <span
-                    className="infoTooltipIcon"
-                    title="Custo estimado por formato = impressões do formato x 0,0014 BRL (CPM fixo de R$ 1,40). A API da Nexd não retorna custo real por formato."
-                    aria-label="Disclaimer: custo por formato é estimado por CPM fixo"
-                  >
-                    i
-                  </span>
-                </div>
-              </div>
-              {nexdFormatPieData.length ? (
-                <>
-                <div className="chartWrap chartWrapSmall">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={nexdFormatPieData}
-                        dataKey="value"
-                        nameKey="name"
-                        innerRadius={62}
-                        outerRadius={96}
-                        paddingAngle={2}
-                        stroke="rgba(28, 38, 47, 0.7)"
-                        strokeWidth={1}
-                      >
-                        {nexdFormatPieData.map((entry) => (
-                          <Cell key={entry.name} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip
-                        formatter={(value) => brl(Number(Array.isArray(value) ? value[0] : value ?? 0))}
-                        labelFormatter={(label) => `Formato: ${label}`}
-                      />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className="chartLegend">
-                  {nexdFormatPieData.map((entry) => (
-                    <div className="chartLegendItem" key={`nexd-format-${entry.name}`}>
-                      <span className="chartLegendDot" style={{ backgroundColor: entry.color }} />
-                      <span>
-                        {entry.name}{" "}
-                        {nexdFormatPieTotal > 0 ? `(${((entry.value / nexdFormatPieTotal) * 100).toFixed(1)}%)` : "(0.0%)"}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-                <p className="muted">Total do custo estimado por formato: {brl(nexdFormatPieTotal)}</p>
-                </>
-              ) : null}
-              <div className="tableWrap">
+            <section className="panel nexdPanelCard nexdPanelTight">
+              <h3 className="nexdSectionTitle">Por formato</h3>
+              <p className="nexdSectionHint muted">
+                Distribuição de impressões e custo por formato no período.
+              </p>
+
+              <div className="tableWrap nexdTableWrap nexdFormatTableWrap">
                 <table>
                   <thead>
                     <tr>
-                      <th>Formato</th>
-                      <th>Impressões</th>
-                      <th>Custo estimado (BRL)</th>
-                      <th>% custo estimado</th>
+                      <th className={nexdFormatSort.key === "layout" ? "stackThSorted" : ""}>
+                        <button type="button" className={nexdFormatSortButtonClass("layout")} onClick={() => toggleNexdFormatSort("layout")}>
+                          <span>Formato</span>
+                          <span className="stackSortIndicator">{nexdFormatSortIndicator("layout")}</span>
+                        </button>
+                      </th>
+                      <th className={`nexdThNumeric stackThNumeric ${nexdFormatSort.key === "pct_imp" ? "stackThSorted" : ""}`}>
+                        <button type="button" className={nexdFormatSortButtonClass("pct_imp")} onClick={() => toggleNexdFormatSort("pct_imp")}>
+                          <span>% impressões</span>
+                          <span className="stackSortIndicator">{nexdFormatSortIndicator("pct_imp")}</span>
+                        </button>
+                      </th>
+                      <th className={`nexdThNumeric stackThNumeric ${nexdFormatSort.key === "impressions" ? "stackThSorted" : ""}`}>
+                        <button
+                          type="button"
+                          className={nexdFormatSortButtonClass("impressions")}
+                          onClick={() => toggleNexdFormatSort("impressions")}
+                        >
+                          <span>Impressões</span>
+                          <span className="stackSortIndicator">{nexdFormatSortIndicator("impressions")}</span>
+                        </button>
+                      </th>
+                      <th className={`nexdThNumeric stackThNumeric ${nexdFormatSort.key === "creatives" ? "stackThSorted" : ""}`}>
+                        <button type="button" className={nexdFormatSortButtonClass("creatives")} onClick={() => toggleNexdFormatSort("creatives")}>
+                          <span>Criativos</span>
+                          <span className="stackSortIndicator">{nexdFormatSortIndicator("creatives")}</span>
+                        </button>
+                      </th>
+                      <th className={`nexdThNumeric stackThNumeric ${nexdFormatSort.key === "per_creative" ? "stackThSorted" : ""}`}>
+                        <button
+                          type="button"
+                          className={nexdFormatSortButtonClass("per_creative")}
+                          onClick={() => toggleNexdFormatSort("per_creative")}
+                        >
+                          <span>Imp. / criativo</span>
+                          <span className="stackSortIndicator">{nexdFormatSortIndicator("per_creative")}</span>
+                        </button>
+                      </th>
+                      <th className={`nexdThNumeric stackThNumeric ${nexdFormatSort.key === "estimated_cost_brl" ? "stackThSorted" : ""}`}>
+                        <button
+                          type="button"
+                          className={nexdFormatSortButtonClass("estimated_cost_brl")}
+                          onClick={() => toggleNexdFormatSort("estimated_cost_brl")}
+                        >
+                          <span>Custo est. (BRL)</span>
+                          <span className="stackSortIndicator">{nexdFormatSortIndicator("estimated_cost_brl")}</span>
+                        </button>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(page.layouts ?? []).map((row) => (
-                      <tr key={row.layout}>
-                        <td>{row.layout}</td>
-                        <td>{row.impressions.toLocaleString("pt-BR")}</td>
-                        <td>{brl(Number(row.estimated_cost_brl ?? 0))}</td>
-                        <td>{`${Number(row.pct_estimated_cost ?? 0).toFixed(1)}%`}</td>
-                      </tr>
-                    ))}
+                    {layoutsSortedForTable.map((row) => {
+                      const creatives = Number(row.creatives ?? 0);
+                      const perCreative =
+                        creatives > 0 ? Math.round(row.impressions / creatives) : null;
+                      const pctImp = impressions > 0 ? (row.impressions / impressions) * 100 : 0;
+                      return (
+                        <tr key={row.layout}>
+                          <td>{row.layout}</td>
+                          <td className="nexdTdNumeric">{pctImp.toFixed(1)}%</td>
+                          <td className="nexdTdNumeric">{row.impressions.toLocaleString("pt-BR")}</td>
+                          <td className="nexdTdNumeric">{creatives.toLocaleString("pt-BR")}</td>
+                          <td className="nexdTdNumeric">
+                            {perCreative != null ? perCreative.toLocaleString("pt-BR") : "—"}
+                          </td>
+                          <td className="nexdTdNumeric">{brl(Number(row.estimated_cost_brl ?? 0))}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
-            </div>
+            </section>
           ) : null}
-        </section>
+        </div>
       );
     }
 
@@ -4654,7 +5714,7 @@ function HomeContent() {
           </section>
 
           {!rows.length ? (
-            <p className="alertInfo">Nenhuma line com gasto encontrada.</p>
+            <DspLinesNoDataEmptyState />
           ) : (
             <section className="card stackDetailCard">
               <div className="stackDetailHeader">
@@ -4690,9 +5750,12 @@ function HomeContent() {
                   </div>
                 </div>
               </div>
-              <p className="stackDetailCounter">
-                {sortedRows.length.toLocaleString("pt-BR")} lines analisadas • {brl(filteredTotalGasto)} no período
-              </p>
+              {sortedRows.length > 0 ? (
+                <p className="stackDetailCounter">
+                  {sortedRows.length.toLocaleString("pt-BR")} lines analisadas • {brl(filteredTotalGasto)} no período
+                </p>
+              ) : null}
+              {sortedRows.length > 0 ? (
               <div className="tableWrap">
                 <table className="stackDetailTable">
                   <colgroup>
@@ -4887,9 +5950,11 @@ function HomeContent() {
                   </tbody>
                 </table>
               </div>
-              {!sortedRows.length ? (
-                <p className="alertInfo">Nenhuma line encontrada para a busca ou o filtro ativo.</p>
-              ) : null}
+              ) : (
+                <div className="tableWrap tableWrapDspEmpty">
+                  <DspLinesFilteredEmptyState onClearFilters={clearDspLineTableFilters} />
+                </div>
+              )}
             </section>
           )}
         </>
@@ -4922,7 +5987,7 @@ function HomeContent() {
           {page.currency === "USD" ? ` • USD ${(page.spend_usd ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}` : ""}
         </p>
         {!rows.length ? (
-          <p className="alertInfo">Nenhuma line com gasto encontrada.</p>
+          <DspLinesNoDataEmptyState />
         ) : (
           <>
             <div className="tableTopActions">
@@ -4944,7 +6009,9 @@ function HomeContent() {
               </label>
             </div>
             {!simpleDspTableRows.length ? (
-              <p className="alertInfo">Nenhuma line encontrada para o filtro ativo.</p>
+              <div className="tableWrap tableWrapDspEmpty">
+                <DspLinesFilteredEmptyState onClearFilters={clearDspLineTableFilters} />
+              </div>
             ) : (
               <div className="tableWrap">
                 <table>

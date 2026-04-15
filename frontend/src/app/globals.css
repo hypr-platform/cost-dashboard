@@ -336,6 +336,17 @@ body {
   background: var(--content-divider);
 }
 
+/* Entre gráficos e card da jornada: linha no fundo da página (não no card), senão some no #surface */
+.homeChartsJourneyDivider {
+  display: block;
+  width: 100%;
+  height: 1px;
+  margin: 28px 0 18px;
+  padding: 0;
+  border: 0;
+  background: var(--content-divider);
+}
+
 .platformTopBar {
   margin-bottom: 0;
   min-height: 88px;
@@ -800,8 +811,1146 @@ body {
   font-size: 0.9rem;
 }
 
-.nexdSummaryLine {
-  margin-bottom: 12px;
+/* ─── Plataforma Nexd: KPI fora; cada bloco em .panel próprio ─── */
+.nexdPlatformStack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.nexdPlatformStack > .panel + .panel {
+  margin-top: 0;
+}
+
+.nexdPlatformStack .panel.nexdPanelTight {
+  padding: 10px 12px;
+}
+
+/* Card principal (NEXD) primeiro; “Uso do pacote” logo abaixo, largura total. */
+.nexdSummaryCapRow {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+}
+
+.nexdHomeKpiWrap {
+  max-width: min(380px, 100%);
+  min-width: 0;
+}
+
+.nexdSummaryCapRow .nexdHomeKpiWrap {
+  max-width: min(420px, 100%);
+  align-self: flex-start;
+}
+
+.nexdSummaryCapRow .nexdCapPanel {
+  width: 100%;
+  min-height: 0;
+}
+
+.cardNexdSummary {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.cardNexdSummaryRhythm {
+  margin: 0 0 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: 0.82rem;
+  font-weight: 750;
+  color: #f1f5f9;
+  letter-spacing: 0.01em;
+}
+
+.cardNexdSummaryRhythmEmoji {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.cardNexdSummaryPace {
+  margin: 0;
+  font-size: 0.76rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.cardNexdSummary--risk .cardNexdSummaryRhythm {
+  color: #fecaca;
+}
+
+.cardNexdSummary--warn .cardNexdSummaryRhythm {
+  color: #fef9c3;
+}
+
+.cardNexdSummary--neutral .cardNexdSummaryRhythm {
+  color: #e0f2fe;
+}
+
+.cardNexdSummary--ok .cardNexdSummaryRhythm {
+  color: #d1fae5;
+}
+
+.cardNexdForecastLeft {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  font-weight: 720;
+  line-height: 1.38;
+  color: #e2e8f0;
+  letter-spacing: 0.01em;
+}
+
+.cardNexdForecastLeft--hot {
+  color: #fecaca;
+  font-weight: 820;
+}
+
+.cardValueNexdCapLead {
+  font-size: 1.85rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.cardNexdSpendSecondary {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cardNexdSpendSecondaryBrl {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: #cbd5e1;
+  line-height: 1.3;
+}
+
+.cardNexdSpendSecondaryUsd {
+  margin: 0;
+  font-size: 0.76rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: #94a3b8;
+  opacity: 0.88;
+  line-height: 1.35;
+}
+
+.cardNexdTrendLine {
+  margin: 10px 0 0;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.cardNexdDetails {
+  margin-top: 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.28);
+  padding: 0;
+}
+
+.cardNexdDetailsSummary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  padding: 8px 10px;
+}
+
+.cardNexdDetailsSummary::-webkit-details-marker {
+  display: none;
+}
+
+.cardNexdDetailsSummary::after {
+  content: "▾";
+  float: right;
+  font-size: 0.72rem;
+  opacity: 0.75;
+}
+
+.cardNexdDetails[open] .cardNexdDetailsSummary::after {
+  transform: rotate(180deg);
+  display: inline-block;
+}
+
+.cardNexdDetailsBody {
+  padding: 0 10px 10px;
+}
+
+.cardNexdDetails .cardNexdSummary {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.cardNexdDetails .cardMetricBlock {
+  margin-top: 10px;
+}
+
+.nexdPanelCard,
+.nexdCapPanel {
+  min-height: 0;
+}
+
+.nexdCapTitleRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.nexdCapTitleRow .nexdSectionTitle {
+  margin-bottom: 0;
+}
+
+.nexdCapStatusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 750;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+}
+
+.nexdCapStatusBadgeEmoji {
+  flex-shrink: 0;
+  font-size: 0.82rem;
+  line-height: 1;
+}
+
+.nexdCapStatusBadge--risk {
+  color: #fecaca;
+  background: rgba(245, 39, 43, 0.16);
+  border: 1px solid rgba(245, 39, 43, 0.42);
+}
+
+.nexdCapStatusBadge--warn {
+  color: #fef9c3;
+  background: rgba(234, 179, 8, 0.14);
+  border: 1px solid rgba(234, 179, 8, 0.38);
+}
+
+.nexdCapStatusBadge--neutral {
+  color: #e0f2fe;
+  background: rgba(51, 151, 185, 0.16);
+  border: 1px solid rgba(51, 151, 185, 0.35);
+}
+
+.nexdCapStatusBadge--ok {
+  color: #d1fae5;
+  background: rgba(76, 176, 80, 0.14);
+  border: 1px solid rgba(76, 176, 80, 0.34);
+}
+
+.nexdCapPanelHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 2px;
+}
+
+.nexdCapPanelHeading .nexdSectionTitle {
+  margin-bottom: 0;
+}
+
+.nexdCapPanelHeading .chartExportButton {
+  flex-shrink: 0;
+  margin-top: 0;
+}
+
+.nexdCapSplitPctRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+  margin: 6px 0 2px;
+}
+
+.nexdCapSplitPctRow--stack {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px 0;
+}
+
+.nexdCapSplitPctItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.nexdCapSplitPctValue {
+  font-size: 1.2rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #f8fafc;
+  letter-spacing: -0.02em;
+}
+
+.nexdCapSplitPctLabel {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
+.nexdCapSplitPctSep {
+  font-size: 0.85rem;
+  font-weight: 500;
+  opacity: 0.45;
+}
+
+.nexdCapRemainCompact {
+  margin: 0 0 8px;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.nexdCapForecastSpotlight {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  border-radius: 9px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.nexdCapForecastSpotlightEmoji {
+  flex-shrink: 0;
+  font-size: 1.05rem;
+  line-height: 1.1;
+  margin-top: 1px;
+}
+
+.nexdCapForecastSpotlightEmoji--placeholder {
+  display: none;
+}
+
+.nexdCapForecastSpotlightBody {
+  min-width: 0;
+}
+
+.nexdCapForecastSpotlightTitle {
+  margin: 0 0 2px;
+  font-size: 0.88rem;
+  font-weight: 820;
+  letter-spacing: 0.01em;
+  color: #f8fafc;
+  line-height: 1.3;
+}
+
+.nexdCapForecastSpotlightSub {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.nexdCapForecastSpotlight--calm {
+  border-color: rgba(74, 222, 128, 0.28);
+  background: rgba(22, 101, 52, 0.12);
+}
+
+.nexdCapForecastSpotlight--warm {
+  border-color: rgba(250, 204, 21, 0.45);
+  background: rgba(113, 63, 18, 0.18);
+}
+
+.nexdCapForecastSpotlight--warm .nexdCapForecastSpotlightTitle {
+  color: #fef9c3;
+}
+
+.nexdCapForecastSpotlight--hot {
+  border: 1px solid rgba(248, 113, 113, 0.72);
+  background: linear-gradient(135deg, rgba(127, 29, 29, 0.42), rgba(69, 10, 10, 0.55));
+  padding: 9px 11px;
+  gap: 8px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+
+.nexdCapForecastSpotlight--hot .nexdCapForecastSpotlightTitle {
+  color: #fff1f2;
+  font-size: 0.92rem;
+  font-weight: 850;
+}
+
+.nexdCapForecastSpotlight--hot .nexdCapForecastSpotlightSub {
+  font-size: 0.74rem;
+  margin-top: 2px;
+  color: #fecdd3;
+  font-weight: 650;
+}
+
+.nexdCapForecastSpotlight--hot .nexdCapForecastSpotlightEmoji {
+  font-size: 1.15rem;
+  line-height: 1;
+  filter: drop-shadow(0 0 6px rgba(248, 113, 113, 0.55));
+}
+
+.nexdPaceBlock {
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: rgba(15, 23, 42, 0.35);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.nexdPaceBarRows {
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.nexdPaceBarRow {
+  display: grid;
+  grid-template-columns: minmax(7.25rem, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.nexdPaceBarLabelRich {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 650;
+  color: #cbd5e1;
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+}
+
+.nexdPaceBarLabelKey {
+  font-weight: 650;
+  color: #94a3b8;
+}
+
+.nexdPaceBarLabelPct {
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+  color: #f8fafc;
+}
+
+.nexdPaceBarTrack {
+  height: 11px;
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  overflow: hidden;
+  min-width: 0;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.nexdPaceBarTrack--secondary {
+  height: 7px;
+  opacity: 0.9;
+  border-color: rgba(148, 163, 184, 0.1);
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.nexdPaceBarTrack--secondary .nexdPaceBarFill--expected {
+  opacity: 0.55;
+}
+
+.nexdPaceBarTrack--secondary .nexdPaceBarFill--actual {
+  opacity: 0.62;
+}
+
+.nexdPaceBarFill {
+  height: 100%;
+  min-width: 0;
+  border-radius: 5px;
+  transition: width 0.4s ease;
+}
+
+.nexdPaceBarFill--expected {
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.82), rgba(34, 211, 238, 0.55));
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.18);
+}
+
+.nexdPaceBarFill--actual {
+  background: linear-gradient(90deg, rgba(250, 204, 21, 0.88), rgba(245, 158, 11, 0.62));
+  box-shadow: 0 0 10px rgba(250, 204, 21, 0.12);
+}
+
+.nexdPaceBarFill--actual.nexdPaceBarFill--over {
+  background: linear-gradient(90deg, rgba(248, 113, 113, 0.95), rgba(239, 68, 68, 0.75));
+  box-shadow: 0 0 10px rgba(248, 113, 113, 0.2);
+}
+
+.nexdPaceGapHero {
+  margin: 12px 0 0;
+  padding: 8px 0 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+}
+
+.nexdPaceGapHeroArrow {
+  font-weight: 850;
+  font-size: 1.15rem;
+}
+
+.nexdPaceGapHeroValue {
+  font-weight: 900;
+  font-size: 1.35rem;
+  letter-spacing: -0.03em;
+}
+
+.nexdPaceGapHeroHint {
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.nexdPaceGapHero--below {
+  color: #bae6fd;
+}
+
+.nexdPaceGapHero--above {
+  color: #fde68a;
+}
+
+.nexdPaceGapHero--on {
+  color: #bbf7d0;
+}
+
+.nexdPaceGapHero--on .nexdPaceGapHeroValue {
+  font-size: 1.15rem;
+}
+
+.nexdPaceTrend {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  font-size: 0.84rem;
+  font-weight: 600;
+  line-height: 1.4;
+  max-width: 36rem;
+  color: #e2e8f0;
+}
+
+.nexdPaceTrend--strip {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.nexdPaceTrendLead {
+  font-weight: 800;
+  color: #f8fafc;
+}
+
+.nexdPaceTrendBody {
+  font-weight: 650;
+  color: #cbd5e1;
+}
+
+.nexdSectionTitle {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+
+.nexdSectionTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.nexdSectionTitleRow .nexdSectionTitle {
+  margin-bottom: 0;
+}
+
+.nexdSectionHint {
+  margin: 0 0 8px;
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.nexdPeriodLine {
+  margin: 0 0 6px;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.nexdCapProgressTrack {
+  margin-top: 8px;
+  height: 14px;
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.12);
+}
+
+.nexdCapUsageBarBlock {
+  margin-top: 6px;
+}
+
+.nexdCapUsageBarVisual {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.nexdCapUsageBarLabelLayer {
+  position: relative;
+  min-height: 1.95rem;
+  margin-bottom: 3px;
+}
+
+.nexdCapUsageBarExpectedBelowLayer {
+  position: relative;
+  min-height: 1.95rem;
+  margin-top: 4px;
+}
+
+.nexdCapUsageBarFlyLabel {
+  position: absolute;
+  bottom: 0;
+  z-index: 3;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  padding: 3px 7px 4px;
+  border-radius: 7px;
+  line-height: 1.12;
+  min-width: 0;
+  max-width: 5.2rem;
+  text-align: center;
+}
+
+.nexdCapUsageBarFlyLabelText {
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.nexdCapUsageBarFlyLabelPct {
+  margin-top: 1px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.nexdCapUsageBarFlyLabel--expected {
+  background: rgba(30, 41, 59, 0.94);
+  border: 1px solid rgba(71, 85, 105, 0.55);
+  color: #94a3b8;
+}
+
+.nexdCapUsageBarFlyLabel--expected .nexdCapUsageBarFlyLabelPct {
+  color: #cbd5e1;
+}
+
+.nexdCapUsageBarFlyLabel--expected::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  width: 1px;
+  height: 5px;
+  transform: translateX(-50%);
+  background: rgba(100, 116, 139, 0.65);
+}
+
+.nexdCapUsageBarFlyLabel--expectedBelow {
+  top: 0;
+  bottom: auto;
+}
+
+.nexdCapUsageBarFlyLabel--expectedBelow::after {
+  top: -5px;
+  bottom: auto;
+}
+
+.nexdCapUsageBarFlyLabel--today {
+  background: rgba(15, 23, 42, 0.94);
+  color: #f8fafc;
+  border: 1px solid rgba(125, 211, 252, 0.35);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+}
+
+.nexdCapUsageBarFlyLabel--today .nexdCapUsageBarFlyLabelPct {
+  color: #f1f5f9;
+}
+
+.nexdCapUsageBarFlyLabel--today::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -5px;
+  width: 1px;
+  height: 5px;
+  transform: translateX(-50%);
+  background: rgba(125, 211, 252, 0.55);
+}
+
+.nexdCapUsageBarVisual--ok .nexdCapUsageBarFlyLabel--today {
+  border-color: rgba(34, 197, 94, 0.5);
+}
+
+.nexdCapUsageBarVisual--ok .nexdCapUsageBarFlyLabel--today::after {
+  background: rgba(74, 222, 128, 0.65);
+}
+
+.nexdCapUsageBarVisual--warn .nexdCapUsageBarFlyLabel--today {
+  border-color: rgba(234, 179, 8, 0.55);
+}
+
+.nexdCapUsageBarVisual--warn .nexdCapUsageBarFlyLabel--today::after {
+  background: rgba(250, 204, 21, 0.6);
+}
+
+.nexdCapUsageBarVisual--risk .nexdCapUsageBarFlyLabel--today {
+  border-color: rgba(248, 113, 113, 0.58);
+}
+
+.nexdCapUsageBarVisual--risk .nexdCapUsageBarFlyLabel--today::after {
+  background: rgba(252, 165, 165, 0.65);
+}
+
+.nexdCapUsageBarTrack {
+  position: relative;
+  height: 14px;
+}
+
+.nexdCapUsageBarTrackInner {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.nexdCapUsageBarFill {
+  height: 100%;
+  min-width: 0;
+}
+
+/* Esperado: discreto (cinza), não compete com o preenchimento “Hoje”. */
+.nexdCapUsageBarExpectedMarker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 0;
+  margin-left: 0;
+  border-left: 2px dashed rgba(100, 116, 139, 0.72);
+  transform: translateX(-50%);
+  pointer-events: none;
+  opacity: 0.88;
+}
+
+.nexdCapUsageBarLegend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+  margin: 6px 0 0;
+  font-size: 0.74rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.nexdCapUsageBarLegend strong {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #e2e8f0;
+}
+
+.nexdCapUsageBarLegendGap {
+  font-weight: 600;
+}
+
+.nexdCapUsageBarLegendHint {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #64748b;
+  line-height: 1.35;
+}
+
+.nexdCapTemporalMetrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(6.75rem, 1fr));
+  gap: 8px 10px;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(15, 23, 42, 0.28);
+}
+
+@media (max-width: 520px) {
+  .nexdCapTemporalMetrics {
+    grid-template-columns: 1fr;
+  }
+}
+
+.nexdCapTemporalMetric {
+  min-width: 0;
+  text-align: center;
+}
+
+.nexdCapTemporalMetricLine {
+  margin: 0;
+  line-height: 1.2;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  color: #f1f5f9;
+  letter-spacing: -0.02em;
+}
+
+.nexdCapTemporalMetricLine--tight {
+  line-height: 1.25;
+}
+
+.nexdCapTemporalMetricValue {
+  font-size: 1.05rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: #f8fafc;
+}
+
+.nexdCapTemporalMetricRest {
+  font-size: 0.72rem;
+  font-weight: 650;
+  color: #94a3b8;
+  letter-spacing: 0.01em;
+}
+
+.nexdCapTemporalMetricPer {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #cbd5e1;
+}
+
+.nexdCapTemporalMetricInlineMuted {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+.nexdCapMoreDetails {
+  margin-top: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(15, 23, 42, 0.22);
+}
+
+.nexdCapMoreDetailsSummary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  padding: 6px 9px;
+}
+
+.nexdCapMoreDetailsSummary::-webkit-details-marker {
+  display: none;
+}
+
+.nexdCapMoreDetailsSummary::after {
+  content: "▾";
+  float: right;
+  font-size: 0.68rem;
+  opacity: 0.7;
+}
+
+.nexdCapMoreDetails[open] .nexdCapMoreDetailsSummary::after {
+  transform: rotate(180deg);
+  display: inline-block;
+}
+
+.nexdCapMoreDetailsBody {
+  padding: 0 9px 8px;
+}
+
+.nexdCapMoreDetailsLine {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.nexdHBarBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 10px;
+}
+
+.nexdHBarRow {
+  display: grid;
+  grid-template-columns: minmax(0, 120px) minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+@media (min-width: 720px) {
+  .nexdHBarRow {
+    grid-template-columns: minmax(0, 160px) minmax(0, 1fr) 48px;
+  }
+}
+
+.nexdHBarLabel {
+  font-size: 0.78rem;
+  color: #cbd5e1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexdHBarMiddle {
+  min-width: 0;
+}
+
+.nexdHBarTrack {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(51, 65, 85, 0.75);
+  overflow: hidden;
+}
+
+.nexdHBarFill {
+  height: 100%;
+  border-radius: 999px;
+  min-width: 0;
+  transition: width 0.35s ease;
+}
+
+.nexdHBarPct {
+  font-size: 0.78rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #f1f5f9;
+  text-align: right;
+}
+
+.nexdCampaignTable .nexdCampaignNameCell {
+  max-width: 240px;
+  font-size: 0.82rem;
+  color: #e2e8f0;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.nexdCampaignTable {
+  width: 100%;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.nexdCampaignTable col.nexdCampaignColName {
+  width: 44%;
+}
+
+.nexdCampaignTable col.nexdCampaignColDist {
+  width: 36%;
+}
+
+.nexdCampaignTable col.nexdCampaignColImp {
+  width: 20%;
+}
+
+.nexdCampaignTable th,
+.nexdCampaignTable td {
+  vertical-align: top;
+}
+
+.nexdCampaignTable th:nth-child(3),
+.nexdCampaignTable td:nth-child(3) {
+  text-align: right;
+}
+
+.nexdCampaignNameText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nexdCampaignDominantBadge {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.58rem;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ecfeff;
+  background: rgba(51, 151, 185, 0.42);
+  border: 1px solid rgba(125, 211, 252, 0.45);
+  line-height: 1.2;
+}
+
+.nexdCampaignRowDominant {
+  background: rgba(36, 108, 132, 0.16);
+  box-shadow: inset 4px 0 0 rgba(51, 151, 185, 0.88);
+}
+
+.nexdCampaignRowDominant .nexdCampaignNameText {
+  font-weight: 650;
+  color: #f8fafc;
+}
+
+.nexdCampaignRowOthers {
+  background: rgba(15, 23, 42, 0.32);
+}
+
+.nexdCampaignOthersName {
+  font-weight: 600;
+  color: #cbd5e1;
+}
+
+.nexdCampaignOthersCount {
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.nexdCampaignTableActions {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.nexdInlineBarCell {
+  min-width: 140px;
+}
+
+.nexdInlineBarContent {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+}
+
+.nexdInlineBarTrack {
+  flex: 1;
+  min-width: 0;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(51, 65, 85, 0.85);
+  overflow: hidden;
+}
+
+.nexdInlineBarTrack--lead {
+  height: 11px;
+  box-shadow: 0 0 0 1px rgba(51, 151, 185, 0.22);
+}
+
+.nexdInlineBarTrack--muted {
+  height: 7px;
+  background: rgba(51, 65, 85, 0.65);
+  opacity: 0.92;
+}
+
+.nexdInlineBarFill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #246c84, #3397b9);
+  min-width: 0;
+  transition: width 0.3s ease;
+}
+
+.nexdInlineBarFill--muted {
+  background: linear-gradient(90deg, rgba(71, 85, 105, 0.85), rgba(100, 116, 139, 0.55));
+  opacity: 0.88;
+}
+
+.nexdCampaignRowDominant .nexdInlineBarFill {
+  background: linear-gradient(90deg, #018376, #8fd4ea);
+  opacity: 1;
+}
+
+.nexdInlineBarPct {
+  flex: 0 0 auto;
+  width: 44px;
+  text-align: right;
+  font-size: 0.8rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  color: #e2e8f0;
+}
+
+.nexdInlineBarPct--lead {
+  width: 48px;
+  font-size: 0.84rem;
+  font-weight: 800;
+  color: #f8fafc;
+}
+
+.nexdInlineBarPct--muted {
+  font-size: 0.74rem;
+  font-weight: 650;
+  color: #64748b;
+}
+
+.nexdTdNumericSecondary {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.nexdThNumeric,
+.nexdTdNumeric {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.nexdFormatTableWrap {
+  margin-top: 4px;
+}
+
+.nexdTableWrap {
+  width: 100%;
+  max-width: 100%;
+}
+
+.nexdTableWrap table {
+  width: 100%;
+  min-width: 100%;
+}
+
+.nexdTableEmptyCell {
+  padding: 1rem 0.75rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.84rem;
 }
 
 .button {
@@ -1553,6 +2702,16 @@ body {
   line-height: 1.2;
 }
 
+.cardKpiContextLine {
+  margin: 10px 0 0;
+  font-size: 0.92rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: #cbd5e1;
+  line-height: 1.38;
+  letter-spacing: 0.01em;
+}
+
 .cardValue {
   margin-top: 10px;
   font-size: 2rem;
@@ -1781,6 +2940,59 @@ button.card.platformStatCardNoTokenButton .cardSubtitle {
   color: #94a3b8;
   font-size: 0.78rem;
   margin-bottom: 10px;
+}
+
+/* Empty state: tabelas de lines (DSP) — centralizado, não parece linha da tabela */
+.tableEmptyState {
+  box-sizing: border-box;
+  max-width: 28rem;
+  margin: 0 auto;
+  padding: 2.25rem 1.5rem 2.5rem;
+  text-align: center;
+}
+
+.tableEmptyStateStandalone {
+  margin: 0.75rem 0 1.25rem;
+}
+
+.tableEmptyStateInTable {
+  padding: 2.5rem 1.5rem 2.75rem;
+}
+
+.tableEmptyStateIconWrap {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.tableEmptyStateSvg {
+  display: block;
+  color: rgba(148, 163, 184, 0.55);
+}
+
+.tableEmptyStateTitle {
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  margin: 0 0 0.45rem;
+  line-height: 1.35;
+}
+
+.tableEmptyStateSubtitle {
+  font-size: 0.875rem;
+  color: #94a3b8;
+  margin: 0;
+  line-height: 1.45;
+}
+
+.tableEmptyStateClearButton {
+  margin-top: 1.2rem;
+}
+
+.tableWrapDspEmpty {
+  border-radius: 10px;
+  border: 1px dashed rgba(83, 104, 114, 0.4);
+  background: rgba(15, 23, 42, 0.28);
 }
 
 .stackDetailCard .tableWrap {
@@ -2890,6 +4102,105 @@ th.stackThFinancial {
   margin-bottom: 10px;
 }
 
+.journeyFilterBar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.journeyFilterBarSelects {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.journeyTopSummary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.journeyTopSummaryCard {
+  border: 1px solid rgba(100, 116, 139, 0.35);
+  background: rgba(30, 41, 59, 0.28);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.journeyTopSummaryLabel {
+  color: #93a4b5;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.journeyTopSummaryValue {
+  margin-top: 6px;
+  color: #f8fafc;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.journeyFilterSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.journeyFilterToolbar {
+  width: 100%;
+}
+
+.journeyFilterToolbar .filterField {
+  flex: 1 1 200px;
+  max-width: none;
+}
+
+.journeyFilterActiveCount {
+  color: #94a3b8;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.journeyFilterSelectedChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.journeySelectedChip {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.journeyFilterEmptyState {
+  color: #94a3b8;
+  font-size: 0.78rem;
+}
+
+.journeyFilterPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.journeyFilterChips {
+  margin-bottom: 0;
+}
+
+.button.buttonActive {
+  border-color: rgba(143, 212, 234, 0.5);
+  color: #e2f3fb;
+  background: rgba(36, 108, 132, 0.18);
+}
+
 .chip {
   margin: 0;
   border: 1px solid rgba(83, 104, 114, 0.5);
@@ -3881,6 +5192,255 @@ td {
   background: rgba(36, 108, 132, 0.08);
 }
 
+.stackDetailTableWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.campaignJourneyTable {
+  min-width: 1380px;
+  table-layout: auto;
+}
+
+.campaignJourneyTable th,
+.campaignJourneyTable td {
+  padding: 8px 14px;
+  border-bottom: 1px solid rgba(100, 116, 139, 0.45);
+}
+
+.campaignJourneyTable td {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.campaignJourneyTable td:nth-child(1),
+.campaignJourneyTable td:nth-child(2),
+.campaignJourneyTable td:nth-child(3) {
+  max-width: 240px;
+}
+
+.campaignJourneyTable td:nth-child(1) .copyCell span,
+.campaignJourneyTable td:nth-child(2),
+.campaignJourneyTable td:nth-child(3) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.campaignJourneyTable .stackSortButton {
+  min-height: 22px;
+}
+
+.campaignJourneyTable .stackNumericCellFinancial,
+.campaignJourneyTable .journeyInvestmentValue,
+.campaignJourneyTable .stackTokenCell .copyCell span {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.campaignJourneyTable tbody tr:nth-child(even) td {
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.campaignJourneyTable tbody tr:nth-child(odd) td {
+  background: transparent;
+}
+
+.campaignJourneyTable .campaignJourneyRow:hover td,
+.campaignJourneyTable .campaignJourneyRow:focus-visible td {
+  background: rgba(56, 189, 248, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(143, 212, 234, 0.35),
+    inset 0 -1px 0 rgba(143, 212, 234, 0.18);
+}
+
+.campaignJourneyTable .campaignJourneyRow:hover td:first-child,
+.campaignJourneyTable .campaignJourneyRow:focus-visible td:first-child {
+  box-shadow:
+    inset 3px 0 0 rgba(56, 189, 248, 0.9),
+    inset 0 1px 0 rgba(143, 212, 234, 0.35),
+    inset 0 -1px 0 rgba(143, 212, 234, 0.18);
+}
+
+.campaignJourneyTable .campaignJourneyRow:active td {
+  background: rgba(56, 189, 248, 0.3);
+}
+
+.journeyColumnGroups {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.journeyAlertHeader {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.journeyAlertInfoIcon {
+  width: 15px;
+  height: 15px;
+  font-size: 0.62rem;
+}
+
+.stackThNoSort,
+.stackThNoSort * {
+  cursor: default;
+}
+
+.journeyRowActionHeader {
+  width: 130px;
+}
+
+.journeyRowActionCell {
+  text-align: right;
+  white-space: nowrap;
+  color: #cbd5e1;
+}
+
+.journeyRowActionHint {
+  font-size: 12px;
+  font-weight: 600;
+  color: #dbeafe;
+  opacity: 0;
+  transform: translateX(4px);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.journeyRowActionIcon {
+  margin-left: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #8fd4ea;
+  opacity: 0.8;
+  transition: transform 0.14s ease, opacity 0.14s ease;
+}
+
+.campaignJourneyTable .campaignJourneyRow:hover .journeyRowActionHint,
+.campaignJourneyTable .campaignJourneyRow:focus-visible .journeyRowActionHint {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.campaignJourneyTable .campaignJourneyRow:hover .journeyRowActionIcon,
+.campaignJourneyTable .campaignJourneyRow:focus-visible .journeyRowActionIcon {
+  opacity: 1;
+  transform: translateX(2px);
+}
+
+.journeyBreakdownToggle {
+  appearance: none;
+  border: 1px solid rgba(51, 151, 185, 0.35);
+  background: rgba(36, 108, 132, 0.18);
+  color: #dff4fb;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.journeyBreakdownToggle:hover {
+  border-color: rgba(143, 212, 234, 0.6);
+  background: rgba(36, 108, 132, 0.28);
+}
+
+.campaignStatusBadge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+
+.campaignStatusBadgeSuccess {
+  color: #d1fae5;
+  background: rgba(16, 185, 129, 0.22);
+  border: 1px solid rgba(16, 185, 129, 0.5);
+}
+
+.campaignStatusBadgeDanger {
+  color: #fee2e2;
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+}
+
+.campaignStatusBadgeNeutral {
+  color: #e2e8f0;
+  background: rgba(100, 116, 139, 0.22);
+  border: 1px solid rgba(100, 116, 139, 0.45);
+}
+
+.journeyAlertBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.journeyAlertBadgeOk {
+  color: #dcfce7;
+  background: rgba(34, 197, 94, 0.22);
+  border: 1px solid rgba(34, 197, 94, 0.46);
+}
+
+.journeyAlertBadgeWarn {
+  color: #fef3c7;
+  background: rgba(245, 158, 11, 0.25);
+  border: 1px solid rgba(245, 158, 11, 0.5);
+}
+
+.journeyAlertBadgeDanger {
+  color: #fee2e2;
+  background: rgba(239, 68, 68, 0.24);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+}
+
+.journeyInvestmentCell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.journeyInvestmentValue {
+  font-weight: 700;
+}
+
+.journeyBudgetProgress {
+  width: 104px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(100, 116, 139, 0.35);
+  overflow: hidden;
+}
+
+.journeyBudgetProgressFill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #22c55e 0%, #38bdf8 100%);
+}
+
+.journeyBudgetPct {
+  font-size: 12px;
+  color: #93c5fd;
+  font-weight: 700;
+}
+
 .campaignLineCell .copyCell {
   grid-template-columns: auto minmax(0, 1fr);
 }
@@ -3895,6 +5455,10 @@ td {
 
 #lines-sem-token,
 #gasto-fora-mes {
+  scroll-margin-top: 16px;
+}
+
+#jornada-campanhas {
   scroll-margin-top: 16px;
 }
 
