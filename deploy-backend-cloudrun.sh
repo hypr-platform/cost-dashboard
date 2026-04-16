@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-PROJECT_ID="${PROJECT_ID:-}"
+PROJECT_ID="${PROJECT_ID:-site-hypr}"
 SERVICE_NAME="${SERVICE_NAME:-cost-dashboard-api}"
 REGION="${REGION:-southamerica-east1}"
 ENV_FILE="${ENV_FILE:-cloudrun.backend.env.yaml}"
