@@ -361,6 +361,6 @@ def fetch_campaign_journey(period_start: date | None = None, period_end: date | 
 
 
 def extract_token_from_line(line_name):
-    """Extrai o short token de nomes como 'ID-CIRON2_HYPR_...' → 'CIRON2'"""
-    match = re.search(r"ID-([A-Z0-9]{6})[_\s]", str(line_name))
+    """Extrai o short token de nomes como 'ID-CIRON2_HYPR_...' ou 'ID-CIRON2|...' → 'CIRON2'."""
+    match = re.search(r"ID-([A-Z0-9]{6})(?:[_\s|]|$)", str(line_name))
     return match.group(1) if match else None
