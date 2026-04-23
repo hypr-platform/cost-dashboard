@@ -77,17 +77,64 @@ def _is_probably_line_id(value: str | None) -> bool:
     return bool(re.fullmatch(r"\d{6,}", value.strip()))
 
 
+def _dv360_header_norm(c: str) -> str:
+    return re.sub(r"\s+", " ", str(c).replace("\ufeff", "").strip().lower())
+
+
+def _is_line_item_id_column_name(c: str) -> bool:
+    """Cabeçalhos como 'Line Item ID' ou 'Line item id' (minúsculo) no CSV do Bid Manager."""
+    s = _dv360_header_norm(c)
+    if "line" not in s or "item" not in s:
+        return False
+    return bool(re.search(r"\bid\b", s))
+
+
+def _is_line_item_name_column_name(c: str, id_col: str | None) -> bool:
+    """
+    Nome de exibição da line (não a coluna de ID, nem Line Item Type).
+    """
+    if id_col is not None and c == id_col:
+        return False
+    s = _dv360_header_norm(c)
+    if "line" not in s or "item" not in s:
+        return False
+    if "type" in s and "line" in s and "item" in s:
+        return False
+    if re.search(r"\bid\b", s):
+        return False
+    return True
+
+
 def _normalize_advertiser_ids(advertiser_ids_raw: str) -> list[str]:
     return [adv.strip() for adv in advertiser_ids_raw.split(",") if adv.strip()]
 
 
-def _fetch_line_names_for_advertiser(advertiser_id: str, headers: dict) -> dict[str, str]:
-    out: dict[str, str] = {}
+def _str_api_field(value: object) -> str:
+    if value is None or (isinstance(value, float) and value != value):
+        return ""
+    return str(value).strip()
+
+
+def _line_item_dict_from_api_item(item: dict, advertiser_id: str) -> dict[str, str] | None:
+    line_item_id = _str_api_field(item.get("lineItemId"))
+    if not line_item_id:
+        return None
+    return {
+        "displayName": _str_api_field(item.get("displayName")),
+        "insertionOrderId": _str_api_field(item.get("insertionOrderId")),
+        "campaignId": _str_api_field(item.get("campaignId")),
+        "advertiserId": _str_api_field(item.get("advertiserId")) or str(advertiser_id).strip(),
+        "entityStatus": _str_api_field(item.get("entityStatus")),
+    }
+
+
+def _fetch_line_item_meta_by_advertiser(advertiser_id: str, headers: dict) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
     page_token = None
     while True:
         params = {
             "pageSize": 200,
-            "fields": "lineItems(lineItemId,displayName),nextPageToken",
+            "fields": "lineItems(lineItemId,displayName,insertionOrderId,campaignId,entityStatus,advertiserId),nextPageToken",
         }
         if page_token:
             params["pageToken"] = page_token
@@ -100,32 +147,91 @@ def _fetch_line_names_for_advertiser(advertiser_id: str, headers: dict) -> dict[
         response.raise_for_status()
         payload = response.json()
         for item in payload.get("lineItems", []):
-            line_item_id = str(item.get("lineItemId", "")).strip()
-            display_name = str(item.get("displayName", "")).strip()
-            if line_item_id and display_name:
-                out[line_item_id] = display_name
+            if not isinstance(item, dict):
+                continue
+            row = _line_item_dict_from_api_item(item, advertiser_id)
+            if not row:
+                continue
+            lid = _str_api_field(item.get("lineItemId"))
+            if lid:
+                out[lid] = row
         page_token = payload.get("nextPageToken")
         if not page_token:
             break
     return out
 
 
-def _line_id_to_name_map(headers: dict, advertiser_ids_raw: str) -> dict[str, str]:
+def _get_line_item_meta_by_get(line_item_id: str, headers: dict, advertiser_ids: list[str]) -> dict[str, str] | None:
+    for advertiser_id in advertiser_ids:
+        url = f"https://displayvideo.googleapis.com/v4/advertisers/{advertiser_id}/lineItems/{line_item_id}"
+        try:
+            response = requests.get(
+                url,
+                params={"fields": "lineItemId,displayName,insertionOrderId,campaignId,entityStatus,advertiserId"},
+                headers=headers,
+                timeout=20,
+            )
+        except Exception:
+            continue
+        if response.status_code == 404:
+            continue
+        if response.status_code != 200:
+            continue
+        data = response.json()
+        if not isinstance(data, dict):
+            continue
+        row = _line_item_dict_from_api_item(data, advertiser_id)
+        return row
+    return None
+
+
+def _normalize_cached_line_map(cached_map: object, advertiser_id: str) -> dict[str, dict[str, str]]:
+    """Cache antigo: line_id -> str (só display name). Novo: line_id -> dict."""
+    if not isinstance(cached_map, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for k, v in cached_map.items():
+        kid = str(k).strip()
+        if not kid:
+            continue
+        if isinstance(v, str):
+            out[kid] = {
+                "displayName": v.strip(),
+                "insertionOrderId": "",
+                "campaignId": "",
+                "advertiserId": str(advertiser_id).strip(),
+                "entityStatus": "",
+            }
+        elif isinstance(v, dict):
+            m = {str(k2): (str(v2) if v2 is not None else "") for k2, v2 in v.items()}
+            m.setdefault("displayName", "")
+            m.setdefault("insertionOrderId", "")
+            m.setdefault("campaignId", "")
+            m.setdefault("entityStatus", "")
+            m.setdefault("advertiserId", str(advertiser_id).strip())
+            out[kid] = m
+    return out
+
+
+def _line_id_to_line_meta_map(headers: dict, advertiser_ids_raw: str) -> dict[str, dict[str, str]]:
+    """Mapa lineItemId -> metadados da API Display & Video (inventário; ajuda a achar a line na UI)."""
     advertiser_ids = _normalize_advertiser_ids(advertiser_ids_raw)
     if not advertiser_ids:
         return {}
     now = time.time()
     ttl = _line_name_cache_ttl_seconds()
-    aggregate: dict[str, str] = {}
+    aggregate: dict[str, dict[str, str]] = {}
     for advertiser_id in advertiser_ids:
         with _line_name_cache_lock:
             cached_entry = _line_name_cache.get(advertiser_id)
             if cached_entry and float(cached_entry.get("expires_at", 0)) > now:
-                cached_map = cached_entry.get("data")
-                if isinstance(cached_map, dict):
-                    aggregate.update({str(k): str(v) for k, v in cached_map.items()})
+                cached_map = _normalize_cached_line_map(
+                    cached_entry.get("data"), advertiser_id
+                )
+                if cached_map:
+                    aggregate.update(cached_map)
                     continue
-        fetched_map = _fetch_line_names_for_advertiser(advertiser_id, headers)
+        fetched_map = _fetch_line_item_meta_by_advertiser(advertiser_id, headers)
         with _line_name_cache_lock:
             _line_name_cache[advertiser_id] = {
                 "expires_at": now + ttl,
@@ -133,6 +239,52 @@ def _line_id_to_name_map(headers: dict, advertiser_ids_raw: str) -> dict[str, st
             }
         aggregate.update(fetched_map)
     return aggregate
+
+
+def _line_display_name(
+    line_id: str, name_by_line_id: dict[str, str], line_id_to_meta: dict[str, dict[str, str]]
+) -> str:
+    if line_id in name_by_line_id:
+        return name_by_line_id[line_id]
+    m = line_id_to_meta.get(line_id) or {}
+    dn = (m.get("displayName") or "").strip()
+    return dn or line_id
+
+
+def _apply_dv360_line_meta_to_lines(
+    lines_out: list[dict],
+    headers: dict,
+    advertiser_ids_raw: str,
+    *,
+    preloaded_meta: dict[str, dict[str, str]] | None = None,
+) -> None:
+    adv_ids = _normalize_advertiser_ids(advertiser_ids_raw)
+    if not adv_ids:
+        return
+    meta = preloaded_meta if preloaded_meta is not None else _line_id_to_line_meta_map(
+        headers, advertiser_ids_raw
+    )
+    for line in lines_out:
+        lid = str(line.get("line_item_id") or "").strip()
+        if not lid:
+            continue
+        m = dict(meta.get(lid, {}))
+        if not m:
+            got = _get_line_item_meta_by_get(lid, headers, adv_ids)
+            if got:
+                m = got
+        for src, dst in (
+            ("advertiserId", "dv360_advertiser_id"),
+            ("insertionOrderId", "dv360_insertion_order_id"),
+            ("campaignId", "dv360_campaign_id"),
+            ("entityStatus", "dv360_entity_status"),
+        ):
+            val = (m.get(src) or "").strip()
+            if val:
+                line[dst] = val
+        partner = os.getenv("DV360_PARTNER_ID", "").strip()
+        if partner:
+            line["dv360_partner_id"] = partner
 
 
 def _get_service_account_info():
@@ -482,18 +634,23 @@ def fetch_mtd_cost(start, end):
             return {"spend": 0.0, "currency": "USD", "status": "error",
                     "message": "Relatório não disponível. Tente novamente.", "lines": [], "cost_types": [], "daily": []}
 
-        rev_col = next((c for c in df_lines.columns if "Revenue" in c or "Cost" in c), None)
-        id_col = next((c for c in df_lines.columns if "ID" in c), None)
-        type_col = next((c for c in df_lines.columns if "Type" in c), None)
-        name_col = next(
+        _cols = list(df_lines.columns)
+        rev_col = next((c for c in _cols if "Revenue" in c or "Cost" in c), None)
+        # "Line item id" (minúsculo) não contém a substring "ID" — exigir match por coluna de line item
+        id_col = next((c for c in _cols if _is_line_item_id_column_name(c)), None) or next(
+            (c for c in _cols if "ID" in str(c)), None
+        )
+        type_col = next(
             (
-                c for c in df_lines.columns
-                if ("Line Item" in c or "Line item" in c)
-                and "ID" not in c
-                and "Type" not in c
+                c
+                for c in _cols
+                if "line" in _dv360_header_norm(c)
+                and "item" in _dv360_header_norm(c)
+                and "type" in _dv360_header_norm(c)
             ),
             None,
-        )
+        ) or next((c for c in _cols if "Type" in str(c)), None)
+        name_col = next((c for c in _cols if _is_line_item_name_column_name(c, id_col)), None)
 
         if rev_col:
             df_lines.loc[:, rev_col] = pd.to_numeric(df_lines[rev_col], errors="coerce").fillna(0)
@@ -501,6 +658,7 @@ def fetch_mtd_cost(start, end):
         total = float(df_lines[rev_col].sum()) if rev_col else 0.0
 
         lines_out = []
+        line_id_to_meta_preload: dict[str, dict[str, str]] | None = None
         if rev_col and id_col:
             # Agrega por ID para garantir um único gasto por line item e resolve nome depois.
             agg = df_lines.groupby(id_col)[rev_col].sum().reset_index()
@@ -535,8 +693,9 @@ def fetch_mtd_cost(start, end):
                 if line_id:
                     aggregated_line_ids.append(line_id)
 
-            needs_lookup = any(not name_by_line_id.get(line_id) for line_id in aggregated_line_ids)
-            line_id_to_name = _line_id_to_name_map(headers, advertiser_ids_raw) if needs_lookup else {}
+            if aggregated_line_ids:
+                line_id_to_meta_preload = _line_id_to_line_meta_map(headers, advertiser_ids_raw)
+            line_id_to_meta = line_id_to_meta_preload or {}
 
             for _, row in agg.iterrows():
                 line_id = ""
@@ -547,12 +706,14 @@ def fetch_mtd_cost(start, end):
                         line_id = str(row[id_col]).strip()
                 if not line_id:
                     continue
-                name = (
-                    name_by_line_id.get(line_id)
-                    or line_id_to_name.get(line_id)
-                    or line_id
+                name = _line_display_name(line_id, name_by_line_id, line_id_to_meta)
+                lines_out.append(
+                    {
+                        "name": name,
+                        "spend": float(row[rev_col]),
+                        "line_item_id": line_id,
+                    }
                 )
-                lines_out.append({"name": name, "spend": float(row[rev_col])})
         elif rev_col and name_col:
             agg = df_lines.groupby(name_col)[rev_col].sum().reset_index()
             agg = agg.sort_values(rev_col, ascending=False)
@@ -563,7 +724,15 @@ def fetch_mtd_cost(start, end):
                 name = str(raw_name).strip()
                 if not name:
                     continue
-                lines_out.append({"name": name, "spend": float(row[rev_col])})
+                out_line: dict[str, str | float] = {"name": name, "spend": float(row[rev_col])}
+                if _is_probably_line_id(name):
+                    out_line["line_item_id"] = name
+                lines_out.append(out_line)
+
+        if lines_out and any(x.get("line_item_id") for x in lines_out):
+            _apply_dv360_line_meta_to_lines(
+                lines_out, headers, advertiser_ids_raw, preloaded_meta=line_id_to_meta_preload
+            )
 
         types_out = []
         if type_col and rev_col:
@@ -587,7 +756,7 @@ def fetch_mtd_cost(start, end):
                     except Exception:
                         pass
 
-        return {
+        out_payload: dict = {
             "spend": total,
             "currency": "USD",
             "status": "ok",
@@ -596,6 +765,14 @@ def fetch_mtd_cost(start, end):
             "cost_types": types_out,
             "daily": daily_out,
         }
+        _partner = os.getenv("DV360_PARTNER_ID", "").strip()
+        _adv = [x.strip() for x in os.getenv("DV360_ADVERTISER_IDS", "").split(",") if x.strip()]
+        if _partner or _adv:
+            out_payload["dv360_context"] = {
+                "partner_id": _partner or None,
+                "advertiser_ids": _adv,
+            }
+        return out_payload
 
     except Exception as e:
         return {"spend": 0.0, "currency": "USD", "status": "error", "message": str(e),

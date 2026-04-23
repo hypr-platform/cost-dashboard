@@ -513,12 +513,16 @@ if active_page == "⚠️ Atenção":
         if pdata["status"] != "ok":
             continue
         for line in pdata.get("lines", []):
-            if not extract_token_from_line(line["name"]):
-                no_token_rows.append({
-                    "Plataforma": pname,
-                    "Line":       line["name"],
-                    "Gasto":      to_brl_smart(line["spend"], pdata["currency"]),
-                })
+            if extract_token_from_line(line["name"]):
+                continue
+            if float(line.get("spend", 0.0) or 0.0) <= 0.0:
+                continue
+            no_token_rows.append({
+                "Plataforma": pname,
+                "Line":       line["name"],
+                "Line item ID": line.get("line_item_id") or "",
+                "Gasto":      to_brl_smart(line["spend"], pdata["currency"]),
+            })
 
     st.markdown('<p class="sec-label">Sem token identificado</p><p class="sec-title">Lines sem Token</p><p class="sec-sub">Gasto que não pode ser cruzado com a planilha</p>', unsafe_allow_html=True)
     if no_token_rows:

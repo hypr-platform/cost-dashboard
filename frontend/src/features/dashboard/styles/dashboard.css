@@ -2793,21 +2793,145 @@ button.card.platformStatCardNoTokenButton .cardSubtitle {
 
 .stackDetailTable {
   width: 100%;
-  min-width: 1480px;
+  min-width: 1880px;
   table-layout: fixed;
 }
 
 .attentionDetailTable {
   width: 100%;
-  min-width: 920px;
+  min-width: 1320px;
 }
 
 .attentionDetailTable td:last-child {
   white-space: nowrap;
 }
 
+.attentionThLineItemId,
+.attentionLineItemIdCell {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.attentionThLineItemId {
+  color: #94a3b8;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.attentionLineItemIdCell {
+  font-size: 0.8rem;
+  color: #e2e8f0;
+}
+
+.stackThLineItemId {
+  color: #94a3b8;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.stackLineItemIdCell {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+  white-space: nowrap;
+}
+
+.dv360ScopeCard {
+  margin-bottom: 1rem;
+  padding: 1rem 1.25rem;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 10px;
+}
+
+.attentionDv360ScopeHint {
+  font-size: 0.85rem;
+  color: #94a3b8;
+  margin: 0 0 0.75rem 0;
+  line-height: 1.45;
+}
+
+.attentionThDv360Meta,
+.attentionDv360MetaCell {
+  font-size: 0.78rem;
+}
+
+.attentionThDv360Meta {
+  color: #94a3b8;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.attentionDv360MetaCell {
+  font-variant-numeric: tabular-nums;
+  color: #e2e8f0;
+  max-width: 120px;
+  overflow-wrap: anywhere;
+}
+
+.stackColDv360Adv {
+  width: 10%;
+}
+.stackColDv360Io,
+.stackColDv360Camp {
+  width: 8%;
+}
+.stackColDv360Status {
+  width: 6%;
+}
+
+.stackThDv360Meta {
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  vertical-align: bottom;
+  white-space: normal;
+  max-width: 100px;
+}
+
+.stackDv360MetaCell {
+  font-size: 0.75rem;
+  color: #e2e8f0;
+  line-height: 1.3;
+  vertical-align: top;
+  max-width: 120px;
+  overflow-wrap: anywhere;
+}
+
+.stackDv360MetaCellBlock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+
+a.dv360ExternalLink {
+  color: #7dd3fc;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+a.dv360ExternalLink:hover {
+  color: #bae6fd;
+}
+
+a.dv360LineLinkTry {
+  font-size: 0.68rem;
+  color: #94a3b8;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+a.dv360LineLinkTry:hover {
+  color: #cbd5e1;
+}
+
 .stackDetailTable col.stackColLine {
   width: 20%;
+}
+
+.stackDetailTable col.stackColLineItemId {
+  width: 12%;
 }
 
 .stackDetailTable col.stackColToken {

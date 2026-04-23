@@ -39,6 +39,10 @@ import {
 } from "@/shared/charts/homeRecharts";
 import { PLATFORM_COLORS, PLATFORM_LOGOS } from "@/shared/constants/platform";
 import {
+  dv360AdvertiserRootUrl,
+  dv360LineItemUrlGuess,
+} from "@/shared/utils/dv360Links";
+import {
   getAccountManagerAvatar,
   getAccountManagerWhatsAppNumber,
 } from "@/shared/utils/accountManagers";
@@ -3479,6 +3483,12 @@ function HomeContent() {
       const budgetTag = hasBudget ? "com budget" : "sem budget";
       const searchableText = [
         row.line,
+        row.line_item_id ?? "",
+        row.dv360_advertiser_id ?? "",
+        row.dv360_insertion_order_id ?? "",
+        row.dv360_campaign_id ?? "",
+        row.dv360_entity_status ?? "",
+        row.dv360_partner_id ?? "",
         row.token,
         row.cliente,
         row.campanha,
@@ -3561,6 +3571,12 @@ function HomeContent() {
       const searchableText = [
         row.platform,
         row.line,
+        row.line_item_id ?? "",
+        row.dv360_advertiser_id ?? "",
+        row.dv360_insertion_order_id ?? "",
+        row.dv360_campaign_id ?? "",
+        row.dv360_entity_status ?? "",
+        row.dv360_partner_id ?? "",
         brl(row.gasto),
         String(row.gasto),
       ]
@@ -3646,6 +3662,12 @@ function HomeContent() {
         row.platform,
         row.token,
         row.line,
+        row.line_item_id ?? "",
+        row.dv360_advertiser_id ?? "",
+        row.dv360_insertion_order_id ?? "",
+        row.dv360_campaign_id ?? "",
+        row.dv360_entity_status ?? "",
+        row.dv360_partner_id ?? "",
         row.cliente,
         row.campanha,
         row.account_management,
@@ -6289,6 +6311,7 @@ function HomeContent() {
     }
 
     const rows = page.rows ?? [];
+    const showDv360LineItemId = platformName === "DV360";
     const renderTokenValue = (token: string | null | undefined) => {
       if (hasCampaignToken(token)) return token;
       return (
@@ -6321,6 +6344,15 @@ function HomeContent() {
       const handleExportDetailedLines = () => {
         const headers = [
           "Line",
+          ...(showDv360LineItemId
+            ? [
+                "Line item ID (DV360)",
+                "Anunciante (DV360)",
+                "Inserção (IO) ID",
+                "Campanha (ID API)",
+                "Status (API)",
+              ]
+            : []),
           "Token",
           "Cliente",
           "Campanha",
@@ -6332,6 +6364,15 @@ function HomeContent() {
         ];
         const rowsToExport = sortedRows.map((row) => [
           row.line,
+          ...(showDv360LineItemId
+            ? [
+                row.line_item_id ?? "",
+                row.dv360_advertiser_id ?? "",
+                row.dv360_insertion_order_id ?? "",
+                row.dv360_campaign_id ?? "",
+                row.dv360_entity_status ?? "",
+              ]
+            : []),
           row.token,
           row.cliente,
           row.campanha,
@@ -6348,8 +6389,28 @@ function HomeContent() {
         );
       };
 
+      const dv360Scope = page.dv360_context;
       return (
         <>
+          {platformName === "DV360" && dv360Scope ? (
+            <section
+              className="card dv360ScopeCard"
+              aria-label="Escopo e dicas do DV360"
+            >
+              <p className="cardTitle">Como achar a line no DV360</p>
+              <p className="stackDetailSubtitle">
+                O relatório usa o{" "}
+                <strong>Partner {dv360Scope.partner_id ?? "—"}</strong> e{" "}
+                {dv360Scope.advertiser_ids?.length
+                  ? `anunciante(s) ${dv360Scope.advertiser_ids.join(", ")}.`
+                  : "os anunciantes do .env."}{" "}
+                No site, mude o seletor de anunciante; em{" "}
+                <strong>Inserção</strong>, abra a IO pelo ID abaixo; a line
+                aparece sob a inserção. Se não achar, a line pode ter sido
+                arquivada mas ainda aparecer no histórico do Bid Manager.
+              </p>
+            </section>
+          ) : null}
           <section className="panel panelSub filterPanelCard filterPanelCardDashboard">
             <button
               type="button"
@@ -6574,6 +6635,21 @@ function HomeContent() {
                   <table className="stackDetailTable">
                     <colgroup>
                       <col className="stackColLine" />
+                      {showDv360LineItemId ? (
+                        <col className="stackColLineItemId" />
+                      ) : null}
+                      {showDv360LineItemId ? (
+                        <col className="stackColDv360Adv" />
+                      ) : null}
+                      {showDv360LineItemId ? (
+                        <col className="stackColDv360Io" />
+                      ) : null}
+                      {showDv360LineItemId ? (
+                        <col className="stackColDv360Camp" />
+                      ) : null}
+                      {showDv360LineItemId ? (
+                        <col className="stackColDv360Status" />
+                      ) : null}
                       <col className="stackColToken" />
                       <col className="stackColCliente" />
                       <col className="stackColCampanha" />
@@ -6603,6 +6679,46 @@ function HomeContent() {
                             </span>
                           </button>
                         </th>
+                        {showDv360LineItemId ? (
+                          <th
+                            className="stackThLineItemId"
+                            title="ID numérico do line item no DV360; use na busca do inventário se o nome exibido for só o ID"
+                          >
+                            Line item ID
+                          </th>
+                        ) : null}
+                        {showDv360LineItemId ? (
+                          <th
+                            className="stackThDv360Meta"
+                            title="Inventário Display &amp; Video — selecione o anunciante no DV360 e abra a inserção (IO) por este ID"
+                          >
+                            Anunciante
+                          </th>
+                        ) : null}
+                        {showDv360LineItemId ? (
+                          <th
+                            className="stackThDv360Meta"
+                            title="Inserção (order) em que a line está; filtre no DV360 por ID de inserção"
+                          >
+                            Inserção (IO)
+                          </th>
+                        ) : null}
+                        {showDv360LineItemId ? (
+                          <th
+                            className="stackThDv360Meta"
+                            title="ID de campanha (API) — pode diferir de nomes na UI"
+                          >
+                            Campanha (ID)
+                          </th>
+                        ) : null}
+                        {showDv360LineItemId ? (
+                          <th
+                            className="stackThDv360Meta"
+                            title="Status da entidade no inventário (ex. PAUSED, ARCHIVED)"
+                          >
+                            Status
+                          </th>
+                        ) : null}
                         <th
                           className={
                             stackAdaptSort.key === "token"
@@ -6787,6 +6903,83 @@ function HomeContent() {
                               </span>
                             </div>
                           </td>
+                          {showDv360LineItemId ? (
+                            <td
+                              className="stackLineItemIdCell"
+                              title={
+                                row.line_item_id
+                                  ? `ID do line item no DV360: ${row.line_item_id}`
+                                  : "ID não resolvido pelo relatório"
+                              }
+                            >
+                              {row.line_item_id && String(row.line_item_id).trim()
+                                ? String(row.line_item_id).trim()
+                                : "—"}
+                            </td>
+                          ) : null}
+                          {showDv360LineItemId ? (
+                            <td className="stackDv360MetaCell">
+                              {row.dv360_advertiser_id &&
+                              String(row.dv360_advertiser_id).trim() !==
+                                "" ? (
+                                <div className="stackDv360MetaCellBlock">
+                                  <a
+                                    href={dv360AdvertiserRootUrl(
+                                      String(row.dv360_advertiser_id),
+                                    )}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="dv360ExternalLink"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {row.dv360_advertiser_id}
+                                  </a>
+                                  {row.line_item_id ? (
+                                    <a
+                                      href={dv360LineItemUrlGuess(
+                                        String(row.dv360_advertiser_id),
+                                        String(row.line_item_id),
+                                      )}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="dv360LineLinkTry"
+                                      title="URL aproximada; a interface do Google pode mudar"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      Abrir line (tentativa)
+                                    </a>
+                                  ) : null}
+                                </div>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                          ) : null}
+                          {showDv360LineItemId ? (
+                            <td className="stackDv360MetaCell" title="ID da inserção (IO) no DV360">
+                              {row.dv360_insertion_order_id &&
+                              String(row.dv360_insertion_order_id).trim() !==
+                                ""
+                                ? String(row.dv360_insertion_order_id).trim()
+                                : "—"}
+                            </td>
+                          ) : null}
+                          {showDv360LineItemId ? (
+                            <td className="stackDv360MetaCell" title="ID da campanha (recurso API)">
+                              {row.dv360_campaign_id &&
+                              String(row.dv360_campaign_id).trim() !== ""
+                                ? String(row.dv360_campaign_id).trim()
+                                : "—"}
+                            </td>
+                          ) : null}
+                          {showDv360LineItemId ? (
+                            <td className="stackDv360MetaCell">
+                              {row.dv360_entity_status &&
+                              String(row.dv360_entity_status).trim() !== ""
+                                ? String(row.dv360_entity_status).trim()
+                                : "—"}
+                            </td>
+                          ) : null}
                           <td className="stackTokenCell">
                             <div className="copyCell">
                               <button
@@ -7104,10 +7297,26 @@ function HomeContent() {
     const sortedNoTokenRows = noTokenDerived.sortedRows;
     const filteredNoTokenTotal = noTokenDerived.filteredTotal;
     const handleExportNoToken = () => {
-      const headers = ["Plataforma", "Line", "Gasto"];
+      const headers = [
+        "Plataforma",
+        "Line",
+        "Line item ID (DV360)",
+        "Anunciante (DV360)",
+        "Inserção (IO) ID",
+        "Campanha (ID API)",
+        "Status (API)",
+        "Partner ID",
+        "Gasto (BRL)",
+      ];
       const rowsToExport = sortedNoTokenRows.map((row) => [
         row.platform,
         row.line,
+        row.line_item_id ?? "",
+        row.dv360_advertiser_id ?? "",
+        row.dv360_insertion_order_id ?? "",
+        row.dv360_campaign_id ?? "",
+        row.dv360_entity_status ?? "",
+        row.dv360_partner_id ?? "",
         row.gasto,
       ]);
       downloadCsv("lines-sem-token.csv", headers, rowsToExport);
@@ -7226,7 +7435,7 @@ function HomeContent() {
                   onChange={(event) =>
                     setAttentionNoTokenSearch(event.target.value)
                   }
-                  placeholder="Buscar por plataforma, line e gasto"
+                  placeholder="Buscar por plataforma, line, id DV360 e gasto"
                   aria-label="Buscar lines sem token"
                 />
                 {noTokenRows.length > 0 && noTokenUniquePlatforms.length > 0 ? (
@@ -7268,6 +7477,17 @@ function HomeContent() {
                   {sortedNoTokenRows.length.toLocaleString("pt-BR")} linha(s)
                   encontrada(s) • Total filtrado: {brl(filteredNoTokenTotal)}
                 </p>
+                {data.platform_pages?.DV360?.dv360_context ? (
+                  <p className="attentionDv360ScopeHint">
+                    Linhas DV360: no site, use o Partner{" "}
+                    <strong>
+                      {data.platform_pages.DV360.dv360_context.partner_id ??
+                        "—"}
+                    </strong>{" "}
+                    e o anunciante da coluna abaixo; a inserção (IO) agrupa a
+                    line.
+                  </p>
+                ) : null}
                 <div className="tableWrap">
                   <table className="attentionDetailTable">
                     <thead>
@@ -7296,6 +7516,16 @@ function HomeContent() {
                             <span>{attentionNoTokenSortIndicator("line")}</span>
                           </button>
                         </th>
+                        <th
+                          className="attentionThLineItemId"
+                          title="Só preenchido no DV360; é o ID numérico do line item, útil se o nome exibido for só o ID"
+                        >
+                          Line item ID
+                        </th>
+                        <th className="attentionThDv360Meta">Anunciante</th>
+                        <th className="attentionThDv360Meta">Inserção (IO)</th>
+                        <th className="attentionThDv360Meta">Campanha (ID)</th>
+                        <th className="attentionThDv360Meta">Status</th>
                         <th>
                           <button
                             type="button"
@@ -7312,9 +7542,56 @@ function HomeContent() {
                     </thead>
                     <tbody>
                       {sortedNoTokenRows.map((row, index) => (
-                        <tr key={`${row.platform}-${row.line}-${index}`}>
+                        <tr
+                          key={`${row.platform}-${row.line}-${row.line_item_id ?? ""}-${index}`}
+                        >
                           <td>{row.platform}</td>
                           <td>{row.line}</td>
+                          <td className="attentionLineItemIdCell">
+                            {row.line_item_id &&
+                            String(row.line_item_id).trim() !== ""
+                              ? String(row.line_item_id).trim()
+                              : "—"}
+                          </td>
+                          <td className="attentionDv360MetaCell">
+                            {row.platform === "DV360" &&
+                            row.dv360_advertiser_id &&
+                            String(row.dv360_advertiser_id).trim() !== "" ? (
+                              <a
+                                href={dv360AdvertiserRootUrl(
+                                  String(row.dv360_advertiser_id),
+                                )}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="dv360ExternalLink"
+                              >
+                                {row.dv360_advertiser_id}
+                              </a>
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                          <td className="attentionDv360MetaCell">
+                            {row.platform === "DV360" &&
+                            row.dv360_insertion_order_id &&
+                            String(row.dv360_insertion_order_id).trim() !== ""
+                              ? String(row.dv360_insertion_order_id).trim()
+                              : "—"}
+                          </td>
+                          <td className="attentionDv360MetaCell">
+                            {row.platform === "DV360" &&
+                            row.dv360_campaign_id &&
+                            String(row.dv360_campaign_id).trim() !== ""
+                              ? String(row.dv360_campaign_id).trim()
+                              : "—"}
+                          </td>
+                          <td className="attentionDv360MetaCell">
+                            {row.platform === "DV360" &&
+                            row.dv360_entity_status &&
+                            String(row.dv360_entity_status).trim() !== ""
+                              ? String(row.dv360_entity_status).trim()
+                              : "—"}
+                          </td>
                           <td>{brl(row.gasto)}</td>
                         </tr>
                       ))}

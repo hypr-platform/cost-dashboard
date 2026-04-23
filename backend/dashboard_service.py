@@ -649,27 +649,42 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
                 else None
             )
             pct_invest = (spend_brl / investido * 100) if investido and investido > 0 else None
-            rows.append(
-                {
-                    "line": line.get("name", ""),
-                    "token": token or "—",
-                    "cliente": campaign.get("cliente", "—") if campaign else "—",
-                    "campanha": campaign.get("campanha", "—") if campaign else "—",
-                    "account_management": campaign.get("account_management", "—") if campaign else "—",
-                    "gasto": spend_brl,
-                    "investido": investido,
-                    "pct_invest": pct_invest,
-                }
-            )
+            row = {
+                "line": line.get("name", ""),
+                "line_item_id": line.get("line_item_id"),
+                "token": token or "—",
+                "cliente": campaign.get("cliente", "—") if campaign else "—",
+                "campanha": campaign.get("campanha", "—") if campaign else "—",
+                "account_management": campaign.get("account_management", "—") if campaign else "—",
+                "gasto": spend_brl,
+                "investido": investido,
+                "pct_invest": pct_invest,
+            }
+            for _dk in (
+                "dv360_advertiser_id",
+                "dv360_insertion_order_id",
+                "dv360_campaign_id",
+                "dv360_entity_status",
+                "dv360_partner_id",
+            ):
+                _v = line.get(_dk)
+                if _v is not None and str(_v).strip() != "":
+                    row[_dk] = str(_v).strip()
+            rows.append(row)
         rows.sort(key=lambda x: x["gasto"], reverse=True)
 
-        platform_pages[platform_name] = {
+        page_block: dict[str, Any] = {
             "spend_brl": _to_brl_smart(platform_data.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
             "spend_usd": platform_data.get("spend", 0.0),
             "currency": platform_data.get("currency", "USD"),
             "rows": rows,
             "daily": daily_platforms.get(platform_name, []),
         }
+        if platform_name == "DV360":
+            ctx = platform_data.get("dv360_context")
+            if isinstance(ctx, dict) and ctx:
+                page_block["dv360_context"] = ctx
+        platform_pages[platform_name] = page_block
 
     if nexd_data.get("status") == "ok":
         impressions = nexd_data.get("impressions", 0)
@@ -704,13 +719,25 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
         for line in platform_data.get("lines", []):
             if extract_token_from_line(line.get("name", "")):
                 continue
-            no_token_rows.append(
-                {
-                    "platform": platform_name,
-                    "line": line.get("name", ""),
-                    "gasto": _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
-                }
-            )
+            if float(line.get("spend", 0.0) or 0.0) <= 0.0:
+                continue
+            nt: dict = {
+                "platform": platform_name,
+                "line": line.get("name", ""),
+                "line_item_id": line.get("line_item_id"),
+                "gasto": _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
+            }
+            for _dk in (
+                "dv360_advertiser_id",
+                "dv360_insertion_order_id",
+                "dv360_campaign_id",
+                "dv360_entity_status",
+                "dv360_partner_id",
+            ):
+                _v = line.get(_dk)
+                if _v is not None and str(_v).strip() != "":
+                    nt[_dk] = str(_v).strip()
+            no_token_rows.append(nt)
     no_token_rows.sort(key=lambda x: x["gasto"], reverse=True)
 
     _last_day = _cal.monthrange(start.year, start.month)[1]
@@ -729,19 +756,29 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
             s_c = campaign.get("start")
             e_c = campaign.get("end")
             if (s_c and s_c > month_end) or (e_c and e_c < start):
-                out_rows.append(
-                    {
-                        "platform": platform_name,
-                        "token": token,
-                        "line": line.get("name", ""),
-                        "cliente": campaign.get("cliente", ""),
-                        "campanha": campaign.get("campanha", ""),
-                        "account_management": campaign.get("account_management", ""),
-                        "vigencia_start": _iso(s_c),
-                        "vigencia_end": _iso(e_c),
-                        "gasto": _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
-                    }
-                )
+                oor: dict = {
+                    "platform": platform_name,
+                    "token": token,
+                    "line": line.get("name", ""),
+                    "line_item_id": line.get("line_item_id"),
+                    "cliente": campaign.get("cliente", ""),
+                    "campanha": campaign.get("campanha", ""),
+                    "account_management": campaign.get("account_management", ""),
+                    "vigencia_start": _iso(s_c),
+                    "vigencia_end": _iso(e_c),
+                    "gasto": _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
+                }
+                for _dk in (
+                    "dv360_advertiser_id",
+                    "dv360_insertion_order_id",
+                    "dv360_campaign_id",
+                    "dv360_entity_status",
+                    "dv360_partner_id",
+                ):
+                    _v = line.get(_dk)
+                    if _v is not None and str(_v).strip() != "":
+                        oor[_dk] = str(_v).strip()
+                out_rows.append(oor)
     out_rows.sort(key=lambda x: x["gasto"], reverse=True)
 
     for c in journey.get("data", []):

@@ -13,8 +13,19 @@ export type JourneyRow = {
   [platform: string]: string | number | null | undefined;
 };
 
+/** Metadados da API Display & Video (inventário) para achar a line no DV360. */
+export type Dv360LineContext = {
+  dv360_advertiser_id?: string | null;
+  dv360_insertion_order_id?: string | null;
+  dv360_campaign_id?: string | null;
+  dv360_entity_status?: string | null;
+  dv360_partner_id?: string | null;
+};
+
 export type PlatformPageRow = {
   line: string;
+  /** Present for DV360 when o relatório agrega por line item. */
+  line_item_id?: string | null;
   token: string;
   cliente: string;
   campanha: string;
@@ -22,19 +33,20 @@ export type PlatformPageRow = {
   gasto: number;
   investido: number | null;
   pct_invest: number | null;
-};
+} & Dv360LineContext;
 
 export type AttentionOutOfPeriodRow = {
   platform: string;
   token: string;
   line: string;
+  line_item_id?: string | null;
   cliente: string;
   campanha: string;
   account_management: string;
   vigencia_start: string | null;
   vigencia_end: string | null;
   gasto: number;
-};
+} & Dv360LineContext;
 
 export type BudgetData = {
   month_key: string;
@@ -70,7 +82,7 @@ export type DashboardResponse = {
       spend?: number;
       currency?: "USD" | "BRL";
       daily?: { date: string; spend: number }[];
-      lines?: { name: string; spend: number }[];
+      lines?: { name: string; spend: number; line_item_id?: string | null }[];
     }
   >;
   dashboard: {
@@ -98,10 +110,17 @@ export type DashboardResponse = {
         estimated_cost_brl?: number;
         pct_estimated_cost?: number;
       }[];
+      /** Só em DV360: escopo do .env (partner e anunciantes consultados). */
+      dv360_context?: { partner_id: string | null; advertiser_ids: string[] };
     }
   >;
   attention: {
-    no_token_rows: { platform: string; line: string; gasto: number }[];
+    no_token_rows: ({
+      platform: string;
+      line: string;
+      line_item_id?: string | null;
+      gasto: number;
+    } & Dv360LineContext)[];
     no_token_total_brl: number;
     out_of_period_rows: AttentionOutOfPeriodRow[];
     out_of_period_total_brl: number;
@@ -142,13 +161,14 @@ export type RefreshMetricsResponse = {
 export type CampaignLineRow = {
   platform: string;
   line: string;
+  line_item_id?: string | null;
   cliente: string;
   campanha: string;
   account_management?: string;
   gasto: number;
   investido: number | null;
   pct_invest: number | null;
-};
+} & Dv360LineContext;
 
 export type CampaignResponse = {
   token: string;

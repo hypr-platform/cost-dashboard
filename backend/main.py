@@ -228,18 +228,28 @@ def campaign_data(
         for row in rows:
             if _normalize_token(str(row.get("token", ""))) != normalized_token:
                 continue
-            line_rows.append(
-                {
-                    "platform": platform_name,
-                    "line": row.get("line", ""),
-                    "cliente": row.get("cliente", ""),
-                    "campanha": row.get("campanha", ""),
-                    "account_management": row.get("account_management", ""),
-                    "gasto": row.get("gasto", 0.0),
-                    "investido": row.get("investido"),
-                    "pct_invest": row.get("pct_invest"),
-                }
-            )
+            lr = {
+                "platform": platform_name,
+                "line": row.get("line", ""),
+                "line_item_id": row.get("line_item_id"),
+                "cliente": row.get("cliente", ""),
+                "campanha": row.get("campanha", ""),
+                "account_management": row.get("account_management", ""),
+                "gasto": row.get("gasto", 0.0),
+                "investido": row.get("investido"),
+                "pct_invest": row.get("pct_invest"),
+            }
+            for _dk in (
+                "dv360_advertiser_id",
+                "dv360_insertion_order_id",
+                "dv360_campaign_id",
+                "dv360_entity_status",
+                "dv360_partner_id",
+            ):
+                _v = row.get(_dk)
+                if _v is not None and str(_v).strip() != "":
+                    lr[_dk] = str(_v).strip()
+            line_rows.append(lr)
     line_rows.sort(key=lambda row: float(row.get("gasto", 0.0)), reverse=True)
 
     active_platforms = sorted({str(row["platform"]) for row in line_rows if row.get("platform")})
