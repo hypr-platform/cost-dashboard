@@ -2021,6 +2021,9 @@ function HomeContent() {
   const outOfPeriodDistributionChartRef = useRef<HTMLDivElement | null>(null);
   const nexdUsageChartRef = useRef<HTMLDivElement | null>(null);
   const snapshotInfoWrapRef = useRef<HTMLDivElement | null>(null);
+  const journeyInvestidoSortWrapRef = useRef<HTMLDivElement | null>(null);
+  const [journeyInvestidoSortMenuOpen, setJourneyInvestidoSortMenuOpen] =
+    useState(false);
 
   useEffect(() => {
     if (!isUserLoaded) return;
@@ -2053,6 +2056,27 @@ function HomeContent() {
       document.removeEventListener("keydown", onKey);
     };
   }, [snapshotInfoOpen]);
+
+  useEffect(() => {
+    if (!journeyInvestidoSortMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (
+        journeyInvestidoSortWrapRef.current &&
+        !journeyInvestidoSortWrapRef.current.contains(e.target as Node)
+      ) {
+        setJourneyInvestidoSortMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setJourneyInvestidoSortMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [journeyInvestidoSortMenuOpen]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -3356,6 +3380,25 @@ function HomeContent() {
 
   const campaignJourneySortButtonClass = (key: CampaignJourneySortKey) =>
     `stackSortButton ${campaignJourneySort.key === key ? "stackSortButtonActive" : ""}`;
+
+  const campaignJourneyInvestidoSortHeaderActive =
+    campaignJourneySort.key === "investido" ||
+    campaignJourneySort.key === "pct_investido";
+
+  const campaignJourneyInvestidoSortIndicator = () => {
+    if (!campaignJourneyInvestidoSortHeaderActive) return "↕";
+    return campaignJourneySort.direction === "asc" ? "↑" : "↓";
+  };
+
+  const selectJourneyInvestidoSortKey = (key: "investido" | "pct_investido") => {
+    setCampaignJourneySort((prev) => {
+      if (prev.key === key) {
+        return { key, direction: prev.direction === "asc" ? "desc" : "asc" };
+      }
+      return { key, direction: "desc" };
+    });
+    setJourneyInvestidoSortMenuOpen(false);
+  };
 
   const toggleNexdFormatSort = (key: NexdFormatSortKey) => {
     setNexdFormatSort((prev) => {
@@ -5315,23 +5358,65 @@ function HomeContent() {
                       </th>
                       <th
                         className={
-                          campaignJourneySort.key === "investido"
+                          campaignJourneyInvestidoSortHeaderActive
                             ? "stackThSorted stackThFinancial stackThNumeric"
                             : "stackThFinancial stackThNumeric"
                         }
                       >
-                        <button
-                          type="button"
-                          className={campaignJourneySortButtonClass(
-                            "investido",
-                          )}
-                          onClick={() => toggleCampaignJourneySort("investido")}
+                        <div
+                          className="journeyInvestidoSortWrap"
+                          ref={journeyInvestidoSortWrapRef}
                         >
-                          <span>Investido</span>
-                          <span className="stackSortIndicator">
-                            {campaignJourneySortIndicator("investido")}
-                          </span>
-                        </button>
+                          <button
+                            type="button"
+                            className={`stackSortButton ${campaignJourneyInvestidoSortHeaderActive ? "stackSortButtonActive" : ""}`}
+                            aria-expanded={journeyInvestidoSortMenuOpen}
+                            aria-haspopup="dialog"
+                            aria-controls={
+                              journeyInvestidoSortMenuOpen
+                                ? "journey-investido-sort-popover"
+                                : undefined
+                            }
+                            onClick={() =>
+                              setJourneyInvestidoSortMenuOpen((open) => !open)
+                            }
+                          >
+                            <span>Investido</span>
+                            <span className="stackSortIndicator">
+                              {campaignJourneyInvestidoSortIndicator()}
+                            </span>
+                          </button>
+                          {journeyInvestidoSortMenuOpen ? (
+                            <div
+                              id="journey-investido-sort-popover"
+                              className="journeyInvestidoSortPopover"
+                              role="dialog"
+                              aria-label="Ordenar coluna Investido"
+                            >
+                              <p className="journeyInvestidoSortPopoverTitle">
+                                Ordenar por
+                              </p>
+                              <button
+                                type="button"
+                                className="journeyInvestidoSortPopoverOption"
+                                onClick={() =>
+                                  selectJourneyInvestidoSortKey("investido")
+                                }
+                              >
+                                Valor investido
+                              </button>
+                              <button
+                                type="button"
+                                className="journeyInvestidoSortPopoverOption"
+                                onClick={() =>
+                                  selectJourneyInvestidoSortKey("pct_investido")
+                                }
+                              >
+                                % do budget (gasto ÷ investido)
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
                       </th>
                       <th
                         className={

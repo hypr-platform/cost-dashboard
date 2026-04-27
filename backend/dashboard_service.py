@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import date, datetime, timezone
 from typing import Any
 
-from backend import bigquery_store
+from backend import bigquery_store, discord_notify
 from backend.budget_store import dynamic_platform_targets_brl, get_platform_budget_share_percent
 from src.apis import amazon_dsp, dv360, hivestack, nexd, stackadapt, xandr
 from src.apis.sheets import extract_token_from_line, fetch_campaign_journey
@@ -960,6 +960,12 @@ def _refresh_dashboard(start: date, end: date, trigger: str) -> dict[str, Any]:
             payload = _build_payload(start, end, previous_payload=previous_payload)
             snapshot_at = datetime.now(timezone.utc).isoformat()
             payload = _refresh_metadata(payload, snapshot_at=snapshot_at, source="live")
+            try:
+                discord_notify.maybe_notify_partial_after_refresh(
+                    trigger=trigger, run_id=run_id, payload=payload
+                )
+            except Exception:
+                logger.exception("Falha ao avaliar/enviar alerta Discord (integrações parciais).")
             _update_cache(start, end, payload, source="live", snapshot_at=snapshot_at)
 
             if bigquery_store.is_enabled():
@@ -1013,6 +1019,16 @@ def _refresh_dashboard(start: date, end: date, trigger: str) -> dict[str, Any]:
                     )
                 except Exception:
                     logger.exception("Falha ao registrar erro do run no BigQuery.")
+            try:
+                discord_notify.notify_dashboard_refresh_failed(
+                    trigger=trigger,
+                    run_id=run_id,
+                    exc=exc,
+                    period_start=start,
+                    period_end=end,
+                )
+            except Exception:
+                logger.exception("Falha ao enviar alerta Discord (refresh falhou).")
             raise
 
 
