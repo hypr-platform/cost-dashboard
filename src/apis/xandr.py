@@ -16,6 +16,7 @@ Nota: O token expira a cada 2 horas.
 import os
 import requests
 import time
+import logging
 from datetime import date
 
 
@@ -24,6 +25,57 @@ REPORT_POLL_TIMEOUT_SECONDS = 90
 REPORT_POLL_INTERVAL_SECONDS = 2
 
 _token_cache: dict = {"token": None, "expires_at": 0}
+logger = logging.getLogger(__name__)
+
+
+class XandrApiError(RuntimeError):
+    pass
+
+
+def _format_api_error(response: requests.Response, context: str) -> str:
+    parts = [
+        f"{context} falhou",
+        f"HTTP {response.status_code}",
+        f"reason={response.reason or 'sem reason'}",
+        f"url={response.url}",
+    ]
+    try:
+        payload = response.json()
+    except ValueError:
+        raw_body = response.text.strip()
+        if raw_body:
+            parts.append(f"body={raw_body[:500]}")
+        return " - ".join(parts)
+
+    response_payload = payload.get("response", {}) if isinstance(payload, dict) else {}
+    if isinstance(response_payload, dict):
+        error_id = response_payload.get("error_id")
+        error = response_payload.get("error")
+        error_description = response_payload.get("error_description")
+        dbg_info = response_payload.get("dbg_info") or response_payload.get("debug_info") or {}
+        request_id = (
+            dbg_info.get("request_id") or dbg_info.get("instance")
+            if isinstance(dbg_info, dict)
+            else None
+        )
+
+        if error_id:
+            parts.append(f"error_id={error_id}")
+        if error:
+            parts.append(f"error={error}")
+        if error_description:
+            parts.append(f"description={error_description}")
+        if request_id:
+            parts.append(f"debug_id={request_id}")
+    return " - ".join(parts)
+
+
+def _raise_for_xandr_error(response: requests.Response, context: str) -> None:
+    if response.ok:
+        return
+    message = _format_api_error(response, context)
+    logger.warning(message)
+    raise XandrApiError(message)
 
 
 def _get_token():
@@ -41,9 +93,11 @@ def _get_token():
         json={"auth": {"username": username, "password": password}},
         timeout=30,
     )
-    resp.raise_for_status()
+    _raise_for_xandr_error(resp, "Autenticação Xandr")
     data = resp.json()
     token = data.get("response", {}).get("token")
+    if not token:
+        raise XandrApiError(_format_api_error(resp, "Autenticação Xandr sem token"))
     if token:
         _token_cache["token"] = token
         _token_cache["expires_at"] = now + 7200  # 2h
@@ -84,7 +138,7 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
                 }
             }
             r = requests.post(f"{BASE_URL}/report", json=body, headers=headers, timeout=30)
-            r.raise_for_status()
+            _raise_for_xandr_error(r, "Criação de relatório Xandr")
             report_id = r.json().get("response", {}).get("report_id")
             if not report_id:
                 return None, r.json().get("response", {}).get("error", "Report ID não retornado")
@@ -93,7 +147,7 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
             deadline = time.time() + REPORT_POLL_TIMEOUT_SECONDS
             while time.time() < deadline:
                 sr = requests.get(f"{BASE_URL}/report?id={report_id}", headers=headers, timeout=30)
-                sr.raise_for_status()
+                _raise_for_xandr_error(sr, "Status de relatório Xandr")
                 response_payload = sr.json().get("response", {})
                 status = str(response_payload.get("execution_status", "")).lower()
                 if status == "ready":
@@ -111,7 +165,7 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
                 )
 
             dl = requests.get(f"{BASE_URL}/report-download?id={report_id}", headers=headers, timeout=60)
-            dl.raise_for_status()
+            _raise_for_xandr_error(dl, "Download de relatório Xandr")
             return pd.read_csv(io.StringIO(dl.text)), None
 
         # Relatório por line item e media type
