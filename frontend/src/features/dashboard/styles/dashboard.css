@@ -2827,13 +2827,68 @@ button.card.platformStatCardNoTokenButton .cardSubtitle {
   justify-content: center;
   color: #64748b;
   opacity: 0.72;
-  cursor: help;
   line-height: 0;
+  pointer-events: none;
 }
 
-.attentionObsIconWrap:hover {
+.attentionNoTokenDataRow:hover .attentionObsIconWrap {
   opacity: 1;
   color: #94a3b8;
+}
+
+.attentionDetailTable tbody tr.attentionNoTokenDataRow {
+  cursor: pointer;
+  transition: background-color 0.16s ease;
+}
+
+.attentionDetailTable tbody tr.attentionNoTokenDataRow:hover {
+  background: rgba(71, 184, 217, 0.08);
+}
+
+.attentionDetailTable tbody tr.attentionNoTokenDataRow--hasObs:hover {
+  background: rgba(71, 184, 217, 0.1);
+}
+
+.attentionObsTooltipLayer {
+  pointer-events: auto;
+}
+
+.attentionObsTooltipCard {
+  position: relative;
+  max-width: min(360px, calc(100vw - 28px));
+  min-width: 176px;
+  padding: 11px 14px 13px;
+  border-radius: 12px;
+  background: linear-gradient(
+    165deg,
+    rgba(32, 44, 54, 0.98) 0%,
+    rgba(24, 34, 42, 0.98) 100%
+  );
+  border: 1px solid rgba(71, 184, 217, 0.38);
+  box-shadow:
+    0 14px 36px rgba(0, 0, 0, 0.48),
+    0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  backdrop-filter: blur(12px);
+}
+
+.attentionObsTooltipEyebrow {
+  margin: 0 0 5px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #5ec8e8;
+}
+
+.attentionObsTooltipBody {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.48;
+  color: #e8eef4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: min(240px, 42vh);
+  overflow-y: auto;
 }
 
 .attentionObsMiniIcon {
@@ -2861,6 +2916,10 @@ button.card.platformStatCardNoTokenButton .cardSubtitle {
   transition:
     color 0.12s ease,
     background 0.12s ease;
+}
+
+.attentionNoTokenDataRow .attentionRowKebabButton {
+  cursor: pointer;
 }
 
 .attentionRowKebabButton:hover {

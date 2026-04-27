@@ -1877,6 +1877,14 @@ function HomeContent() {
   >(null);
   const [noTokenObsModalText, setNoTokenObsModalText] = useState("");
   const [noTokenObsModalSaving, setNoTokenObsModalSaving] = useState(false);
+  const [noTokenRowTooltip, setNoTokenRowTooltip] = useState<{
+    text: string;
+    anchorCenterX: number;
+    anchorBottom: number;
+  } | null>(null);
+  const noTokenTooltipHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
   const [refreshPhase, setRefreshPhase] = useState<RefreshPhase>("idle");
   const [refreshRunStartedAt, setRefreshRunStartedAt] = useState<number | null>(
@@ -2021,11 +2029,40 @@ function HomeContent() {
     refreshPhase === "running" ||
     Boolean(refreshStatus?.running);
 
+  const cancelHideNoTokenRowTooltip = useCallback(() => {
+    if (noTokenTooltipHideTimerRef.current !== null) {
+      clearTimeout(noTokenTooltipHideTimerRef.current);
+      noTokenTooltipHideTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleHideNoTokenRowTooltip = useCallback(() => {
+    cancelHideNoTokenRowTooltip();
+    noTokenTooltipHideTimerRef.current = setTimeout(() => {
+      setNoTokenRowTooltip(null);
+      noTokenTooltipHideTimerRef.current = null;
+    }, 220);
+  }, [cancelHideNoTokenRowTooltip]);
+
+  const showNoTokenRowTooltipFromRect = useCallback(
+    (text: string, rect: DOMRect) => {
+      cancelHideNoTokenRowTooltip();
+      setNoTokenRowTooltip({
+        text,
+        anchorCenterX: rect.left + rect.width / 2,
+        anchorBottom: rect.bottom,
+      });
+    },
+    [cancelHideNoTokenRowTooltip],
+  );
+
   const closeNoTokenObservationModal = useCallback(() => {
+    cancelHideNoTokenRowTooltip();
+    setNoTokenRowTooltip(null);
     setNoTokenObsModalRow(null);
     setNoTokenObsModalText("");
     setNoTokenObsModalSaving(false);
-  }, []);
+  }, [cancelHideNoTokenRowTooltip]);
 
   const saveNoTokenObservationFromModal = useCallback(async () => {
     if (!noTokenObsModalRow) return;
@@ -2763,6 +2800,11 @@ function HomeContent() {
   }, [data, requestedPage]);
 
   const resolvedActivePage: NavKey = requestedPage;
+
+  useEffect(() => {
+    cancelHideNoTokenRowTooltip();
+    setNoTokenRowTooltip(null);
+  }, [resolvedActivePage, cancelHideNoTokenRowTooltip]);
 
   const campaignRows = useMemo(
     () => dashboardFilteredRows,
@@ -7696,19 +7738,26 @@ function HomeContent() {
                       </tr>
                     </thead>
                     <tbody>
-                      {sortedNoTokenRows.map((row, index) => (
+                      {sortedNoTokenRows.map((row, index) => {
+                        const obsTrim = (row.observation ?? "").trim();
+                        return (
                         <tr
                           key={`${row.platform}-${row.line}-${row.line_item_id ?? ""}-${index}`}
+                          className={`attentionNoTokenDataRow${obsTrim ? " attentionNoTokenDataRow--hasObs" : ""}`}
+                          onMouseEnter={(event) => {
+                            if (!obsTrim) return;
+                            showNoTokenRowTooltipFromRect(
+                              obsTrim,
+                              event.currentTarget.getBoundingClientRect(),
+                            );
+                          }}
+                          onMouseLeave={scheduleHideNoTokenRowTooltip}
                         >
                           <td className="attentionObsIconCell">
-                            {(() => {
-                              const obsText = (row.observation ?? "").trim();
-                              if (!obsText) return null;
-                              return (
+                            {obsTrim ? (
                                 <span
                                   className="attentionObsIconWrap"
-                                  title={obsText}
-                                  aria-label={`Observação: ${obsText}`}
+                                  aria-hidden={true}
                                 >
                                   <svg
                                     className="attentionObsMiniIcon"
@@ -7723,8 +7772,7 @@ function HomeContent() {
                                     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                                   </svg>
                                 </span>
-                              );
-                            })()}
+                            ) : null}
                           </td>
                           <td>{row.platform}</td>
                           <td>{row.line}</td>
@@ -7791,6 +7839,8 @@ function HomeContent() {
                                   : "Adicionar observação nesta line"
                               }
                               onClick={() => {
+                                cancelHideNoTokenRowTooltip();
+                                setNoTokenRowTooltip(null);
                                 setNoTokenObsModalRow(row);
                                 setNoTokenObsModalText(
                                   (row.observation ?? "").trim(),
@@ -7801,7 +7851,8 @@ function HomeContent() {
                             </button>
                           </td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -8780,6 +8831,27 @@ function HomeContent() {
         )}
       </section>
 
+      {noTokenRowTooltip ? (
+        <div
+          className="attentionObsTooltipLayer"
+          style={{
+            position: "fixed",
+            left: noTokenRowTooltip.anchorCenterX,
+            top: noTokenRowTooltip.anchorBottom + 2,
+            paddingTop: 6,
+            transform: "translateX(-50%) translateZ(0)",
+            zIndex: 96,
+          }}
+          onMouseEnter={cancelHideNoTokenRowTooltip}
+          onMouseLeave={scheduleHideNoTokenRowTooltip}
+        >
+          <div className="attentionObsTooltipCard" role="tooltip">
+            <p className="attentionObsTooltipEyebrow">Observação</p>
+            <p className="attentionObsTooltipBody">{noTokenRowTooltip.text}</p>
+          </div>
+        </div>
+      ) : null}
+
       {noTokenObsModalRow ? (
         <div
           className="modalOverlay"
@@ -8813,7 +8885,7 @@ function HomeContent() {
                 className="modalTextarea"
                 value={noTokenObsModalText}
                 onChange={(event) => setNoTokenObsModalText(event.target.value)}
-                placeholder="Observação interna (visível no hover do aviso na tabela)…"
+                placeholder="Observação interna (passe o mouse na linha na tabela para ver o preview)…"
                 rows={6}
               />
             </div>
