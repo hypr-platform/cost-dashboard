@@ -26,3 +26,41 @@ export async function triggerDashboardRefresh(url: string): Promise<void> {
     throw new Error("Falha ao disparar atualizacao na fonte.");
   }
 }
+
+export type SaveNoTokenObservationInput = {
+  platform: string;
+  line: string;
+  line_item_id?: string | null;
+  observation: string;
+};
+
+export async function saveNoTokenObservation(
+  apiBase: string,
+  body: SaveNoTokenObservationInput,
+): Promise<void> {
+  const response = await fetch(
+    `${apiBase.replace(/\/$/, "")}/api/attention/no-token-lines/observation`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform: body.platform,
+        line: body.line,
+        line_item_id: body.line_item_id ?? null,
+        observation: body.observation,
+      }),
+    },
+  );
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const parsed = (await response.json()) as { detail?: unknown };
+      if (typeof parsed.detail === "string") {
+        detail = parsed.detail;
+      }
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail || `Falha ao salvar observação (${response.status}).`);
+  }
+}

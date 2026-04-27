@@ -8,9 +8,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import date, datetime, timezone
 from typing import Any
 
-from backend import bigquery_store, discord_notify
+from backend import bigquery_store, discord_notify, line_observations_pg
 from backend.budget_store import dynamic_platform_targets_brl, get_platform_budget_share_percent
-from src.apis import amazon_dsp, dv360, hivestack, nexd, stackadapt, xandr
+from src.apis import dv360, hivestack, nexd, stackadapt, xandr
 from src.apis.sheets import extract_token_from_line, fetch_campaign_journey
 from src.utils.currency import get_usd_to_brl, to_brl
 from src.utils.date_utils import fmt, get_mtd_dates
@@ -22,11 +22,11 @@ DEFAULT_DV360_TIMEOUT_SECONDS = 240.0
 DEFAULT_CACHE_TTL_SECONDS = 300.0
 DEFAULT_WORKER_FAST_INTERVAL_SECONDS = 600.0
 DEFAULT_WORKER_DV360_INTERVAL_SECONDS = 1800.0
+# Amazon DSP desligado no worker: sem credenciais de API por ora; não incluir evita alertas no Discord.
 PLATFORMS = {
     "StackAdapt": stackadapt,
     "DV360": dv360,
     "Xandr": xandr,
-    "Amazon DSP": amazon_dsp,
     "Hivestack": hivestack,
 }
 
@@ -1039,7 +1039,9 @@ def get_dashboard_data(
 ) -> dict[str, Any]:
     resolved_start, resolved_end = _period_range(start, end)
     if force_refresh:
-        return _refresh_dashboard(resolved_start, resolved_end, trigger="force_refresh")
+        return line_observations_pg.merge_observations_into_payload(
+            _refresh_dashboard(resolved_start, resolved_end, trigger="force_refresh")
+        )
 
     with _cache_lock:
         if (
@@ -1048,13 +1050,15 @@ def get_dashboard_data(
             and _cache["data"] is not None
             and _cache_is_fresh(_cache.get("cached_at"))
         ):
-            return dict(_cache["data"])
+            return line_observations_pg.merge_observations_into_payload(dict(_cache["data"]))
 
     bq_payload = _load_from_bigquery(resolved_start, resolved_end)
     if bq_payload is not None:
-        return bq_payload
+        return line_observations_pg.merge_observations_into_payload(bq_payload)
 
-    return _refresh_dashboard(resolved_start, resolved_end, trigger="cache_miss")
+    return line_observations_pg.merge_observations_into_payload(
+        _refresh_dashboard(resolved_start, resolved_end, trigger="cache_miss")
+    )
 
 
 def trigger_refresh_async(start: date | None = None, end: date | None = None, trigger: str = "manual") -> dict[str, Any]:

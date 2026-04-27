@@ -16,6 +16,7 @@ import {
   fetchDashboard,
   fetchRefreshMetrics,
   fetchRefreshStatus,
+  saveNoTokenObservation,
   triggerDashboardRefresh,
 } from "@/services/api/dashboard";
 import type {
@@ -1871,6 +1872,11 @@ function HomeContent() {
     message: string;
     kind: "success" | "error";
   } | null>(null);
+  const [noTokenObsModalRow, setNoTokenObsModalRow] = useState<
+    DashboardResponse["attention"]["no_token_rows"][number] | null
+  >(null);
+  const [noTokenObsModalText, setNoTokenObsModalText] = useState("");
+  const [noTokenObsModalSaving, setNoTokenObsModalSaving] = useState(false);
   const [copiedFieldKey, setCopiedFieldKey] = useState<string | null>(null);
   const [refreshPhase, setRefreshPhase] = useState<RefreshPhase>("idle");
   const [refreshRunStartedAt, setRefreshRunStartedAt] = useState<number | null>(
@@ -2014,10 +2020,46 @@ function HomeContent() {
     refreshPhase === "starting" ||
     refreshPhase === "running" ||
     Boolean(refreshStatus?.running);
+
+  const closeNoTokenObservationModal = useCallback(() => {
+    setNoTokenObsModalRow(null);
+    setNoTokenObsModalText("");
+    setNoTokenObsModalSaving(false);
+  }, []);
+
+  const saveNoTokenObservationFromModal = useCallback(async () => {
+    if (!noTokenObsModalRow) return;
+    setNoTokenObsModalSaving(true);
+    try {
+      await saveNoTokenObservation(apiBase, {
+        platform: noTokenObsModalRow.platform,
+        line: noTokenObsModalRow.line,
+        line_item_id: noTokenObsModalRow.line_item_id,
+        observation: noTokenObsModalText,
+      });
+      setToast({ kind: "success", message: "Observação salva." });
+      closeNoTokenObservationModal();
+      await mutate();
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Falha ao salvar observação.";
+      setToast({ kind: "error", message: msg });
+    } finally {
+      setNoTokenObsModalSaving(false);
+    }
+  }, [
+    apiBase,
+    closeNoTokenObservationModal,
+    mutate,
+    noTokenObsModalRow,
+    noTokenObsModalText,
+  ]);
+
   const spendByPlatformChartRef = useRef<HTMLDivElement | null>(null);
   const distributionChartRef = useRef<HTMLDivElement | null>(null);
   const dailyCostChartRef = useRef<HTMLDivElement | null>(null);
   const noTokenDistributionChartRef = useRef<HTMLDivElement | null>(null);
+  const noTokenObsTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const outOfPeriodDistributionChartRef = useRef<HTMLDivElement | null>(null);
   const nexdUsageChartRef = useRef<HTMLDivElement | null>(null);
   const snapshotInfoWrapRef = useRef<HTMLDivElement | null>(null);
@@ -2077,6 +2119,23 @@ function HomeContent() {
       document.removeEventListener("keydown", onKey);
     };
   }, [journeyInvestidoSortMenuOpen]);
+
+  useEffect(() => {
+    if (!noTokenObsModalRow) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeNoTokenObservationModal();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [noTokenObsModalRow, closeNoTokenObservationModal]);
+
+  useEffect(() => {
+    if (!noTokenObsModalRow) return;
+    const id = window.requestAnimationFrame(() => {
+      noTokenObsTextareaRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [noTokenObsModalRow]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -3615,6 +3674,7 @@ function HomeContent() {
         row.platform,
         row.line,
         row.line_item_id ?? "",
+        row.observation ?? "",
         row.dv360_advertiser_id ?? "",
         row.dv360_insertion_order_id ?? "",
         row.dv360_campaign_id ?? "",
@@ -7383,6 +7443,7 @@ function HomeContent() {
     const filteredNoTokenTotal = noTokenDerived.filteredTotal;
     const handleExportNoToken = () => {
       const headers = [
+        "Observação",
         "Plataforma",
         "Line",
         "Line item ID (DV360)",
@@ -7394,6 +7455,7 @@ function HomeContent() {
         "Gasto (BRL)",
       ];
       const rowsToExport = sortedNoTokenRows.map((row) => [
+        row.observation ?? "",
         row.platform,
         row.line,
         row.line_item_id ?? "",
@@ -7577,6 +7639,7 @@ function HomeContent() {
                   <table className="attentionDetailTable">
                     <thead>
                       <tr>
+                        <th className="attentionThObservation">Observação</th>
                         <th>
                           <button
                             type="button"
@@ -7630,6 +7693,42 @@ function HomeContent() {
                         <tr
                           key={`${row.platform}-${row.line}-${row.line_item_id ?? ""}-${index}`}
                         >
+                          <td className="attentionObservationActionsCell">
+                            <div className="attentionObservationActionsRow">
+                              {(() => {
+                                const obsText = (row.observation ?? "").trim();
+                                if (!obsText) return null;
+                                return (
+                                  <span
+                                    className="attentionObservationBadge"
+                                    title={obsText}
+                                    aria-label={`Observação: ${obsText}`}
+                                  >
+                                    !
+                                  </span>
+                                );
+                              })()}
+                              <button
+                                type="button"
+                                className="button buttonGhost buttonSmall attentionObservationTableButton"
+                                title={
+                                  (row.observation ?? "").trim()
+                                    ? "Editar observação"
+                                    : "Adicionar observação nesta line"
+                                }
+                                onClick={() => {
+                                  setNoTokenObsModalRow(row);
+                                  setNoTokenObsModalText(
+                                    (row.observation ?? "").trim(),
+                                  );
+                                }}
+                              >
+                                {(row.observation ?? "").trim()
+                                  ? "Editar"
+                                  : "Adicionar observação"}
+                              </button>
+                            </div>
+                          </td>
                           <td>{row.platform}</td>
                           <td>{row.line}</td>
                           <td className="attentionLineItemIdCell">
@@ -7677,7 +7776,9 @@ function HomeContent() {
                               ? String(row.dv360_entity_status).trim()
                               : "—"}
                           </td>
-                          <td>{brl(row.gasto)}</td>
+                          <td className="attentionGastoCell">
+                            {brl(row.gasto)}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -8657,6 +8758,65 @@ function HomeContent() {
           </>
         )}
       </section>
+
+      {noTokenObsModalRow ? (
+        <div
+          className="modalOverlay"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) closeNoTokenObservationModal();
+          }}
+        >
+          <div
+            className="modalCard modalCardObservation"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="no-token-obs-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modalHeading">
+              <h2 id="no-token-obs-modal-title">Observação na line</h2>
+            </div>
+            <p className="modalSubtitle">
+              {noTokenObsModalRow.platform}
+              {" · "}
+              {noTokenObsModalRow.line.length > 96
+                ? `${noTokenObsModalRow.line.slice(0, 96)}…`
+                : noTokenObsModalRow.line}
+            </p>
+            <div className="modalField">
+              <label htmlFor="no-token-obs-modal-text">Texto</label>
+              <textarea
+                ref={noTokenObsTextareaRef}
+                id="no-token-obs-modal-text"
+                className="modalTextarea"
+                value={noTokenObsModalText}
+                onChange={(event) => setNoTokenObsModalText(event.target.value)}
+                placeholder="Observação interna (visível no hover do aviso na tabela)…"
+                rows={6}
+              />
+            </div>
+            <div className="modalActions">
+              <button
+                type="button"
+                className="button modalButtonGhost"
+                disabled={noTokenObsModalSaving}
+                onClick={closeNoTokenObservationModal}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="button modalButtonPrimary"
+                disabled={noTokenObsModalSaving}
+                onClick={() => void saveNoTokenObservationFromModal()}
+              >
+                {noTokenObsModalSaving ? "Salvando…" : "Salvar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {toast ? (
         <div

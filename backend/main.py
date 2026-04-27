@@ -9,6 +9,7 @@ from fastapi import FastAPI, Query
 from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 
 from backend.budget_store import init_budget_store
 from backend.dashboard_service import (
@@ -21,6 +22,7 @@ from backend.dashboard_service import (
     stop_background_workers,
     trigger_refresh_async,
 )
+from backend import line_observations_pg
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
@@ -155,7 +157,7 @@ def dashboard_data(
         logger.exception("Falha ao montar payload de dashboard.")
         cached = get_cached_dashboard_data()
         if cached is not None:
-            stale_payload = dict(cached)
+            stale_payload = line_observations_pg.merge_observations_into_payload(dict(cached))
             stale_payload["_warning"] = "Erro ao atualizar dados ao vivo; retornando cache anterior."
             stale_payload["_error"] = "Falha temporária ao atualizar integrações."
             return stale_payload
@@ -187,6 +189,45 @@ def dashboard_refresh_status() -> dict[str, Any]:
 @app.get("/api/dashboard/refresh/metrics")
 def dashboard_refresh_metrics() -> dict[str, Any]:
     return get_refresh_metrics()
+
+
+class NoTokenLineObservationBody(BaseModel):
+    platform: str = Field(..., max_length=512)
+    line: str = Field(..., max_length=8192)
+    line_item_id: str | None = Field(default=None, max_length=512)
+    observation: str = Field(default="", max_length=8000)
+
+
+@app.post("/api/attention/no-token-lines/observation")
+def save_no_token_line_observation(body: NoTokenLineObservationBody) -> dict[str, str]:
+    if not line_observations_pg.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Observações em PostgreSQL não configuradas. Defina LINE_NO_TOKEN_POSTGRES_URL "
+                "ou POSTGRESS_DATABASE_URL / POSTGRES_DATABASE_URL / POSTGRES_URL; "
+                "DATABASE_URL em localhost só conta com LINE_OBSERVATIONS_USE_DATABASE_URL=1. "
+                "Schema: POSTGRESS_DATABASE_PG_SCHEMA (opcional se for public)."
+            ),
+        )
+    try:
+        line_observations_pg.upsert_observation(
+            body.platform,
+            body.line,
+            body.line_item_id,
+            body.observation,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Falha ao gravar observação de line sem token.")
+        raise HTTPException(
+            status_code=500,
+            detail="Falha ao gravar observação. Verifique os logs do backend e a conexão com o PostgreSQL.",
+        )
+    return {"status": "ok"}
 
 
 @app.get("/api/campaign/{token}")

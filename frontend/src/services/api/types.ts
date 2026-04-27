@@ -120,6 +120,8 @@ export type DashboardResponse = {
       line: string;
       line_item_id?: string | null;
       gasto: number;
+      /** Preenchido pelo backend a partir do PostgreSQL, quando configurado. */
+      observation?: string | null;
     } & Dv360LineContext)[];
     no_token_total_brl: number;
     out_of_period_rows: AttentionOutOfPeriodRow[];
