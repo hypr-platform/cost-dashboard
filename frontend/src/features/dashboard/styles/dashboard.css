@@ -2799,55 +2799,78 @@ button.card.platformStatCardNoTokenButton .cardSubtitle {
 
 .attentionDetailTable {
   width: 100%;
-  min-width: 1460px;
+  min-width: 1420px;
 }
 
-.attentionObservationTableButton {
-  max-width: 8.5rem;
-  line-height: 1.2;
-  white-space: normal;
-  text-align: center;
-  font-size: 0.72rem;
-  padding: 0.32rem 0.45rem;
+.attentionObsIconTh,
+.attentionRowActionsTh {
+  width: 1.75rem;
+  min-width: 1.75rem;
+  max-width: 2rem;
+  padding-left: 0.1rem;
+  padding-right: 0.1rem;
 }
 
-.attentionThObservation {
-  color: #94a3b8;
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-align: left;
-  white-space: nowrap;
-}
-
-.attentionObservationActionsCell {
+.attentionObsIconCell,
+.attentionRowActionsCell {
   vertical-align: middle;
-  text-align: left;
+  width: 1.75rem;
+  min-width: 1.75rem;
+  max-width: 2rem;
+  padding-left: 0.1rem;
+  padding-right: 0.1rem;
 }
 
-.attentionObservationActionsRow {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 0.45rem;
-}
-
-.attentionObservationBadge {
+.attentionObsIconWrap {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 1.35rem;
-  height: 1.35rem;
-  padding: 0 0.28rem;
-  border-radius: 999px;
-  font-size: 0.68rem;
-  font-weight: 800;
-  line-height: 1;
-  letter-spacing: 0.02em;
-  color: #fde68a;
-  background: rgba(245, 158, 11, 0.22);
-  border: 1px solid rgba(251, 191, 36, 0.45);
+  color: #64748b;
+  opacity: 0.72;
   cursor: help;
-  flex-shrink: 0;
+  line-height: 0;
+}
+
+.attentionObsIconWrap:hover {
+  opacity: 1;
+  color: #94a3b8;
+}
+
+.attentionObsMiniIcon {
+  width: 11px;
+  height: 11px;
+}
+
+.attentionRowKebabButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.75rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    background 0.12s ease;
+}
+
+.attentionRowKebabButton:hover {
+  color: #e2e8f0;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.attentionRowKebabButton:focus-visible {
+  outline: 2px solid rgba(71, 184, 217, 0.65);
+  outline-offset: 1px;
 }
 
 .attentionGastoCell {

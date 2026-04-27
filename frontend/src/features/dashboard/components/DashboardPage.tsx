@@ -7443,7 +7443,6 @@ function HomeContent() {
     const filteredNoTokenTotal = noTokenDerived.filteredTotal;
     const handleExportNoToken = () => {
       const headers = [
-        "Observação",
         "Plataforma",
         "Line",
         "Line item ID (DV360)",
@@ -7453,9 +7452,9 @@ function HomeContent() {
         "Status (API)",
         "Partner ID",
         "Gasto (BRL)",
+        "Observação",
       ];
       const rowsToExport = sortedNoTokenRows.map((row) => [
-        row.observation ?? "",
         row.platform,
         row.line,
         row.line_item_id ?? "",
@@ -7465,6 +7464,7 @@ function HomeContent() {
         row.dv360_entity_status ?? "",
         row.dv360_partner_id ?? "",
         row.gasto,
+        row.observation ?? "",
       ]);
       downloadCsv("lines-sem-token.csv", headers, rowsToExport);
     };
@@ -7639,7 +7639,10 @@ function HomeContent() {
                   <table className="attentionDetailTable">
                     <thead>
                       <tr>
-                        <th className="attentionThObservation">Observação</th>
+                        <th
+                          className="attentionObsIconTh"
+                          aria-label="Indicador de observação"
+                        />
                         <th>
                           <button
                             type="button"
@@ -7686,6 +7689,10 @@ function HomeContent() {
                             </span>
                           </button>
                         </th>
+                        <th
+                          className="attentionRowActionsTh"
+                          aria-label="Ações"
+                        />
                       </tr>
                     </thead>
                     <tbody>
@@ -7693,41 +7700,31 @@ function HomeContent() {
                         <tr
                           key={`${row.platform}-${row.line}-${row.line_item_id ?? ""}-${index}`}
                         >
-                          <td className="attentionObservationActionsCell">
-                            <div className="attentionObservationActionsRow">
-                              {(() => {
-                                const obsText = (row.observation ?? "").trim();
-                                if (!obsText) return null;
-                                return (
-                                  <span
-                                    className="attentionObservationBadge"
-                                    title={obsText}
-                                    aria-label={`Observação: ${obsText}`}
+                          <td className="attentionObsIconCell">
+                            {(() => {
+                              const obsText = (row.observation ?? "").trim();
+                              if (!obsText) return null;
+                              return (
+                                <span
+                                  className="attentionObsIconWrap"
+                                  title={obsText}
+                                  aria-label={`Observação: ${obsText}`}
+                                >
+                                  <svg
+                                    className="attentionObsMiniIcon"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    aria-hidden={true}
                                   >
-                                    !
-                                  </span>
-                                );
-                              })()}
-                              <button
-                                type="button"
-                                className="button buttonGhost buttonSmall attentionObservationTableButton"
-                                title={
-                                  (row.observation ?? "").trim()
-                                    ? "Editar observação"
-                                    : "Adicionar observação nesta line"
-                                }
-                                onClick={() => {
-                                  setNoTokenObsModalRow(row);
-                                  setNoTokenObsModalText(
-                                    (row.observation ?? "").trim(),
-                                  );
-                                }}
-                              >
-                                {(row.observation ?? "").trim()
-                                  ? "Editar"
-                                  : "Adicionar observação"}
-                              </button>
-                            </div>
+                                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                                  </svg>
+                                </span>
+                              );
+                            })()}
                           </td>
                           <td>{row.platform}</td>
                           <td>{row.line}</td>
@@ -7778,6 +7775,30 @@ function HomeContent() {
                           </td>
                           <td className="attentionGastoCell">
                             {brl(row.gasto)}
+                          </td>
+                          <td className="attentionRowActionsCell">
+                            <button
+                              type="button"
+                              className="attentionRowKebabButton"
+                              title={
+                                (row.observation ?? "").trim()
+                                  ? "Editar observação"
+                                  : "Adicionar observação"
+                              }
+                              aria-label={
+                                (row.observation ?? "").trim()
+                                  ? "Editar observação desta line"
+                                  : "Adicionar observação nesta line"
+                              }
+                              onClick={() => {
+                                setNoTokenObsModalRow(row);
+                                setNoTokenObsModalText(
+                                  (row.observation ?? "").trim(),
+                                );
+                              }}
+                            >
+                              ...
+                            </button>
                           </td>
                         </tr>
                       ))}
