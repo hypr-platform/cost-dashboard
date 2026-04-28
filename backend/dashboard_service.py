@@ -29,6 +29,8 @@ PLATFORMS = {
     "Xandr": xandr,
     "Hivestack": hivestack,
 }
+FAST_WORKER_SKIP_PLATFORMS = {"DV360"}
+DV360_WORKER_ONLY_PLATFORMS = {"DV360"}
 
 
 _cache: dict[str, Any] = {
@@ -192,6 +194,35 @@ def _platform_timeout_seconds(platform_name: str) -> float:
     if platform_name == "DV360":
         return _dv360_timeout_seconds()
     return _integration_timeout_seconds()
+
+
+def _platform_names_for_trigger(trigger: str) -> set[str] | None:
+    if trigger == "scheduled_fast":
+        return set(PLATFORMS) - FAST_WORKER_SKIP_PLATFORMS
+    if trigger == "scheduled_dv360":
+        return set(DV360_WORKER_ONLY_PLATFORMS)
+    return None
+
+
+def _reuse_previous_ok_platforms(
+    results: dict[str, dict[str, Any]],
+    previous_payload: dict[str, Any] | None,
+    platform_names: set[str],
+) -> None:
+    if not platform_names or not isinstance(previous_payload, dict):
+        return
+    previous_results = previous_payload.get("platform_results", {})
+    if not isinstance(previous_results, dict):
+        return
+    for platform_name in sorted(platform_names):
+        previous_platform = previous_results.get(platform_name)
+        if isinstance(previous_platform, dict) and previous_platform.get("status") == "ok":
+            fallback = dict(previous_platform)
+            fallback["reused_from_previous_snapshot"] = True
+            fallback["message"] = (
+                f"{platform_name} não foi consultado neste ciclo; exibindo último snapshot válido."
+            )
+            results[platform_name] = fallback
 
 
 def _period_range(start: date | None, end: date | None) -> tuple[date, date]:
@@ -414,13 +445,24 @@ def build_filtered_daily_series(
     return filtered_daily
 
 
-def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _build_payload(
+    start: date,
+    end: date,
+    previous_payload: dict[str, Any] | None = None,
+    platform_names: set[str] | None = None,
+) -> dict[str, Any]:
     timeout_seconds = _integration_timeout_seconds()
-    max_workers = len(PLATFORMS) + 3
+    selected_platforms = {
+        name: module
+        for name, module in PLATFORMS.items()
+        if platform_names is None or name in platform_names
+    }
+    skipped_platform_names = set(PLATFORMS) - set(selected_platforms)
+    max_workers = len(selected_platforms) + 3
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         platform_futures = {
             name: executor.submit(module.fetch_mtd_cost, start, end)
-            for name, module in PLATFORMS.items()
+            for name, module in selected_platforms.items()
         }
         rate_future = executor.submit(get_usd_to_brl)
         journey_future = executor.submit(fetch_campaign_journey, start, end)
@@ -428,7 +470,10 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
 
         results: dict[str, dict[str, Any]] = {}
         future_to_platform = {future: name for name, future in platform_futures.items()}
-        platform_timeout_ceiling = max(_platform_timeout_seconds(name) for name in PLATFORMS)
+        platform_timeout_ceiling = max(
+            (_platform_timeout_seconds(name) for name in selected_platforms),
+            default=timeout_seconds,
+        )
         done_platforms, pending_platforms = wait(
             set(platform_futures.values()),
             timeout=platform_timeout_ceiling,
@@ -462,21 +507,7 @@ def _build_payload(start: date, end: date, previous_payload: dict[str, Any] | No
                 "daily": [],
             }
 
-        if isinstance(previous_payload, dict):
-            previous_results = previous_payload.get("platform_results", {})
-            if isinstance(previous_results, dict):
-                # Evita "lines zeradas" da DV360 quando timeout/falha momentânea.
-                current_dv360 = results.get("DV360", {})
-                previous_dv360 = previous_results.get("DV360", {})
-                if (
-                    isinstance(current_dv360, dict)
-                    and current_dv360.get("status") != "ok"
-                    and isinstance(previous_dv360, dict)
-                    and previous_dv360.get("status") == "ok"
-                ):
-                    fallback = dict(previous_dv360)
-                    fallback["message"] = "DV360 indisponível no refresh atual; exibindo último snapshot válido."
-                    results["DV360"] = fallback
+        _reuse_previous_ok_platforms(results, previous_payload, skipped_platform_names)
 
         try:
             rate = float(rate_future.result(timeout=timeout_seconds))
@@ -957,7 +988,12 @@ def _refresh_dashboard(start: date, end: date, trigger: str) -> dict[str, Any]:
                 if isinstance(bq_snapshot, dict):
                     previous_payload = dict(bq_snapshot)
 
-            payload = _build_payload(start, end, previous_payload=previous_payload)
+            payload = _build_payload(
+                start,
+                end,
+                previous_payload=previous_payload,
+                platform_names=_platform_names_for_trigger(trigger),
+            )
             snapshot_at = datetime.now(timezone.utc).isoformat()
             payload = _refresh_metadata(payload, snapshot_at=snapshot_at, source="live")
             try:

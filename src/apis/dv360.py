@@ -38,7 +38,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 QUERIES_URL = "https://doubleclickbidmanager.googleapis.com/v2/queries"
 REPORT_BACKOFF_BASE_SECONDS = 5
 REPORT_BACKOFF_MAX_SECONDS = 80
-REPORT_POLL_TIMEOUT_SECONDS = 240
+DEFAULT_REPORT_POLL_TIMEOUT_SECONDS = 240
 QUERY_TITLE_PREFIX = "Cost Dashboard"
 LINE_NAME_CACHE_TTL_SECONDS = 1800
 
@@ -69,6 +69,19 @@ def _line_name_cache_ttl_seconds() -> int:
     except Exception:
         pass
     return LINE_NAME_CACHE_TTL_SECONDS
+
+
+def _report_poll_timeout_seconds() -> float:
+    raw = os.getenv("DV360_REPORT_POLL_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_REPORT_POLL_TIMEOUT_SECONDS
+    try:
+        parsed = float(raw)
+        if parsed > 0:
+            return parsed
+    except Exception:
+        pass
+    return DEFAULT_REPORT_POLL_TIMEOUT_SECONDS
 
 
 def _is_probably_line_id(value: str | None) -> bool:
@@ -533,8 +546,9 @@ def _wait_report_csv(query_id: str, report_id: str | None, headers: dict) -> str
     started_at = time.time()
     attempt = 0
     tracked_report_id = report_id
+    timeout_seconds = _report_poll_timeout_seconds()
 
-    while time.time() - started_at < REPORT_POLL_TIMEOUT_SECONDS:
+    while time.time() - started_at < timeout_seconds:
         if not tracked_report_id:
             reports = _list_reports(query_id, headers, page_size=1)
             if not reports:

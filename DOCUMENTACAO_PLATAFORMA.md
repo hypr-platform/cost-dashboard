@@ -456,6 +456,47 @@ Padrao comum por plataforma em `platform_results`:
   - `scheduled_fast`
   - `scheduled_dv360`
 
+### Frequencia e escopo de atualizacao
+
+| Origem | Trigger | Frequencia default | Escopo |
+| --- | --- | ---: | --- |
+| Worker rapido | `scheduled_fast` | `DASHBOARD_FAST_WORKER_INTERVAL_SECONDS=600` (10 min) | Atualiza integracoes rapidas: StackAdapt, Xandr, Hivestack, Sheets/PTAX/Nexd. DV360 nao e consultada nesse ciclo; usa o ultimo resultado `ok` disponivel e marca o payload como reaproveitado. |
+| Worker DV360 | `scheduled_dv360` | `DASHBOARD_DV360_WORKER_INTERVAL_SECONDS=1800` (30 min) | Atualiza DV360. As demais plataformas sao reaproveitadas do snapshot anterior quando estao `ok` e marcadas como reaproveitadas. |
+| Botao `Atualizar dados` | `manual_api` | Sob demanda | Atualiza todas as plataformas, incluindo DV360. |
+| `/api/dashboard?force_refresh=true` | `force_refresh` | Sob demanda | Atualiza todas as plataformas de forma sincrona no proprio request. |
+
+Timeouts:
+
+- `DASHBOARD_INTEGRATION_TIMEOUT_SECONDS=45`: limite para integracoes rapidas e fontes auxiliares.
+- `DV360_REPORT_POLL_TIMEOUT_SECONDS=240`: limite interno esperando o relatorio assíncrono da DV360 ficar pronto.
+- `DASHBOARD_DV360_TIMEOUT_SECONDS=240`: limite dedicado para a integracao DV360 inteira.
+- O cliente do frontend busca `/api/dashboard` com timeout de 15s, mas o botao de atualizacao manual nao espera o payload completo; ele dispara um job assincrono.
+
+Quando a DV360 estiver demorando para gerar relatorios, aumente os dois limites mantendo `DASHBOARD_DV360_TIMEOUT_SECONDS` maior que `DV360_REPORT_POLL_TIMEOUT_SECONDS`. Exemplo recomendado para dar ate 8 min ao relatorio e 10 min ao fluxo completo:
+
+```env
+DV360_REPORT_POLL_TIMEOUT_SECONDS=480
+DASHBOARD_DV360_TIMEOUT_SECONDS=600
+```
+
+### O que acontece ao clicar em `Atualizar dados`
+
+1. O frontend monta a URL de refresh com o mesmo `start` e `end` do dashboard atual.
+2. Envia `POST /api/dashboard/refresh`, que chama `trigger_refresh_async(..., trigger="manual_api")`.
+3. Se ja houver um refresh rodando, o backend responde que existe run em execucao; o frontend passa a observar o status em vez de disparar outro job.
+4. O backend roda `_refresh_dashboard` em uma thread, busca todas as integracoes em paralelo e grava o snapshot no BigQuery quando termina.
+5. Enquanto isso, o frontend consulta `/api/dashboard/refresh/status` a cada 2s.
+6. Durante o run, o botao fica desabilitado e a UI mostra tempo decorrido/tempo medio historico.
+7. Quando o status vira `success`, o frontend chama `mutate()` para recarregar `/api/dashboard` e tambem atualiza `/api/dashboard/refresh/metrics`.
+8. Quando o status vira `error`, o frontend mostra toast de erro e nao troca os dados por um payload incompleto.
+
+### Downsides da separacao da DV360
+
+- O dashboard pode misturar dados rapidos recem-atualizados com DV360 do ultimo snapshot valido quando a DV360 nao foi consultada naquele ciclo. Na pratica, a DV360 pode ficar ate cerca de 30 min atrasada pelo default, ou mais se a API da Google continuar falhando.
+- O `scheduled_fast` deixa de avisar timeout da DV360 porque ele nao tenta DV360. Quando existe uma tentativa real no `scheduled_dv360` ou em refresh manual, falha/timeout continua como `status=error` e ainda gera alerta.
+- O snapshot fica mais resiliente, mas a data `_meta.snapshot_at` representa quando o payload consolidado foi salvo, nao necessariamente quando cada plataforma individual foi consultada.
+- A atualizacao manual continua podendo demorar varios minutos porque consulta DV360 junto das demais plataformas. O request do botao e rapido porque e assincrono, mas a conclusao do run depende das APIs externas.
+
 ### Estado de refresh (`/api/dashboard/refresh/status`)
 
 - `running`
@@ -534,6 +575,7 @@ Referencias completas em `.env.example`.
 - `DASHBOARD_CACHE_TTL_SECONDS`
 - `DASHBOARD_INTEGRATION_TIMEOUT_SECONDS`
 - `DASHBOARD_DV360_TIMEOUT_SECONDS`
+- `DV360_REPORT_POLL_TIMEOUT_SECONDS`
 - `DASHBOARD_FAST_WORKER_INTERVAL_SECONDS`
 - `DASHBOARD_DV360_WORKER_INTERVAL_SECONDS`
 
