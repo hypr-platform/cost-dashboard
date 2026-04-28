@@ -27,6 +27,7 @@ export type PlatformPageRow = {
   /** Present for DV360 when o relatório agrega por line item. */
   line_item_id?: string | null;
   token: string;
+  token_resolution_source?: string | null;
   cliente: string;
   campanha: string;
   account_management: string;

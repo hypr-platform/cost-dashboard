@@ -198,6 +198,14 @@ class NoTokenLineObservationBody(BaseModel):
     observation: str = Field(default="", max_length=8000)
 
 
+class NoTokenLineNameBody(BaseModel):
+    platform: str = Field(..., max_length=512)
+    line: str = Field(default="", max_length=8192)
+    line_item_id: str | None = Field(default=None, max_length=512)
+    line_name: str = Field(..., max_length=8192)
+    updated_by: str | None = Field(default=None, max_length=512)
+
+
 @app.post("/api/attention/no-token-lines/observation")
 def save_no_token_line_observation(body: NoTokenLineObservationBody) -> dict[str, str]:
     if not line_observations_pg.is_enabled():
@@ -228,6 +236,37 @@ def save_no_token_line_observation(body: NoTokenLineObservationBody) -> dict[str
             detail="Falha ao gravar observação. Verifique os logs do backend e a conexão com o PostgreSQL.",
         )
     return {"status": "ok"}
+
+
+@app.post("/api/attention/no-token-lines/line-name")
+def save_no_token_line_name(body: NoTokenLineNameBody) -> dict[str, str]:
+    if not line_observations_pg.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Resolução de tokens em PostgreSQL não configurada. Defina LINE_NO_TOKEN_POSTGRES_URL "
+                "ou POSTGRESS_DATABASE_URL / POSTGRES_DATABASE_URL / POSTGRES_URL."
+            ),
+        )
+    try:
+        token = line_observations_pg.upsert_manual_line_name(
+            body.platform,
+            body.line,
+            body.line_item_id,
+            body.line_name,
+            updated_by=body.updated_by or "",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Falha ao gravar nome/token manual de line sem token.")
+        raise HTTPException(
+            status_code=500,
+            detail="Falha ao salvar nome da line. Verifique os logs do backend e a conexão com o PostgreSQL.",
+        )
+    return {"status": "ok", "token": token}
 
 
 @app.get("/api/campaign/{token}")

@@ -34,6 +34,14 @@ export type SaveNoTokenObservationInput = {
   observation: string;
 };
 
+export type SaveNoTokenLineNameInput = {
+  platform: string;
+  line: string;
+  line_item_id?: string | null;
+  line_name: string;
+  updated_by?: string | null;
+};
+
 export async function saveNoTokenObservation(
   apiBase: string,
   body: SaveNoTokenObservationInput,
@@ -63,4 +71,37 @@ export async function saveNoTokenObservation(
     }
     throw new Error(detail || `Falha ao salvar observação (${response.status}).`);
   }
+}
+
+export async function saveNoTokenLineName(
+  apiBase: string,
+  body: SaveNoTokenLineNameInput,
+): Promise<{ token: string }> {
+  const response = await fetch(
+    `${apiBase.replace(/\/$/, "")}/api/attention/no-token-lines/line-name`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        platform: body.platform,
+        line: body.line,
+        line_item_id: body.line_item_id ?? null,
+        line_name: body.line_name,
+        updated_by: body.updated_by ?? null,
+      }),
+    },
+  );
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const parsed = (await response.json()) as { detail?: unknown };
+      if (typeof parsed.detail === "string") {
+        detail = parsed.detail;
+      }
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail || `Falha ao salvar nome da line (${response.status}).`);
+  }
+  return (await response.json()) as { token: string };
 }

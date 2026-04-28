@@ -63,6 +63,86 @@ def _to_brl_smart(spend: float, currency: str, rate: float) -> float:
     return spend if currency == "BRL" else spend * rate
 
 
+def _resolved_token_for_line(line: dict[str, Any]) -> str | None:
+    token = str(line.get("resolved_token") or "").strip().upper()
+    if token:
+        return token
+    return extract_token_from_line(line.get("name", ""))
+
+
+def _line_display_name(line: dict[str, Any]) -> str:
+    return str(line.get("resolved_line_name") or line.get("name") or "")
+
+
+def _line_identity_for_resolution(platform_name: str, line: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "platform": platform_name,
+        "line": str(line.get("name") or ""),
+        "line_item_id": line.get("line_item_id"),
+    }
+
+
+def _apply_line_token_resolutions(results: dict[str, dict[str, Any]]) -> None:
+    """
+    Resolve tokens antes de cruzar com as planilhas.
+
+    Prioridade: override manual SQL > token no nome atual > histórico SQL.
+    """
+    rows: list[dict[str, Any]] = []
+    history_rows: list[dict[str, Any]] = []
+    line_refs: list[tuple[str, dict[str, Any], dict[str, Any], str | None]] = []
+    for platform_name, platform_data in results.items():
+        if platform_data.get("status") != "ok":
+            continue
+        for line in platform_data.get("lines", []):
+            if not isinstance(line, dict):
+                continue
+            identity = _line_identity_for_resolution(platform_name, line)
+            current_token = extract_token_from_line(line.get("name", ""))
+            rows.append(identity)
+            line_refs.append((platform_name, line, identity, current_token))
+            if current_token:
+                history_rows.append({**identity, "token": current_token})
+
+    if history_rows:
+        try:
+            line_observations_pg.upsert_line_token_history(history_rows)
+        except Exception:
+            logger.exception("Falha ao atualizar histórico de token por line.")
+
+    try:
+        resolution_map = line_observations_pg.fetch_resolution_map(rows)
+    except Exception:
+        logger.exception("Falha ao buscar resoluções de token por line.")
+        resolution_map = {}
+
+    for platform_name, line, identity, current_token in line_refs:
+        key = line_observations_pg.row_resolution_key(identity)
+        resolution = resolution_map.get(key) if key else None
+        manual_token = str((resolution or {}).get("manual_token") or "").strip().upper()
+        historical_token = str((resolution or {}).get("historical_token") or "").strip().upper()
+        manual_name = str((resolution or {}).get("manual_line_name") or "").strip()
+        historical_name = str((resolution or {}).get("historical_line_name") or "").strip()
+
+        if manual_token:
+            line["resolved_token"] = manual_token
+            line["token_resolution_source"] = "manual"
+            if manual_name:
+                line["resolved_line_name"] = manual_name
+                line["name"] = manual_name
+        elif current_token:
+            line["resolved_token"] = current_token
+            line["token_resolution_source"] = "name"
+            if "resolved_line_name" not in line:
+                line["resolved_line_name"] = str(line.get("name") or "")
+        elif historical_token:
+            line["resolved_token"] = historical_token
+            line["token_resolution_source"] = "historical"
+            if historical_name:
+                line["resolved_line_name"] = historical_name
+                line["name"] = historical_name
+
+
 def _is_campaign_active(campaign: dict[str, Any], today: date) -> bool:
     s_c = campaign.get("start")
     e_c = campaign.get("end")
@@ -556,6 +636,7 @@ def _build_payload(
             }
 
     all_campaigns = {c["token"]: c for c in journey.get("data", [])}
+    _apply_line_token_resolutions(results)
     platform_spend_by_token: dict[str, dict[str, float]] = {}
 
     for platform_name, platform_data in results.items():
@@ -563,7 +644,7 @@ def _build_payload(
             continue
         platform_spend_by_token[platform_name] = {}
         for line in platform_data.get("lines", []):
-            token = extract_token_from_line(line.get("name", ""))
+            token = _resolved_token_for_line(line)
             if not token:
                 continue
             spend_brl = _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate)
@@ -665,7 +746,7 @@ def _build_payload(
 
         rows = []
         for line in platform_data.get("lines", []):
-            token = extract_token_from_line(line.get("name", ""))
+            token = _resolved_token_for_line(line)
             campaign = all_campaigns.get(token) if token else None
             spend_brl = _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate)
             investido = (
@@ -681,9 +762,10 @@ def _build_payload(
             )
             pct_invest = (spend_brl / investido * 100) if investido and investido > 0 else None
             row = {
-                "line": line.get("name", ""),
+                "line": _line_display_name(line),
                 "line_item_id": line.get("line_item_id"),
                 "token": token or "—",
+                "token_resolution_source": line.get("token_resolution_source"),
                 "cliente": campaign.get("cliente", "—") if campaign else "—",
                 "campanha": campaign.get("campanha", "—") if campaign else "—",
                 "account_management": campaign.get("account_management", "—") if campaign else "—",
@@ -748,13 +830,13 @@ def _build_payload(
         if platform_data.get("status") != "ok":
             continue
         for line in platform_data.get("lines", []):
-            if extract_token_from_line(line.get("name", "")):
+            if _resolved_token_for_line(line):
                 continue
             if float(line.get("spend", 0.0) or 0.0) <= 0.0:
                 continue
             nt: dict = {
                 "platform": platform_name,
-                "line": line.get("name", ""),
+                "line": _line_display_name(line),
                 "line_item_id": line.get("line_item_id"),
                 "gasto": _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate),
             }
@@ -778,7 +860,7 @@ def _build_payload(
         if platform_data.get("status") != "ok":
             continue
         for line in platform_data.get("lines", []):
-            token = extract_token_from_line(line.get("name", ""))
+            token = _resolved_token_for_line(line)
             if not token:
                 continue
             campaign = all_campaigns.get(token)
@@ -790,7 +872,7 @@ def _build_payload(
                 oor: dict = {
                     "platform": platform_name,
                     "token": token,
-                    "line": line.get("name", ""),
+                    "line": _line_display_name(line),
                     "line_item_id": line.get("line_item_id"),
                     "cliente": campaign.get("cliente", ""),
                     "campanha": campaign.get("campanha", ""),

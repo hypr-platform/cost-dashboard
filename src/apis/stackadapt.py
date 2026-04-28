@@ -100,6 +100,7 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
             rec = outcome.get("records") or {}
             for node in rec.get("nodes", []) or []:
                 camp = node.get("campaign", {})
+                campaign_id = str(camp.get("id", "") or "").strip()
                 name = camp.get("name", "")
                 m = node.get("metrics", {})
                 spend = (
@@ -108,7 +109,7 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
                     + float(m.get("tpCpcCost", 0) or 0)
                 )
                 if spend > 0:
-                    lines.append({"name": name, "spend": spend})
+                    lines.append({"name": name, "spend": spend, "line_item_id": campaign_id or None})
 
             page_info = rec.get("pageInfo") or {}
             if not page_info.get("hasNextPage"):

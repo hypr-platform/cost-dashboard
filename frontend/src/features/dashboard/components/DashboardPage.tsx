@@ -1,4 +1,3 @@
-/* eslint-disable react-hooks/preserve-manual-memoization, react-hooks/set-state-in-effect */
 "use client";
 
 import type {
@@ -16,6 +15,7 @@ import {
   fetchDashboard,
   fetchRefreshMetrics,
   fetchRefreshStatus,
+  saveNoTokenLineName,
   saveNoTokenObservation,
   triggerDashboardRefresh,
 } from "@/services/api/dashboard";
@@ -1877,6 +1877,14 @@ function HomeContent() {
   >(null);
   const [noTokenObsModalText, setNoTokenObsModalText] = useState("");
   const [noTokenObsModalSaving, setNoTokenObsModalSaving] = useState(false);
+  const [noTokenNameModalRow, setNoTokenNameModalRow] = useState<
+    DashboardResponse["attention"]["no_token_rows"][number] | null
+  >(null);
+  const [noTokenNameModalText, setNoTokenNameModalText] = useState("");
+  const [noTokenNameModalSaving, setNoTokenNameModalSaving] = useState(false);
+  const [noTokenActionMenuKey, setNoTokenActionMenuKey] = useState<
+    string | null
+  >(null);
   const [noTokenRowTooltip, setNoTokenRowTooltip] = useState<{
     text: string;
     anchorCenterX: number;
@@ -2064,6 +2072,14 @@ function HomeContent() {
     setNoTokenObsModalSaving(false);
   }, [cancelHideNoTokenRowTooltip]);
 
+  const closeNoTokenNameModal = useCallback(() => {
+    cancelHideNoTokenRowTooltip();
+    setNoTokenRowTooltip(null);
+    setNoTokenNameModalRow(null);
+    setNoTokenNameModalText("");
+    setNoTokenNameModalSaving(false);
+  }, [cancelHideNoTokenRowTooltip]);
+
   const saveNoTokenObservationFromModal = useCallback(async () => {
     if (!noTokenObsModalRow) return;
     setNoTokenObsModalSaving(true);
@@ -2092,11 +2108,45 @@ function HomeContent() {
     noTokenObsModalText,
   ]);
 
+  const saveNoTokenNameFromModal = useCallback(async () => {
+    if (!noTokenNameModalRow) return;
+    setNoTokenNameModalSaving(true);
+    try {
+      const result = await saveNoTokenLineName(apiBase, {
+        platform: noTokenNameModalRow.platform,
+        line: noTokenNameModalRow.line,
+        line_item_id: noTokenNameModalRow.line_item_id,
+        line_name: noTokenNameModalText,
+        updated_by: userEmail || null,
+      });
+      setToast({
+        kind: "success",
+        message: `Line associada ao token ${result.token}.`,
+      });
+      closeNoTokenNameModal();
+      await mutate();
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Falha ao salvar nome da line.";
+      setToast({ kind: "error", message: msg });
+    } finally {
+      setNoTokenNameModalSaving(false);
+    }
+  }, [
+    apiBase,
+    closeNoTokenNameModal,
+    mutate,
+    noTokenNameModalRow,
+    noTokenNameModalText,
+    userEmail,
+  ]);
+
   const spendByPlatformChartRef = useRef<HTMLDivElement | null>(null);
   const distributionChartRef = useRef<HTMLDivElement | null>(null);
   const dailyCostChartRef = useRef<HTMLDivElement | null>(null);
   const noTokenDistributionChartRef = useRef<HTMLDivElement | null>(null);
   const noTokenObsTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const noTokenNameInputRef = useRef<HTMLInputElement | null>(null);
   const outOfPeriodDistributionChartRef = useRef<HTMLDivElement | null>(null);
   const nexdUsageChartRef = useRef<HTMLDivElement | null>(null);
   const snapshotInfoWrapRef = useRef<HTMLDivElement | null>(null);
@@ -2167,12 +2217,29 @@ function HomeContent() {
   }, [noTokenObsModalRow, closeNoTokenObservationModal]);
 
   useEffect(() => {
+    if (!noTokenNameModalRow) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeNoTokenNameModal();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [noTokenNameModalRow, closeNoTokenNameModal]);
+
+  useEffect(() => {
     if (!noTokenObsModalRow) return;
     const id = window.requestAnimationFrame(() => {
       noTokenObsTextareaRef.current?.focus();
     });
     return () => window.cancelAnimationFrame(id);
   }, [noTokenObsModalRow]);
+
+  useEffect(() => {
+    if (!noTokenNameModalRow) return;
+    const id = window.requestAnimationFrame(() => {
+      noTokenNameInputRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [noTokenNameModalRow]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -2804,6 +2871,7 @@ function HomeContent() {
   useEffect(() => {
     cancelHideNoTokenRowTooltip();
     setNoTokenRowTooltip(null);
+    setNoTokenActionMenuKey(null);
   }, [resolvedActivePage, cancelHideNoTokenRowTooltip]);
 
   const campaignRows = useMemo(
@@ -7740,9 +7808,10 @@ function HomeContent() {
                     <tbody>
                       {sortedNoTokenRows.map((row, index) => {
                         const obsTrim = (row.observation ?? "").trim();
+                        const rowActionKey = `${row.platform}-${row.line}-${row.line_item_id ?? ""}-${index}`;
                         return (
                         <tr
-                          key={`${row.platform}-${row.line}-${row.line_item_id ?? ""}-${index}`}
+                          key={rowActionKey}
                           className={`attentionNoTokenDataRow${obsTrim ? " attentionNoTokenDataRow--hasObs" : ""}`}
                           onMouseEnter={(event) => {
                             if (!obsTrim) return;
@@ -7825,30 +7894,59 @@ function HomeContent() {
                             {brl(row.gasto)}
                           </td>
                           <td className="attentionRowActionsCell">
-                            <button
-                              type="button"
-                              className="attentionRowKebabButton"
-                              title={
-                                (row.observation ?? "").trim()
-                                  ? "Editar observação"
-                                  : "Adicionar observação"
-                              }
-                              aria-label={
-                                (row.observation ?? "").trim()
-                                  ? "Editar observação desta line"
-                                  : "Adicionar observação nesta line"
-                              }
-                              onClick={() => {
-                                cancelHideNoTokenRowTooltip();
-                                setNoTokenRowTooltip(null);
-                                setNoTokenObsModalRow(row);
-                                setNoTokenObsModalText(
-                                  (row.observation ?? "").trim(),
-                                );
-                              }}
-                            >
-                              ...
-                            </button>
+                            <div className="attentionRowActionsMenuWrap">
+                              <button
+                                type="button"
+                                className="attentionRowKebabButton"
+                                title="Ações"
+                                aria-label="Abrir ações desta line"
+                                aria-haspopup="menu"
+                                aria-expanded={noTokenActionMenuKey === rowActionKey}
+                                onClick={() => {
+                                  cancelHideNoTokenRowTooltip();
+                                  setNoTokenRowTooltip(null);
+                                  setNoTokenActionMenuKey((current) =>
+                                    current === rowActionKey ? null : rowActionKey,
+                                  );
+                                }}
+                              >
+                                ...
+                              </button>
+                              {noTokenActionMenuKey === rowActionKey ? (
+                                <div
+                                  className="attentionRowActionsPopover"
+                                  role="menu"
+                                  aria-label="Ações da line sem token"
+                                >
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() => {
+                                      setNoTokenActionMenuKey(null);
+                                      setNoTokenNameModalRow(row);
+                                      setNoTokenNameModalText(row.line ?? "");
+                                    }}
+                                  >
+                                    Editar nome da line
+                                  </button>
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() => {
+                                      setNoTokenActionMenuKey(null);
+                                      setNoTokenObsModalRow(row);
+                                      setNoTokenObsModalText(
+                                        (row.observation ?? "").trim(),
+                                      );
+                                    }}
+                                  >
+                                    {(row.observation ?? "").trim()
+                                      ? "Editar observação"
+                                      : "Adicionar observação"}
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
                           </td>
                         </tr>
                         );
@@ -8905,6 +9003,68 @@ function HomeContent() {
                 onClick={() => void saveNoTokenObservationFromModal()}
               >
                 {noTokenObsModalSaving ? "Salvando…" : "Salvar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {noTokenNameModalRow ? (
+        <div
+          className="modalOverlay"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) closeNoTokenNameModal();
+          }}
+        >
+          <div
+            className="modalCard modalCardObservation"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="no-token-name-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modalHeading">
+              <h2 id="no-token-name-modal-title">Editar nome da line</h2>
+            </div>
+            <p className="modalSubtitle">
+              {noTokenNameModalRow.platform}
+              {" · ID "}
+              {noTokenNameModalRow.line_item_id
+                ? String(noTokenNameModalRow.line_item_id)
+                : "—"}
+            </p>
+            <div className="modalField">
+              <label htmlFor="no-token-name-modal-text">Nome correto</label>
+              <input
+                ref={noTokenNameInputRef}
+                id="no-token-name-modal-text"
+                className="modalInput modalInputStandalone"
+                value={noTokenNameModalText}
+                onChange={(event) => setNoTokenNameModalText(event.target.value)}
+                placeholder="Ex.: ID-ABC123_HYPR_Campanha..."
+              />
+              <p className="modalFieldHint">
+                Informe o nome com token no padrão ID-XXXXXX ou apenas o short
+                token de 6 caracteres.
+              </p>
+            </div>
+            <div className="modalActions">
+              <button
+                type="button"
+                className="button modalButtonGhost"
+                disabled={noTokenNameModalSaving}
+                onClick={closeNoTokenNameModal}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="button modalButtonPrimary"
+                disabled={noTokenNameModalSaving}
+                onClick={() => void saveNoTokenNameFromModal()}
+              >
+                {noTokenNameModalSaving ? "Salvando…" : "Salvar"}
               </button>
             </div>
           </div>

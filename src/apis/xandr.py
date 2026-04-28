@@ -183,7 +183,25 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
         # Lines
         lines_out = []
         line_col = next((c for c in df.columns if c.lower() == "line_item_name"), None)
-        if line_col and spend_col:
+        line_id_col = next((c for c in df.columns if c.lower() == "line_item_id"), None)
+        if line_col and spend_col and line_id_col:
+            agg = (
+                df.groupby([line_id_col, line_col], dropna=False)[spend_col]
+                .sum()
+                .reset_index()
+                .sort_values(spend_col, ascending=False)
+            )
+            for _, row in agg.iterrows():
+                raw_id = row[line_id_col]
+                line_item_id = "" if raw_id != raw_id else str(raw_id).strip()
+                lines_out.append(
+                    {
+                        "name": str(row[line_col]),
+                        "spend": float(row[spend_col]),
+                        "line_item_id": line_item_id or None,
+                    }
+                )
+        elif line_col and spend_col:
             agg = df.groupby(line_col)[spend_col].sum().reset_index().sort_values(spend_col, ascending=False)
             for _, row in agg.iterrows():
                 lines_out.append({"name": str(row[line_col]), "spend": float(row[spend_col])})

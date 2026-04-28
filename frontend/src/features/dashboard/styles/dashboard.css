@@ -2932,6 +2932,44 @@ button.card.platformStatCardNoTokenButton .cardSubtitle {
   outline-offset: 1px;
 }
 
+.attentionRowActionsMenuWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.attentionRowActionsPopover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 24;
+  min-width: 178px;
+  padding: 5px;
+  border: 1px solid rgba(83, 104, 114, 0.55);
+  border-radius: 12px;
+  background: rgba(28, 38, 47, 0.98);
+  box-shadow: 0 14px 28px rgba(11, 18, 32, 0.42);
+}
+
+.attentionRowActionsPopover button {
+  width: 100%;
+  border: 0;
+  border-radius: 9px;
+  padding: 8px 9px;
+  background: transparent;
+  color: #dbeafe;
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attentionRowActionsPopover button:hover,
+.attentionRowActionsPopover button:focus-visible {
+  outline: none;
+  background: rgba(71, 184, 217, 0.12);
+  color: #f8fafc;
+}
+
 .attentionGastoCell {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -3765,6 +3803,29 @@ th.stackThFinancial {
 .modalInput::placeholder {
   color: var(--field-placeholder);
   font-weight: 500;
+}
+
+.modalInputStandalone {
+  box-sizing: border-box;
+  border: 1px solid var(--field-border);
+  border-radius: 12px;
+  background: var(--field-bg);
+  padding: 10px 12px;
+  font-size: 0.92rem;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+.modalInputStandalone:focus {
+  border-color: var(--field-focus-border);
+  box-shadow: 0 0 0 3px var(--field-focus-glow);
+}
+
+.modalFieldHint {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 
 .modalInput::-webkit-outer-spin-button,

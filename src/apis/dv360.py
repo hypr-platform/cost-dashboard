@@ -28,6 +28,7 @@ import base64
 import random
 import re
 import threading
+import logging
 import requests
 from datetime import date
 from pathlib import Path
@@ -41,6 +42,9 @@ REPORT_BACKOFF_MAX_SECONDS = 80
 DEFAULT_REPORT_POLL_TIMEOUT_SECONDS = 240
 QUERY_TITLE_PREFIX = "Cost Dashboard"
 LINE_NAME_CACHE_TTL_SECONDS = 1800
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 def _resolve(env_var):
@@ -82,6 +86,10 @@ def _report_poll_timeout_seconds() -> float:
     except Exception:
         pass
     return DEFAULT_REPORT_POLL_TIMEOUT_SECONDS
+
+
+def _elapsed_seconds(started_at: float) -> float:
+    return time.perf_counter() - started_at
 
 
 def _is_probably_line_id(value: str | None) -> bool:
@@ -142,8 +150,10 @@ def _line_item_dict_from_api_item(item: dict, advertiser_id: str) -> dict[str, s
 
 
 def _fetch_line_item_meta_by_advertiser(advertiser_id: str, headers: dict) -> dict[str, dict[str, str]]:
+    started_at = time.perf_counter()
     out: dict[str, dict[str, str]] = {}
     page_token = None
+    page_count = 0
     while True:
         params = {
             "pageSize": 200,
@@ -159,6 +169,7 @@ def _fetch_line_item_meta_by_advertiser(advertiser_id: str, headers: dict) -> di
         )
         response.raise_for_status()
         payload = response.json()
+        page_count += 1
         for item in payload.get("lineItems", []):
             if not isinstance(item, dict):
                 continue
@@ -171,6 +182,13 @@ def _fetch_line_item_meta_by_advertiser(advertiser_id: str, headers: dict) -> di
         page_token = payload.get("nextPageToken")
         if not page_token:
             break
+    logger.warning(
+        "[DV360] line item meta advertiser=%s pages=%s items=%s duration=%.1fs",
+        advertiser_id,
+        page_count,
+        len(out),
+        _elapsed_seconds(started_at),
+    )
     return out
 
 
@@ -231,9 +249,12 @@ def _line_id_to_line_meta_map(headers: dict, advertiser_ids_raw: str) -> dict[st
     advertiser_ids = _normalize_advertiser_ids(advertiser_ids_raw)
     if not advertiser_ids:
         return {}
+    started_at = time.perf_counter()
     now = time.time()
     ttl = _line_name_cache_ttl_seconds()
     aggregate: dict[str, dict[str, str]] = {}
+    cache_hits = 0
+    fetched_advertisers = 0
     for advertiser_id in advertiser_ids:
         with _line_name_cache_lock:
             cached_entry = _line_name_cache.get(advertiser_id)
@@ -243,14 +264,24 @@ def _line_id_to_line_meta_map(headers: dict, advertiser_ids_raw: str) -> dict[st
                 )
                 if cached_map:
                     aggregate.update(cached_map)
+                    cache_hits += 1
                     continue
         fetched_map = _fetch_line_item_meta_by_advertiser(advertiser_id, headers)
+        fetched_advertisers += 1
         with _line_name_cache_lock:
             _line_name_cache[advertiser_id] = {
                 "expires_at": now + ttl,
                 "data": dict(fetched_map),
             }
         aggregate.update(fetched_map)
+    logger.warning(
+        "[DV360] line item meta total advertisers=%s fetched=%s cache_hits=%s items=%s duration=%.1fs",
+        len(advertiser_ids),
+        fetched_advertisers,
+        cache_hits,
+        len(aggregate),
+        _elapsed_seconds(started_at),
+    )
     return aggregate
 
 
@@ -277,15 +308,21 @@ def _apply_dv360_line_meta_to_lines(
     meta = preloaded_meta if preloaded_meta is not None else _line_id_to_line_meta_map(
         headers, advertiser_ids_raw
     )
+    allow_individual_fallback = preloaded_meta is None
+    fallback_gets = 0
+    missing_meta = 0
     for line in lines_out:
         lid = str(line.get("line_item_id") or "").strip()
         if not lid:
             continue
         m = dict(meta.get(lid, {}))
-        if not m:
+        if not m and allow_individual_fallback:
+            fallback_gets += 1
             got = _get_line_item_meta_by_get(lid, headers, adv_ids)
             if got:
                 m = got
+        if not m:
+            missing_meta += 1
         for src, dst in (
             ("advertiserId", "dv360_advertiser_id"),
             ("insertionOrderId", "dv360_insertion_order_id"),
@@ -298,6 +335,13 @@ def _apply_dv360_line_meta_to_lines(
         partner = os.getenv("DV360_PARTNER_ID", "").strip()
         if partner:
             line["dv360_partner_id"] = partner
+    logger.warning(
+        "[DV360] line item meta apply summary lines=%s fallback_gets=%s missing_meta=%s preloaded=%s",
+        len(lines_out),
+        fallback_gets,
+        missing_meta,
+        preloaded_meta is not None,
+    )
 
 
 def _get_service_account_info():
@@ -525,28 +569,55 @@ def _list_reports(query_id: str, headers: dict, page_size: int = 10) -> list[dic
     return response.json().get("reports", [])
 
 
-def _fetch_report_csv(report: dict) -> str | None:
+def _fetch_report_csv(report: dict, *, label: str = "report") -> str | None:
     url = report.get("metadata", {}).get("googleCloudStoragePath")
     if not url:
         return None
-    return requests.get(url, timeout=60).text
+    started_at = time.perf_counter()
+    csv = requests.get(url, timeout=60).text
+    logger.warning(
+        "[DV360] %s csv downloaded bytes=%s duration=%.1fs",
+        label,
+        len(csv),
+        _elapsed_seconds(started_at),
+    )
+    return csv
 
 
-def _latest_done_report_csv(query_id: str, headers: dict) -> str | None:
+def _latest_done_report_csv(query_id: str, headers: dict, *, label: str = "report") -> str | None:
+    started_at = time.perf_counter()
     for report in _list_reports(query_id, headers, page_size=20):
         state = report.get("metadata", {}).get("status", {}).get("state")
         if state == "DONE":
-            csv = _fetch_report_csv(report)
+            logger.warning(
+                "[DV360] %s using latest DONE fallback duration=%.1fs",
+                label,
+                _elapsed_seconds(started_at),
+            )
+            csv = _fetch_report_csv(report, label=f"{label} fallback")
             if csv:
                 return csv
+    logger.warning(
+        "[DV360] %s no latest DONE fallback found duration=%.1fs",
+        label,
+        _elapsed_seconds(started_at),
+    )
     return None
 
 
-def _wait_report_csv(query_id: str, report_id: str | None, headers: dict) -> str | None:
+def _wait_report_csv(query_id: str, report_id: str | None, headers: dict, *, label: str = "report") -> str | None:
     started_at = time.time()
+    monotonic_started_at = time.perf_counter()
     attempt = 0
     tracked_report_id = report_id
     timeout_seconds = _report_poll_timeout_seconds()
+    logger.warning(
+        "[DV360] %s wait started query_id=%s report_id=%s timeout=%.0fs",
+        label,
+        query_id,
+        tracked_report_id or "pending",
+        timeout_seconds,
+    )
 
     while time.time() - started_at < timeout_seconds:
         if not tracked_report_id:
@@ -566,23 +637,51 @@ def _wait_report_csv(query_id: str, report_id: str | None, headers: dict) -> str
         report = _get_report(query_id, tracked_report_id, headers)
         state = report.get("metadata", {}).get("status", {}).get("state")
         if state == "DONE":
-            return _fetch_report_csv(report)
+            logger.warning(
+                "[DV360] %s report DONE attempts=%s wait_duration=%.1fs",
+                label,
+                attempt + 1,
+                _elapsed_seconds(monotonic_started_at),
+            )
+            return _fetch_report_csv(report, label=label)
         if state == "FAILED":
-            return _latest_done_report_csv(query_id, headers)
+            logger.warning(
+                "[DV360] %s report FAILED attempts=%s wait_duration=%.1fs",
+                label,
+                attempt + 1,
+                _elapsed_seconds(monotonic_started_at),
+            )
+            return _latest_done_report_csv(query_id, headers, label=label)
 
         delay = min(REPORT_BACKOFF_BASE_SECONDS * (2 ** attempt), REPORT_BACKOFF_MAX_SECONDS)
+        logger.warning(
+            "[DV360] %s report state=%s attempt=%s elapsed=%.1fs next_delay=%.1fs",
+            label,
+            state or "unknown",
+            attempt + 1,
+            _elapsed_seconds(monotonic_started_at),
+            delay,
+        )
         time.sleep(delay + random.uniform(0, 1))
         attempt += 1
 
     # Timeout: tenta reaproveitar o último report pronto antes de falhar.
-    return _latest_done_report_csv(query_id, headers)
+    logger.warning(
+        "[DV360] %s report wait timeout attempts=%s duration=%.1fs",
+        label,
+        attempt,
+        _elapsed_seconds(monotonic_started_at),
+    )
+    return _latest_done_report_csv(query_id, headers, label=label)
 
 
 def fetch_mtd_cost(start, end):
     """
     Returns {"spend": float, "currency": "USD", "status": "ok" | "no_credentials" | "error", "message": str}
     """
+    fetch_started_at = time.perf_counter()
     if not _check_credentials():
+        logger.warning("[DV360] skipped: credentials or partner id not configured")
         return {
             "spend": 0.0,
             "currency": "USD",
@@ -591,27 +690,60 @@ def fetch_mtd_cost(start, end):
         }
 
     try:
+        advertiser_ids_raw = os.getenv("DV360_ADVERTISER_IDS", "")
+        advertiser_ids = _normalize_advertiser_ids(advertiser_ids_raw)
+        logger.warning(
+            "[DV360] fetch started period=%s..%s advertisers=%s report_poll_timeout=%.0fs",
+            start,
+            end,
+            len(advertiser_ids),
+            _report_poll_timeout_seconds(),
+        )
+        token_started_at = time.perf_counter()
         token = _get_access_token()
         if not token:
             return {"spend": 0.0, "currency": "USD", "status": "error", "message": "Falha ao obter token de acesso"}
+        logger.warning("[DV360] access token ready duration=%.1fs", _elapsed_seconds(token_started_at))
 
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         partner_id = os.getenv("DV360_PARTNER_ID", "")
-        advertiser_ids_raw = os.getenv("DV360_ADVERTISER_IDS", "")
         filters = _build_filters(partner_id, advertiser_ids_raw)
 
         import io
         import pandas as pd
 
         def _run_report(group_bys, title):
+            report_started_at = time.perf_counter()
+            logger.warning("[DV360] %s ensure query started", title)
             query_id = _ensure_query_id(title, group_bys, filters, headers)
+            logger.warning(
+                "[DV360] %s query ready query_id=%s duration=%.1fs",
+                title,
+                query_id,
+                _elapsed_seconds(report_started_at),
+            )
+            run_started_at = time.perf_counter()
             report = _run_query(query_id, start, end, headers)
             report_id = _extract_report_id(report)
-            return _wait_report_csv(query_id, report_id, headers)
+            logger.warning(
+                "[DV360] %s run triggered report_id=%s duration=%.1fs",
+                title,
+                report_id or "pending",
+                _elapsed_seconds(run_started_at),
+            )
+            csv = _wait_report_csv(query_id, report_id, headers, label=title)
+            logger.warning(
+                "[DV360] %s report flow finished has_csv=%s total_duration=%.1fs",
+                title,
+                bool(csv),
+                _elapsed_seconds(report_started_at),
+            )
+            return csv
 
         def _parse_csv(raw):
             if not raw:
                 return pd.DataFrame()
+            parse_started_at = time.perf_counter()
             lines_raw = raw.splitlines()
             # Encontra header — primeira linha que não começa com espaço/vírgula/Report
             start_i = next(
@@ -620,16 +752,30 @@ def fetch_mtd_cost(start, end):
                 None
             )
             if start_i is None:
+                logger.warning(
+                    "[DV360] csv parse skipped: header not found bytes=%s duration=%.1fs",
+                    len(raw),
+                    _elapsed_seconds(parse_started_at),
+                )
                 return pd.DataFrame()
             data_lines = [lines_raw[start_i]]
             for line in lines_raw[start_i + 1:]:
                 if line.strip() == "" or line.startswith(","):
                     break
                 data_lines.append(line)
-            return pd.read_csv(io.StringIO("\n".join(data_lines)))
+            df = pd.read_csv(io.StringIO("\n".join(data_lines)))
+            logger.warning(
+                "[DV360] csv parsed rows=%s cols=%s bytes=%s duration=%.1fs",
+                len(df),
+                len(df.columns),
+                len(raw),
+                _elapsed_seconds(parse_started_at),
+            )
+            return df
 
         # Query 1: por Line Item | Query 2: por Data (em paralelo via threads)
         import concurrent.futures
+        reports_started_at = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             lines_title = _safe_query_title("Lines", partner_id, advertiser_ids_raw)
             daily_title = _safe_query_title("Daily", partner_id, advertiser_ids_raw)
@@ -641,10 +787,12 @@ def fetch_mtd_cost(start, end):
             fut_daily = ex.submit(_run_report, ["FILTER_DATE"], daily_title)
             csv_lines = fut_lines.result()
             csv_daily = fut_daily.result()
+        logger.warning("[DV360] reports parallel section duration=%.1fs", _elapsed_seconds(reports_started_at))
 
         df_lines = _parse_csv(csv_lines)
 
         if df_lines.empty:
+            logger.warning("[DV360] lines report empty total_duration=%.1fs", _elapsed_seconds(fetch_started_at))
             return {"spend": 0.0, "currency": "USD", "status": "error",
                     "message": "Relatório não disponível. Tente novamente.", "lines": [], "cost_types": [], "daily": []}
 
@@ -708,7 +856,14 @@ def fetch_mtd_cost(start, end):
                     aggregated_line_ids.append(line_id)
 
             if aggregated_line_ids:
+                meta_started_at = time.perf_counter()
                 line_id_to_meta_preload = _line_id_to_line_meta_map(headers, advertiser_ids_raw)
+                logger.warning(
+                    "[DV360] preloaded line item meta line_ids=%s meta_items=%s duration=%.1fs",
+                    len(aggregated_line_ids),
+                    len(line_id_to_meta_preload),
+                    _elapsed_seconds(meta_started_at),
+                )
             line_id_to_meta = line_id_to_meta_preload or {}
 
             for _, row in agg.iterrows():
@@ -744,8 +899,14 @@ def fetch_mtd_cost(start, end):
                 lines_out.append(out_line)
 
         if lines_out and any(x.get("line_item_id") for x in lines_out):
+            apply_meta_started_at = time.perf_counter()
             _apply_dv360_line_meta_to_lines(
                 lines_out, headers, advertiser_ids_raw, preloaded_meta=line_id_to_meta_preload
+            )
+            logger.warning(
+                "[DV360] applied line item meta lines=%s duration=%.1fs",
+                len(lines_out),
+                _elapsed_seconds(apply_meta_started_at),
             )
 
         types_out = []
@@ -786,8 +947,16 @@ def fetch_mtd_cost(start, end):
                 "partner_id": _partner or None,
                 "advertiser_ids": _adv,
             }
+        logger.warning(
+            "[DV360] fetch completed status=ok lines=%s daily=%s spend=%.2f total_duration=%.1fs",
+            len(lines_out),
+            len(daily_out),
+            total,
+            _elapsed_seconds(fetch_started_at),
+        )
         return out_payload
 
     except Exception as e:
+        logger.exception("[DV360] fetch failed total_duration=%.1fs", _elapsed_seconds(fetch_started_at))
         return {"spend": 0.0, "currency": "USD", "status": "error", "message": str(e),
                 "lines": [], "cost_types": [], "daily": []}
