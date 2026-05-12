@@ -1,14 +1,16 @@
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
-import { Geist_Mono, Montserrat } from "next/font/google";
+import { Geist_Mono, Inter } from "next/font/google";
 import { clerkLocalizationPtBr } from "@/lib/clerkLocalization";
 import "./globals.css";
 import "@/features/auth/styles/auth.css";
 import "@/features/dashboard/styles/dashboard.css";
+import "@/features/dashboard/styles/claude.css";
 
-const montserrat = Montserrat({
+const inter = Inter({
   variable: "--font-geist-sans",
   subsets: ["latin"],
+  weight: ["300", "400", "500", "600"],
 });
 
 const geistMono = Geist_Mono({
@@ -27,7 +29,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="pt-BR" className={`${montserrat.variable} ${geistMono.variable}`}>
+    <html lang="pt-BR" className={`${inter.variable} ${geistMono.variable}`}>
       <body>
         <ClerkProvider localization={clerkLocalizationPtBr}>{children}</ClerkProvider>
       </body>

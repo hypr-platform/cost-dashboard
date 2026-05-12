@@ -78,7 +78,7 @@ O refresh manual usa trigger `manual_api`, então ele consulta todas as platafor
 | --- | --- | --- |
 | StackAdapt | Sim | Timeout geral de integração rápida. |
 | DV360 | Sim | Timeout dedicado, pois depende de relatório assíncrono do Google. |
-| Xandr | Sim | Timeout geral de integração rápida. |
+| Xandr | Sim | Timeout dedicado, pois também depende de relatório assíncrono da Xandr. |
 | Hivestack | Sim | Timeout geral de integração rápida. |
 | Sheets / Campaign Journey | Sim | Usado para cruzar tokens, campanhas, clientes e vigência. |
 | PTAX | Sim | Usado para conversão USD/BRL quando necessário. |
@@ -127,6 +127,22 @@ Exemplo:
 ```env
 DV360_REPORT_POLL_TIMEOUT_SECONDS=480
 DASHBOARD_DV360_TIMEOUT_SECONDS=600
+```
+
+### Timeouts da Xandr
+
+A Xandr também gera relatório assíncrono antes do download do CSV:
+
+| Variável | Função |
+| --- | --- |
+| `XANDR_REPORT_POLL_TIMEOUT_SECONDS` | Tempo máximo esperando o relatório assíncrono da Xandr ficar pronto. |
+| `DASHBOARD_XANDR_TIMEOUT_SECONDS` | Tempo máximo esperando a integração Xandr inteira terminar. |
+
+Exemplo:
+
+```env
+XANDR_REPORT_POLL_TIMEOUT_SECONDS=120
+DASHBOARD_XANDR_TIMEOUT_SECONDS=180
 ```
 
 ## Diferença Para os Workers Agendados

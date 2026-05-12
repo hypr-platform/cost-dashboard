@@ -23,6 +23,9 @@ from backend.dashboard_service import (
     trigger_refresh_async,
 )
 from backend import line_observations_pg
+from backend.routes import bigquery_cost as bigquery_cost_routes
+from backend.routes import claude as claude_routes
+from backend.routes import gcp_billing as gcp_billing_routes
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
@@ -50,6 +53,11 @@ def _on_startup() -> None:
 @app.on_event("shutdown")
 def _on_shutdown() -> None:
     stop_background_workers()
+
+
+app.include_router(claude_routes.router)
+app.include_router(bigquery_cost_routes.router)
+app.include_router(gcp_billing_routes.router)
 
 
 @app.get("/")
@@ -281,6 +289,23 @@ def campaign_data(
     normalized_token = _normalize_token(token)
     if not normalized_token:
         raise HTTPException(status_code=422, detail="`token` inválido.")
+
+    # Fase 4: quando DASHBOARD_DATA_SOURCE=bq, lê detalhe direto de BQ
+    # (line_costs + dim_campaign). Inclui tokens que gastaram em dias
+    # passados — não dependente do refresh atual.
+    import os
+    if os.getenv("DASHBOARD_DATA_SOURCE", "blob").strip().lower() == "bq":
+        try:
+            from backend import bigquery_reads
+            from datetime import date as _date
+            # Resolve período: se não vier, usa MTD
+            today = _date.today()
+            p_start = start or today.replace(day=1)
+            p_end = end or today
+            return bigquery_reads.campaign_detail(normalized_token, p_start, p_end)
+        except Exception:
+            logger.exception("Falha no campaign_detail via BQ; caindo pro caminho legacy.")
+            # cai pro caminho legacy abaixo
 
     try:
         payload = get_dashboard_data(start=start, end=end, force_refresh=False)

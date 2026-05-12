@@ -17,6 +17,10 @@ GQL_URL = "https://api.stackadapt.com/graphql"
 RECORDS_PAGE_SIZE = 100
 
 
+def _use_daily_granularity() -> bool:
+    return os.getenv("STACKADAPT_USE_DAILY_GRANULARITY", "").strip() in {"1", "true", "True", "yes"}
+
+
 def _campaign_delivery_query(start_str: str, end_str: str) -> str:
     return f"""
 query StackAdaptCampaignDelivery($after: String) {{
@@ -30,6 +34,35 @@ query StackAdaptCampaignDelivery($after: String) {{
       records(first: {RECORDS_PAGE_SIZE}, after: $after) {{
         pageInfo {{ hasNextPage endCursor }}
         nodes {{
+          campaign {{ id name }}
+          metrics {{ cost tpCpmCost tpCpcCost impressionsBigint }}
+        }}
+      }}
+    }}
+  }}
+}}
+"""
+
+
+def _campaign_delivery_query_daily(start_str: str, end_str: str) -> str:
+    """Versão com `granularity: DAILY` — retorna 1 node por (campanha × dia).
+
+    Caller agrega por (campaign_id) pra montar `lines` e mantém a granularidade
+    diária em `line_daily`. `totalStats` continua sendo o agregado do range.
+    """
+    return f"""
+query StackAdaptCampaignDeliveryDaily($after: String) {{
+  campaignDelivery(
+    dataType: TABLE
+    granularity: DAILY
+    date: {{ from: "{start_str}", to: "{end_str}" }}
+  ) {{
+    ... on CampaignDeliveryOutcome {{
+      totalStats {{ cost tpCpmCost tpCpcCost }}
+      records(first: {RECORDS_PAGE_SIZE}, after: $after) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
+          granularity {{ startTime }}
           campaign {{ id name }}
           metrics {{ cost tpCpmCost tpCpcCost impressionsBigint }}
         }}
@@ -82,18 +115,24 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
         return {
             "spend": 0.0, "currency": "USD", "status": "no_credentials",
             "message": "STACKADAPT_API_KEY não configurada",
-            "lines": [], "cost_types": [], "daily": [],
+            "lines": [], "cost_types": [], "daily": [], "line_daily": [],
         }
 
     try:
         start_str = start.strftime("%Y-%m-%d")
         end_str   = (end + timedelta(days=1)).strftime("%Y-%m-%d")  # API 'to' é exclusivo
 
-        # Campaign-level spend (para lines + tokens) — paginar records até cobrir todas as campanhas
-        q = _campaign_delivery_query(start_str, end_str)
+        use_daily = _use_daily_granularity()
+
+        # Campaign-level spend (para lines + tokens) — paginar records até cobrir todas as campanhas.
+        # Com use_daily=True a query retorna 1 node por (campanha × dia); agregamos em
+        # `lines` por campaign_id e mantemos a granularidade em `line_daily`.
+        q = _campaign_delivery_query_daily(start_str, end_str) if use_daily else _campaign_delivery_query(start_str, end_str)
         cursor: Optional[str] = None
         outcome: dict = {}
-        lines = []
+        lines: list[dict[str, Any]] = []
+        line_daily: list[dict[str, Any]] = []
+        spend_by_campaign: dict[tuple[str, str], float] = {}  # (campaign_id, name) -> spend
         while True:
             camp_data = _gql(q, token, variables={"after": cursor})
             outcome = camp_data.get("campaignDelivery", {}) or {}
@@ -108,7 +147,23 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
                     + float(m.get("tpCpmCost", 0) or 0)
                     + float(m.get("tpCpcCost", 0) or 0)
                 )
-                if spend > 0:
+                if spend <= 0:
+                    continue
+                if use_daily:
+                    start_time = (node.get("granularity") or {}).get("startTime", "")
+                    day = start_time[:10] if start_time else ""
+                    if not day:
+                        # node sem data — pula (não dá pra atribuir)
+                        continue
+                    key = (campaign_id, name)
+                    spend_by_campaign[key] = spend_by_campaign.get(key, 0.0) + spend
+                    line_daily.append({
+                        "date": day,
+                        "line_item_id": campaign_id or None,
+                        "name": name,
+                        "spend": spend,
+                    })
+                else:
                     lines.append({"name": name, "spend": spend, "line_item_id": campaign_id or None})
 
             page_info = rec.get("pageInfo") or {}
@@ -118,6 +173,12 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
             if not cursor:
                 break
 
+        if use_daily:
+            # Reconstroi lines agregando line_daily por campaign (id+name).
+            lines = [
+                {"name": name, "spend": v, "line_item_id": cid or None}
+                for (cid, name), v in spend_by_campaign.items()
+            ]
         lines.sort(key=lambda x: -x["spend"])
 
         total_stats = outcome.get("totalStats", {})
@@ -127,7 +188,8 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
             + float(total_stats.get("tpCpcCost", 0) or 0)
         )
 
-        # Daily totals (por campaign group)
+        # Daily totals (por campaign group). Em use_daily a info já está em line_daily,
+        # mas mantemos a chamada pro shape `daily` continuar compatível com consumers.
         daily = []
         try:
             daily_data = _gql(DAILY_QUERY % (start_str, end_str), token)
@@ -144,11 +206,11 @@ def fetch_mtd_cost(start: date, end: date) -> dict:
 
         return {
             "spend": total, "currency": "USD", "status": "ok", "message": "",
-            "lines": lines, "cost_types": [], "daily": daily,
+            "lines": lines, "cost_types": [], "daily": daily, "line_daily": line_daily,
         }
 
     except Exception as e:
         return {
             "spend": 0.0, "currency": "USD", "status": "error",
-            "message": str(e), "lines": [], "cost_types": [], "daily": [],
+            "message": str(e), "lines": [], "cost_types": [], "daily": [], "line_daily": [],
         }

@@ -5,7 +5,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from backend import bigquery_store, discord_notify, line_observations_pg
@@ -19,9 +19,8 @@ NEXD_CPM_BRL = 0.0014
 DEFAULT_USD_BRL_RATE = 5.15
 DEFAULT_INTEGRATION_TIMEOUT_SECONDS = 45.0
 DEFAULT_DV360_TIMEOUT_SECONDS = 240.0
+DEFAULT_XANDR_TIMEOUT_SECONDS = 150.0
 DEFAULT_CACHE_TTL_SECONDS = 300.0
-DEFAULT_WORKER_FAST_INTERVAL_SECONDS = 600.0
-DEFAULT_WORKER_DV360_INTERVAL_SECONDS = 1800.0
 # Amazon DSP desligado no worker: sem credenciais de API por ora; não incluir evita alertas no Discord.
 PLATFORMS = {
     "StackAdapt": stackadapt,
@@ -29,8 +28,6 @@ PLATFORMS = {
     "Xandr": xandr,
     "Hivestack": hivestack,
 }
-FAST_WORKER_SKIP_PLATFORMS = {"DV360"}
-DV360_WORKER_ONLY_PLATFORMS = {"DV360"}
 
 
 _cache: dict[str, Any] = {
@@ -61,6 +58,473 @@ logger = logging.getLogger(__name__)
 
 def _to_brl_smart(spend: float, currency: str, rate: float) -> float:
     return spend if currency == "BRL" else spend * rate
+
+
+def _dsp_line_daily_cost_rows_bigquery(
+    *,
+    run_id: str,
+    trigger: str,
+    snapshot_ts: str,
+    period_start: date,
+    period_end: date,
+    platform_results: dict[str, Any],
+    exchange_rate_usd_brl: float,
+    ingested_at: datetime,
+) -> list[dict[str, Any]]:
+    """Linhas para `dsp_line_daily_cost`: integrações que expõem `line_daily` (hoje: Xandr)."""
+    rows: list[dict[str, Any]] = []
+    rate = float(exchange_rate_usd_brl)
+    for platform_name, pdata in platform_results.items():
+        if not isinstance(pdata, dict) or pdata.get("status") != "ok":
+            continue
+        line_daily = pdata.get("line_daily")
+        if not isinstance(line_daily, list) or not line_daily:
+            continue
+        currency = str(pdata.get("currency") or "USD")
+        fx = None if currency == "BRL" else rate
+        for entry in line_daily:
+            if not isinstance(entry, dict):
+                continue
+            cost_date = str(entry.get("date") or "").strip()
+            if not cost_date:
+                continue
+            spend_orig = float(entry.get("spend") or 0.0)
+            if spend_orig <= 0:
+                continue
+            spend_brl = _to_brl_smart(spend_orig, currency, rate)
+            li = entry.get("line_item_id")
+            line_item_id = str(li).strip() if li is not None and str(li).strip() else None
+            line_name_raw = str(entry.get("name") or "").strip()
+            line_name = line_name_raw or None
+            rows.append(
+                {
+                    "run_id": run_id,
+                    "trigger": trigger,
+                    "snapshot_ts": snapshot_ts,
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "platform": platform_name,
+                    "cost_date": cost_date,
+                    "line_item_id": line_item_id,
+                    "line_name": line_name,
+                    "spend_original": spend_orig,
+                    "currency": currency,
+                    "spend_brl": spend_brl,
+                    "exchange_rate_usd_brl": fx,
+                    "ingested_at": ingested_at.isoformat(),
+                }
+            )
+    return rows
+
+
+def _last_day_of_month(any_day: date) -> date:
+    last = _cal.monthrange(any_day.year, any_day.month)[1]
+    return date(any_day.year, any_day.month, last)
+
+
+def _line_costs_normalize_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _line_costs_line_key(entry: dict[str, Any]) -> str:
+    """Identidade da line: id se houver, senão nome (com prefixo pra evitar colisão)."""
+    lid = _line_costs_normalize_str(entry.get("line_item_id"))
+    if lid:
+        return f"id:{lid}"
+    name = _line_costs_normalize_str(entry.get("name") or entry.get("resolved_line_name"))
+    return f"name:{name or ''}"
+
+
+def _line_costs_rows_from_payload(
+    *,
+    platform_results: dict[str, Any],
+    nexd_data: dict[str, Any] | None,
+    rate: float,
+    snapshot_at: str,
+    period_end: date,
+    accept_dates: set[date],
+) -> dict[tuple[str, date], list[dict[str, Any]]]:
+    """Constrói rows pra `line_costs` agrupadas por (platform, cost_date).
+
+    Pra cada plataforma que emite `line_daily`, emite **1 row por line ativa
+    no mês** apontando pro cost_date alvo:
+
+      - granularity=daily  → target = today (delta = spend de hoje, mtd = total mês)
+      - granularity=monthly_imputed → target = last_day_of_month (delta = mtd)
+
+    Lines que apareceram no mês mas não gastaram em `target` ainda recebem row
+    com `spend_brl_delta=0` mas `spend_brl_mtd > 0` — garantindo cobertura
+    completa do MTD da plataforma.
+
+    Returns: dict[(platform, cost_date)] -> list[row].
+    """
+    grouped: dict[tuple[str, date], list[dict[str, Any]]] = {}
+    ingested_at = datetime.now(timezone.utc).isoformat()
+
+    sources: list[tuple[str, dict[str, Any]]] = []
+    for platform_name, pdata in (platform_results or {}).items():
+        if isinstance(pdata, dict) and pdata.get("status") == "ok":
+            sources.append((str(platform_name), pdata))
+    if isinstance(nexd_data, dict) and nexd_data.get("status") == "ok":
+        sources.append(("Nexd", nexd_data))
+
+    for platform_name, pdata in sources:
+        line_daily = pdata.get("line_daily") or []
+        if not isinstance(line_daily, list) or not line_daily:
+            continue
+        platform_currency = str(pdata.get("currency") or "USD")
+
+        # Token lookup a partir de pdata["lines"] (já com resolved_token aplicado).
+        lookup_by_id: dict[str, dict[str, Any]] = {}
+        lookup_by_name: dict[str, dict[str, Any]] = {}
+        for line in pdata.get("lines") or []:
+            if not isinstance(line, dict):
+                continue
+            info = {
+                "resolved_token": _line_costs_normalize_str(line.get("resolved_token")),
+                "resolved_line_name": _line_costs_normalize_str(line.get("resolved_line_name")),
+                "token_resolution_source": _line_costs_normalize_str(
+                    line.get("token_resolution_source")
+                ),
+            }
+            lid = _line_costs_normalize_str(line.get("line_item_id"))
+            name = _line_costs_normalize_str(line.get("resolved_line_name") or line.get("name"))
+            if lid:
+                lookup_by_id[lid] = info
+            if name:
+                lookup_by_name[name] = info
+
+        # Detecta granularity da plataforma (monthly_imputed vs daily).
+        is_monthly_imputed = any(
+            isinstance(e, dict)
+            and (e.get("granularity") == "monthly_imputed" or e.get("is_estimated"))
+            for e in line_daily
+        )
+        # Pra monthly_imputed o target é a maior `date` em line_daily (geralmente
+        # last_day_of_month). Pra daily o target é o último dia do `accept_dates`
+        # que NÃO é last_day_of_month — ou seja, today.
+        all_entry_dates: list[date] = []
+        for e in line_daily:
+            if not isinstance(e, dict):
+                continue
+            try:
+                all_entry_dates.append(date.fromisoformat(str(e.get("date") or "")))
+            except Exception:
+                pass
+        if not all_entry_dates:
+            continue
+        last_day_in_month = _last_day_of_month(period_end)
+        if is_monthly_imputed:
+            target_cd = max(all_entry_dates)
+        else:
+            # Today = o `accept_date` mais "atual" que não seja o last_day_of_month
+            # (caso especial: se hoje É o last_day, usa ele mesmo).
+            non_last_days = sorted(d for d in accept_dates if d != last_day_in_month)
+            target_cd = non_last_days[-1] if non_last_days else last_day_in_month
+
+        if target_cd not in accept_dates:
+            continue
+
+        # Agrupa line_daily por line_key — pra cada line, soma MTD e isola delta@target.
+        per_line: dict[str, dict[str, Any]] = {}
+        for entry in line_daily:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                cd = date.fromisoformat(str(entry.get("date") or ""))
+            except Exception:
+                continue
+            try:
+                spend = float(entry.get("spend") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if spend <= 0:
+                continue
+            key = _line_costs_line_key(entry)
+            slot = per_line.setdefault(key, {
+                "sample": entry,
+                "mtd_native": 0.0,
+                "delta_native": 0.0,
+                "currency": str(entry.get("currency") or platform_currency),
+                "granularity": str(entry.get("granularity") or "daily"),
+                "is_estimated": bool(entry.get("is_estimated", False)),
+            })
+            slot["mtd_native"] += spend
+            if cd == target_cd:
+                slot["delta_native"] += spend
+
+        # Emite 1 row por line ativa no mês.
+        for key, slot in per_line.items():
+            mtd_n = slot["mtd_native"]
+            if mtd_n <= 0:
+                continue
+            delta_n = slot["delta_native"]
+            entry_currency = slot["currency"]
+            if entry_currency == "BRL":
+                mtd_b = mtd_n
+                delta_b = delta_n
+                fx_rate: float | None = None
+            else:
+                mtd_b = mtd_n * rate
+                delta_b = delta_n * rate
+                fx_rate = rate
+
+            sample = slot["sample"]
+            lid = _line_costs_normalize_str(sample.get("line_item_id"))
+            name = _line_costs_normalize_str(sample.get("name"))
+            token_info = (
+                (lookup_by_id.get(lid) if lid else None)
+                or (lookup_by_name.get(name) if name else None)
+                or {}
+            )
+
+            row: dict[str, Any] = {
+                "cost_date": target_cd.isoformat(),
+                "platform": platform_name,
+                "line_item_id": lid,
+                "line_name": token_info.get("resolved_line_name") or name,
+                "resolved_token": token_info.get("resolved_token"),
+                "token_resolution_source": token_info.get("token_resolution_source"),
+                "spend_native_delta": delta_n,
+                "currency_native": entry_currency,
+                "spend_brl_delta": delta_b,
+                "spend_native_mtd": mtd_n,
+                "spend_brl_mtd": mtd_b,
+                "exchange_rate_usd_brl": fx_rate,
+                "had_negative_delta": False,
+                "observation": None,  # Fase 1 não consulta PG; preencher em fase futura.
+                "source_snapshot_at": snapshot_at,
+                "baseline_snapshot_at": None,
+                "ingested_at": ingested_at,
+                "is_estimated": slot["is_estimated"],
+                "granularity": slot["granularity"],
+            }
+            grouped.setdefault((platform_name, target_cd), []).append(row)
+
+    return grouped
+
+
+def _line_costs_rows_for_backfill(
+    *,
+    platform_name: str,
+    platform_data: dict[str, Any],
+    fx_for_day,
+    period_end_window: date,
+    snapshot_marker: str,
+    observation_tag: str | None = None,
+) -> dict[date, list[dict[str, Any]]]:
+    """Constrói rows pra `line_costs` em modo BACKFILL.
+
+    Diferente de `_line_costs_rows_from_payload` (Fase 1, que escreve 1 row/line
+    no target_date escolhido), este emite **1 row por (line, day)** preservando
+    a granularidade nativa do `line_daily`. MTD é cumulativo dentro do mês.
+
+    `fx_for_day(cd)` é callable: retorna a taxa USD/BRL daquele dia.
+
+    Returns: dict[cost_date] -> list[row].
+    """
+    line_daily = platform_data.get("line_daily") or []
+    if not isinstance(line_daily, list) or not line_daily:
+        return {}
+    platform_currency = str(platform_data.get("currency") or "USD")
+
+    # Token lookup a partir de platform_data["lines"]
+    lookup_by_id: dict[str, dict[str, Any]] = {}
+    lookup_by_name: dict[str, dict[str, Any]] = {}
+    for line in platform_data.get("lines") or []:
+        if not isinstance(line, dict):
+            continue
+        info = {
+            "resolved_token": _line_costs_normalize_str(line.get("resolved_token")),
+            "resolved_line_name": _line_costs_normalize_str(line.get("resolved_line_name")),
+            "token_resolution_source": _line_costs_normalize_str(
+                line.get("token_resolution_source")
+            ),
+        }
+        lid = _line_costs_normalize_str(line.get("line_item_id"))
+        name = _line_costs_normalize_str(line.get("resolved_line_name") or line.get("name"))
+        if lid:
+            lookup_by_id[lid] = info
+        if name:
+            lookup_by_name[name] = info
+
+    # Agrega (line_key, cost_date) -> spend_native. Pula entries depois do window.
+    by_line_day: dict[tuple[str, date], float] = {}
+    sample_by_line: dict[str, dict[str, Any]] = {}
+    granularity_by_line: dict[str, str] = {}
+    estimated_by_line: dict[str, bool] = {}
+    for entry in line_daily:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            cd = date.fromisoformat(str(entry.get("date") or ""))
+        except Exception:
+            continue
+        if cd > period_end_window:
+            continue
+        try:
+            spend = float(entry.get("spend") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if spend <= 0:
+            continue
+        key = _line_costs_line_key(entry)
+        by_line_day[(key, cd)] = by_line_day.get((key, cd), 0.0) + spend
+        sample_by_line.setdefault(key, entry)
+        g = str(entry.get("granularity") or "daily")
+        if g == "monthly_imputed" or entry.get("is_estimated"):
+            granularity_by_line[key] = "monthly_imputed"
+            estimated_by_line[key] = True
+        else:
+            granularity_by_line.setdefault(key, "daily")
+            estimated_by_line.setdefault(key, False)
+
+    # MTD cumulativo por line, ordenado por data.
+    by_line_dates: dict[str, list[tuple[date, float]]] = {}
+    for (key, cd), spend in by_line_day.items():
+        by_line_dates.setdefault(key, []).append((cd, spend))
+
+    grouped: dict[date, list[dict[str, Any]]] = {}
+    ingested_at = datetime.now(timezone.utc).isoformat()
+
+    for key, items in by_line_dates.items():
+        items.sort(key=lambda t: t[0])
+        sample = sample_by_line[key]
+        entry_currency = str(sample.get("currency") or platform_currency)
+        granul = granularity_by_line[key]
+        is_est = estimated_by_line[key]
+
+        lid = _line_costs_normalize_str(sample.get("line_item_id"))
+        name = _line_costs_normalize_str(sample.get("name"))
+        token_info = (
+            (lookup_by_id.get(lid) if lid else None)
+            or (lookup_by_name.get(name) if name else None)
+            or {}
+        )
+
+        acc_native = 0.0
+        for cd, delta_n in items:
+            acc_native += delta_n
+            rate = fx_for_day(cd)
+            if entry_currency == "BRL":
+                delta_b = delta_n
+                mtd_b = acc_native
+                fx: float | None = None
+            else:
+                delta_b = delta_n * rate
+                mtd_b = acc_native * rate
+                fx = rate
+            row: dict[str, Any] = {
+                "cost_date": cd.isoformat(),
+                "platform": platform_name,
+                "line_item_id": lid,
+                "line_name": token_info.get("resolved_line_name") or name,
+                "resolved_token": token_info.get("resolved_token"),
+                "token_resolution_source": token_info.get("token_resolution_source"),
+                "spend_native_delta": delta_n,
+                "currency_native": entry_currency,
+                "spend_brl_delta": delta_b,
+                "spend_native_mtd": acc_native,
+                "spend_brl_mtd": mtd_b,
+                "exchange_rate_usd_brl": fx,
+                "had_negative_delta": False,
+                "observation": observation_tag,
+                "source_snapshot_at": snapshot_marker,
+                "baseline_snapshot_at": None,
+                "ingested_at": ingested_at,
+                "is_estimated": is_est,
+                "granularity": granul,
+            }
+            grouped.setdefault(cd, []).append(row)
+
+    return grouped
+
+
+def _coerce_date(value: Any) -> date | None:
+    """Aceita date object ou ISO string (YYYY-MM-DD ou completo) — retorna date ou None."""
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except Exception:
+            return None
+    return None
+
+
+def _dim_campaign_rows_from_journey(journey_data: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Constrói rows pra `dim_campaign` a partir do `journey["data"]`.
+
+    Pula tokens vazios ou duplicados (fica com último). Status é derivado de
+    start/end vs hoje. `total_plataformas` e `pct_investido` ficam None na dim
+    (são métricas derivadas de gasto real, mudam toda hora — não pertencem ao
+    dimensional de campanha).
+
+    Aceita entries com `start`/`end` como `date` ou como ISO string.
+    """
+    import json as _json
+    today = date.today()
+    by_token: dict[str, dict[str, Any]] = {}
+    for entry in journey_data or []:
+        if not isinstance(entry, dict):
+            continue
+        token = str(entry.get("token") or "").strip().upper()
+        if not token:
+            continue
+        start_d = _coerce_date(entry.get("start"))
+        end_d = _coerce_date(entry.get("end"))
+        # raw_row precisa ser JSON serializável; datas viram ISO
+        raw_dict: dict[str, Any] = {}
+        for k, v in entry.items():
+            if isinstance(v, date):
+                raw_dict[k] = v.isoformat()
+            else:
+                raw_dict[k] = v
+        try:
+            investido = float(entry.get("investido") or 0.0)
+        except (TypeError, ValueError):
+            investido = 0.0
+        # `_is_campaign_active` precisa de date objects — chama com versão coerced.
+        active_check = {"start": start_d, "end": end_d}
+        by_token[token] = {
+            "token": token,
+            "cliente": _line_costs_normalize_str(entry.get("cliente")),
+            "campanha": _line_costs_normalize_str(entry.get("campanha")),
+            "account_management": _line_costs_normalize_str(entry.get("account_management")),
+            "status": "Ativa" if _is_campaign_active(active_check, today) else "Encerrada",
+            "produto": _line_costs_normalize_str(entry.get("produto_vendido")),
+            "investido_brl": investido,
+            "total_plataformas": None,
+            "pct_investido": None,
+            "campaign_start": _iso(start_d),
+            "campaign_end": _iso(end_d),
+            "raw_row": _json.dumps(raw_dict, ensure_ascii=False),
+        }
+    return list(by_token.values())
+
+
+def _fetch_fx_with_source(target: date) -> tuple[float, str]:
+    """Retorna (rate, source) pra `target`. Tenta PTAX(target), depois fallback
+    de até 5 dias úteis pra trás. Por fim cai pro `DEFAULT_USD_BRL_RATE`.
+    """
+    from src.utils.currency import _fetch_ptax
+    for delta in range(6):
+        ref = target - timedelta(days=delta)
+        try:
+            rate = _fetch_ptax(ref)
+        except Exception:
+            rate = None
+        if rate:
+            source = "ptax" if delta == 0 else f"ptax_fallback_{delta}_days"
+            return float(rate), source
+    return DEFAULT_USD_BRL_RATE, "default_5_15"
 
 
 def _resolved_token_for_line(line: dict[str, Any]) -> str | None:
@@ -231,30 +695,22 @@ def _cache_is_fresh(cached_at: Any) -> bool:
     return (time.time() - float(cached_at)) <= _cache_ttl_seconds()
 
 
-def _fast_worker_interval_seconds() -> float:
-    raw_value = os.getenv("DASHBOARD_FAST_WORKER_INTERVAL_SECONDS", "").strip()
+def _hourly_worker_interval_seconds() -> float:
+    """Worker único de 1h (Fase 5). Pop. `line_costs` + dims + cache home.
+
+    Override via `WORKER_HOURLY_INTERVAL_SECONDS` em segundos (mínimo 300).
+    Default: 3600s (1h)."""
+    raw_value = os.getenv("WORKER_HOURLY_INTERVAL_SECONDS", "").strip()
+    default = 3600.0
     if not raw_value:
-        return DEFAULT_WORKER_FAST_INTERVAL_SECONDS
+        return default
     try:
         parsed = float(raw_value)
-        if parsed >= 60:
+        if parsed >= 300:
             return parsed
     except ValueError:
         pass
-    return DEFAULT_WORKER_FAST_INTERVAL_SECONDS
-
-
-def _dv360_worker_interval_seconds() -> float:
-    raw_value = os.getenv("DASHBOARD_DV360_WORKER_INTERVAL_SECONDS", "").strip()
-    if not raw_value:
-        return DEFAULT_WORKER_DV360_INTERVAL_SECONDS
-    try:
-        parsed = float(raw_value)
-        if parsed >= 120:
-            return parsed
-    except ValueError:
-        pass
-    return DEFAULT_WORKER_DV360_INTERVAL_SECONDS
+    return default
 
 
 def _dv360_timeout_seconds() -> float:
@@ -270,39 +726,65 @@ def _dv360_timeout_seconds() -> float:
     return DEFAULT_DV360_TIMEOUT_SECONDS
 
 
+def _xandr_timeout_seconds() -> float:
+    raw_value = os.getenv("DASHBOARD_XANDR_TIMEOUT_SECONDS", "").strip()
+    if not raw_value:
+        return DEFAULT_XANDR_TIMEOUT_SECONDS
+    try:
+        parsed = float(raw_value)
+        if parsed > 0:
+            return parsed
+    except ValueError:
+        pass
+    return DEFAULT_XANDR_TIMEOUT_SECONDS
+
+
 def _platform_timeout_seconds(platform_name: str) -> float:
     if platform_name == "DV360":
         return _dv360_timeout_seconds()
+    if platform_name == "Xandr":
+        return _xandr_timeout_seconds()
     return _integration_timeout_seconds()
 
 
 def _platform_names_for_trigger(trigger: str) -> set[str] | None:
-    if trigger == "scheduled_fast":
-        return set(PLATFORMS) - FAST_WORKER_SKIP_PLATFORMS
-    if trigger == "scheduled_dv360":
-        return set(DV360_WORKER_ONLY_PLATFORMS)
+    """Sempre None = chama TODAS as DSPs. Single worker `scheduled_hourly`."""
     return None
 
 
-def _reuse_previous_ok_platforms(
+def _reuse_from_line_costs(
     results: dict[str, dict[str, Any]],
-    previous_payload: dict[str, Any] | None,
     platform_names: set[str],
+    period_start: date,
+    period_end: date,
 ) -> None:
-    if not platform_names or not isinstance(previous_payload, dict):
+    """Fase 5.2: reconstrói `platform_results[X]` a partir de `line_costs`.
+
+    Substitui o reuse via snapshot blob — pra DSPs puladas pelo worker (ex:
+    `scheduled_fast` pula DV360), reconstituímos os dados a partir do que
+    foi gravado em `line_costs` pelo último ciclo OK daquela DSP.
+
+    Não toca em DSPs com erro/timeout nesse ciclo — só nas explicitamente
+    `skipped`.
+    """
+    if not platform_names:
         return
-    previous_results = previous_payload.get("platform_results", {})
-    if not isinstance(previous_results, dict):
-        return
+    from backend import bigquery_reads
+
     for platform_name in sorted(platform_names):
-        previous_platform = previous_results.get(platform_name)
-        if isinstance(previous_platform, dict) and previous_platform.get("status") == "ok":
-            fallback = dict(previous_platform)
-            fallback["reused_from_previous_snapshot"] = True
-            fallback["message"] = (
-                f"{platform_name} não foi consultado neste ciclo; exibindo último snapshot válido."
+        # Não sobrescreve se já tem dado fresco do refresh atual
+        existing = results.get(platform_name)
+        if isinstance(existing, dict) and existing.get("status") == "ok":
+            continue
+        try:
+            reused = bigquery_reads.platform_data_from_line_costs(
+                platform_name, period_start, period_end
             )
-            results[platform_name] = fallback
+        except Exception:
+            logger.exception("reuse_from_line_costs falhou pra %s", platform_name)
+            continue
+        if reused.get("status") in {"ok", "stale"}:
+            results[platform_name] = reused
 
 
 def _period_range(start: date | None, end: date | None) -> tuple[date, date]:
@@ -587,7 +1069,8 @@ def _build_payload(
                 "daily": [],
             }
 
-        _reuse_previous_ok_platforms(results, previous_payload, skipped_platform_names)
+        # Fase 5.2: reuse vem de line_costs, não do blob snapshot
+        _reuse_from_line_costs(results, skipped_platform_names, start, end)
 
         try:
             rate = float(rate_future.result(timeout=timeout_seconds))
@@ -937,12 +1420,24 @@ def _build_payload(
             "remaining_brl": target_brl,
         }
 
+    # journey_data: versão "crua" da planilha (com investido total não-rateado),
+    # serializável (datas em ISO). Usado pelo hook da Fase 3 pra popular dim_campaign.
+    journey_data_serializable = []
+    for entry in journey.get("data") or []:
+        if not isinstance(entry, dict):
+            continue
+        clean: dict[str, Any] = {}
+        for k, v in entry.items():
+            clean[k] = v.isoformat() if isinstance(v, date) else v
+        journey_data_serializable.append(clean)
+
     return {
         "period": {"start": fmt(start), "end": fmt(end)},
         "exchange_rate_usd_brl": rate,
         "total_brl": total_brl,
         "journey_status": journey.get("status", "unknown"),
         "journey_message": journey.get("message"),
+        "journey_data": journey_data_serializable,
         "platform_results": results,
         "nexd": nexd_data,
         "dashboard": {
@@ -970,6 +1465,86 @@ def _build_payload(
             "platforms": budget_platforms,
         },
     }
+
+
+def _dashboard_data_source() -> str:
+    """`bq` = lê métricas de BQ (Fase 4). `blob` = mantém comportamento atual.
+    Default: `blob` (sem mudança de comportamento)."""
+    return os.getenv("DASHBOARD_DATA_SOURCE", "blob").strip().lower() or "blob"
+
+
+def _overlay_bq_metrics(payload: dict[str, Any], start: date, end: date) -> dict[str, Any]:
+    """Sobrepõe campos derivados de line_costs/dim_fx_daily no `payload`.
+
+    Atualmente sobrescreve:
+      - `total_brl`
+      - `dashboard.spend_by_platform`
+      - `dashboard.daily`
+      - `exchange_rate_usd_brl` (se houver dim_fx pra `end`)
+
+    Não toca em: `platform_results`, `nexd`, `platform_pages`, `attention`,
+    `campaign_journey_rows`, `budget`. Esses ficam pra etapas 4.2+.
+
+    Retorna o mesmo dict (mutado). Idempotente.
+    """
+    from backend import bigquery_reads
+
+    try:
+        bq_total = bigquery_reads.total_brl(start, end)
+        bq_spend = bigquery_reads.spend_by_platform(start, end)
+        bq_daily = bigquery_reads.daily_by_platform(start, end)
+        bq_fx = bigquery_reads.exchange_rate_for_date(end) or bigquery_reads.latest_exchange_rate()
+    except Exception:
+        logger.exception("Falha ao ler métricas de BQ; mantendo blob.")
+        return payload
+
+    # Antes/depois pra log (audit trail)
+    blob_total = float(payload.get("total_brl") or 0.0)
+    diff_total = blob_total - bq_total
+    diff_pct = (diff_total / blob_total * 100) if blob_total else 0
+    logger.info(
+        "overlay_bq: blob_total=%.2f bq_total=%.2f diff=%+.2f (%+.2f%%)",
+        blob_total, bq_total, diff_total, diff_pct,
+    )
+
+    payload["total_brl"] = bq_total
+    if bq_fx:
+        payload["exchange_rate_usd_brl"] = bq_fx
+    dashboard = payload.setdefault("dashboard", {})
+    dashboard["spend_by_platform"] = bq_spend
+    dashboard["daily"] = bq_daily
+
+    # Etapa 4.2: campaign_journey_rows e attention
+    active_plats = list(dashboard.get("active_platforms") or [p["platform"] for p in bq_spend])
+    try:
+        bq_journey = bigquery_reads.campaign_journey_rows(start, end, active_plats)
+        blob_journey = dashboard.get("campaign_journey_rows") or []
+        logger.info(
+            "overlay_bq journey: blob=%d rows bq=%d rows",
+            len(blob_journey), len(bq_journey),
+        )
+        dashboard["campaign_journey_rows"] = bq_journey
+    except Exception:
+        logger.exception("overlay_bq: campaign_journey_rows falhou; mantém blob.")
+
+    try:
+        bq_no_token = bigquery_reads.no_token_rows(start, end)
+        bq_oop = bigquery_reads.out_of_period_rows(start, end)
+        attention = payload.setdefault("attention", {})
+        attention["no_token_rows"] = bq_no_token
+        attention["no_token_total_brl"] = sum(r["gasto"] for r in bq_no_token)
+        attention["out_of_period_rows"] = bq_oop
+        attention["out_of_period_total_brl"] = sum(r["gasto"] for r in bq_oop)
+        logger.info(
+            "overlay_bq attention: no_token=%d (R$ %.2f) oop=%d (R$ %.2f)",
+            len(bq_no_token), attention["no_token_total_brl"],
+            len(bq_oop), attention["out_of_period_total_brl"],
+        )
+    except Exception:
+        logger.exception("overlay_bq: attention falhou; mantém blob.")
+
+    payload["_metrics_source"] = "bq"
+    return payload
 
 
 def _update_cache(
@@ -1017,19 +1592,224 @@ def get_refresh_metrics() -> dict[str, Any]:
     }
 
 
-def _load_from_bigquery(start: date, end: date) -> dict[str, Any] | None:
+def _build_payload_from_bq(start: date, end: date) -> dict[str, Any] | None:
+    """Monta o payload **sempre** a partir de BigQuery — fonte única da verdade.
+
+    Paralelizado com ThreadPoolExecutor (queries BQ simultâneas, ~4-5s total).
+    Todas as métricas vêm de:
+      - `line_costs` (gastos)
+      - `dim_campaign` (campanhas/Investido)
+      - `dim_fx_daily` (câmbio)
+
+    O cron `scheduled_hourly` alimenta essas tabelas a cada hora. Esta função é
+    chamada em toda request — não há "cache de fan-out". Estado é sempre o que
+    a base diz, na cadência do cron.
+
+    Campos NÃO derivados de BQ (preenchidos pelo refresh real quando rodar):
+      - `nexd.campaigns` / `nexd.layouts` (detalhe Nexd page)
+      - `platform_pages[DV360].rows[].dv360_advertiser_id/io_id/...`
+
+    Esses faltam só na Nexd page e em algumas colunas do DV360 page. Home/Journey/
+    Detalhe de campanha vêm completos de BQ.
+    """
     if not bigquery_store.is_enabled():
         return None
     try:
-        latest = bigquery_store.load_latest_snapshot(start, end)
+        from concurrent.futures import ThreadPoolExecutor
+
+        from backend import bigquery_reads
+
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            # Fase 1: dispara todas as queries independentes simultaneamente
+            f_fx_target = ex.submit(bigquery_reads.exchange_rate_for_date, end)
+            f_fx_latest = ex.submit(bigquery_reads.latest_exchange_rate)
+            f_total = ex.submit(bigquery_reads.total_brl, start, end)
+            f_spend = ex.submit(bigquery_reads.spend_by_platform, start, end)
+            f_daily = ex.submit(bigquery_reads.daily_by_platform, start, end)
+            f_no_token = ex.submit(bigquery_reads.no_token_rows, start, end)
+            f_oop = ex.submit(bigquery_reads.out_of_period_rows, start, end)
+            platform_futures = {
+                name: ex.submit(
+                    bigquery_reads.platform_data_from_line_costs, name, start, end
+                )
+                for name in PLATFORMS
+            }
+            # rows da DSP page (line × campanha) — usado em platform_pages[name].rows
+            page_rows_futures = {
+                name: ex.submit(bigquery_reads.platform_page_rows, name, start, end)
+                for name in PLATFORMS
+            }
+            # Nexd snapshot (campaigns/layouts) + DV360 dim
+            f_nexd = ex.submit(bigquery_reads.nexd_snapshot)
+
+            # Aguarda spend_by_platform pra extrair active_platforms (input do journey)
+            spend_by_platform = f_spend.result()
+            active_platforms = [p["platform"] for p in spend_by_platform]
+
+            # Fase 2: dispara journey (depende de active_platforms)
+            f_journey = ex.submit(
+                bigquery_reads.campaign_journey_rows, start, end, active_platforms
+            )
+
+            # Aguarda o resto
+            rate = (
+                f_fx_target.result()
+                or f_fx_latest.result()
+                or DEFAULT_USD_BRL_RATE
+            )
+            total_brl = f_total.result()
+            daily = f_daily.result()
+            no_token = f_no_token.result()
+            out_of_period = f_oop.result()
+            journey_rows = f_journey.result()
+
+            platform_results: dict[str, Any] = {}
+            for name, fut in platform_futures.items():
+                try:
+                    platform_results[name] = fut.result()
+                except Exception:
+                    logger.exception(
+                        "cold-start: line_costs reuse falhou pra %s", name
+                    )
+                    platform_results[name] = {
+                        "status": "stale", "currency": "USD", "spend": 0.0,
+                        "lines": [], "daily": [], "line_daily": [],
+                        "message": "Sem cache disponível.",
+                    }
     except Exception:
-        logger.exception("Falha ao consultar snapshot no BigQuery.")
+        logger.exception("Falha no cold-start via bigquery_reads.")
         return None
-    if not latest:
-        return None
-    payload, snapshot_at = latest
-    payload_with_meta = _refresh_metadata(payload, snapshot_at=snapshot_at, source="bigquery")
-    _update_cache(start, end, payload_with_meta, source="bigquery", snapshot_at=snapshot_at)
+
+    # platform_pages — constrói com spend_brl, daily e rows (BQ).
+    spend_brl_by_platform = {p["platform"]: p["spend_brl"] for p in spend_by_platform}
+
+    # Enriquecimento DV360: pega dimensions (advertiser/IO/campaign/...) do dim_dv360_line_meta
+    dv360_meta_map: dict[str, dict[str, Any]] = {}
+    try:
+        dv360_page_rows = page_rows_futures.get("DV360")
+        if dv360_page_rows is not None:
+            # rows já resolvido aqui — pega line_item_ids únicos
+            dv_rows = dv360_page_rows.result()
+            line_ids = [r.get("line_item_id") for r in dv_rows if r.get("line_item_id")]
+            if line_ids:
+                from backend import bigquery_reads as _br
+                dv360_meta_map = _br.dv360_line_meta_map(line_ids)
+    except Exception:
+        logger.exception("cold-start: falha ao buscar dv360_line_meta_map.")
+
+    platform_pages: dict[str, Any] = {}
+    for name, pdata in platform_results.items():
+        try:
+            page_rows = page_rows_futures[name].result() if name in page_rows_futures else []
+        except Exception:
+            logger.exception("cold-start: platform_page_rows falhou pra %s", name)
+            page_rows = []
+
+        # Enriquece rows DV360 com dimensions
+        if name == "DV360" and dv360_meta_map and page_rows:
+            for r in page_rows:
+                lid = str(r.get("line_item_id") or "").strip()
+                meta = dv360_meta_map.get(lid)
+                if not meta:
+                    continue
+                for k, v in meta.items():
+                    if v is not None and str(v).strip():
+                        r[f"dv360_{k}"] = str(v).strip()
+
+        platform_pages[name] = {
+            "spend_brl": spend_brl_by_platform.get(name, 0.0),
+            "spend_usd": float(pdata.get("spend") or 0.0) if pdata.get("currency") == "USD" else 0.0,
+            "currency": pdata.get("currency", "USD"),
+            "rows": page_rows,
+            "daily": pdata.get("daily") or [],
+        }
+
+    # DV360 context (partner_id, advertiser_ids) — pega de qualquer meta row
+    if dv360_meta_map and "DV360" in platform_pages:
+        partners = {m.get("partner_id") for m in dv360_meta_map.values() if m.get("partner_id")}
+        advertisers = {m.get("advertiser_id") for m in dv360_meta_map.values() if m.get("advertiser_id")}
+        if partners or advertisers:
+            platform_pages["DV360"]["dv360_context"] = {
+                "partner_id": next(iter(partners), None),
+                "advertiser_ids": sorted(filter(None, advertisers)),
+            }
+
+    # Nexd payload — vem de dim_nexd_snapshot
+    nexd_payload: dict[str, Any]
+    try:
+        nexd_snap = f_nexd.result()
+        if nexd_snap:
+            nexd_payload = nexd_snap
+        else:
+            nexd_payload = {
+                "impressions": 0, "cap": 10_000_000, "status": "stale",
+                "message": "Nenhum snapshot Nexd disponível (aguardando primeiro refresh).",
+                "campaigns": [], "layouts": [],
+            }
+    except Exception:
+        logger.exception("cold-start: falha ao ler nexd_snapshot.")
+        nexd_payload = {
+            "impressions": 0, "cap": 10_000_000, "status": "error",
+            "message": "Erro ao ler snapshot Nexd.",
+            "campaigns": [], "layouts": [],
+        }
+
+    # platform_pages["Nexd"] — usado pelo card do home e Nexd page
+    if nexd_payload.get("status") == "ok":
+        imps = int(nexd_payload.get("impressions") or 0)
+        cap_v = int(nexd_payload.get("cap") or 10_000_000) or 1
+        nexd_cost = imps * NEXD_CPM_BRL
+        layout_rows: list[dict[str, Any]] = []
+        for r in (nexd_payload.get("layouts") or []):
+            l_imps = int(r.get("impressions") or 0)
+            est = l_imps * NEXD_CPM_BRL
+            layout_rows.append({
+                "layout": r.get("layout", "—"),
+                "impressions": l_imps,
+                "creatives": int(r.get("creatives") or 0),
+                "estimated_cost_brl": est,
+                "pct_estimated_cost": (est / nexd_cost * 100) if nexd_cost > 0 else 0.0,
+            })
+        layout_rows.sort(key=lambda x: x["estimated_cost_brl"], reverse=True)
+        platform_pages["Nexd"] = {
+            "spend_brl": nexd_cost,
+            "spend_usd": 0.0,
+            "impressions": imps,
+            "cap": cap_v,
+            "pct_cap": (imps / cap_v * 100) if cap_v > 0 else 0.0,
+            "campaigns": nexd_payload.get("campaigns") or [],
+            "layouts": layout_rows,
+        }
+
+    payload: dict[str, Any] = {
+        "period": {"start": start.isoformat(), "end": end.isoformat()},
+        "exchange_rate_usd_brl": rate,
+        "total_brl": total_brl,
+        "journey_status": "ok",
+        "journey_message": "",
+        "journey_data": [],
+        "platform_results": platform_results,
+        "nexd": nexd_payload,
+        "dashboard": {
+            "spend_by_platform": spend_by_platform,
+            "daily": daily,
+            "campaign_journey_rows": journey_rows,
+            "active_platforms": active_platforms,
+        },
+        "platform_pages": platform_pages,
+        "attention": {
+            "no_token_rows": no_token,
+            "no_token_total_brl": sum(r["gasto"] for r in no_token),
+            "out_of_period_rows": out_of_period,
+            "out_of_period_total_brl": sum(r["gasto"] for r in out_of_period),
+        },
+        "budget": {},
+        "_metrics_source": "bq",
+    }
+
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+    payload_with_meta = _refresh_metadata(payload, snapshot_at=snapshot_at, source="bigquery_reads")
+    _update_cache(start, end, payload_with_meta, source="bigquery_reads", snapshot_at=snapshot_at)
     return payload_with_meta
 
 
@@ -1066,7 +1846,7 @@ def _refresh_dashboard(start: date, end: date, trigger: str) -> dict[str, Any]:
                 if _cache["start"] == start and _cache["end"] == end and isinstance(_cache.get("data"), dict):
                     previous_payload = dict(_cache["data"])
             if previous_payload is None:
-                bq_snapshot = _load_from_bigquery(start, end)
+                bq_snapshot = _build_payload_from_bq(start, end)
                 if isinstance(bq_snapshot, dict):
                     previous_payload = dict(bq_snapshot)
 
@@ -1078,6 +1858,16 @@ def _refresh_dashboard(start: date, end: date, trigger: str) -> dict[str, Any]:
             )
             snapshot_at = datetime.now(timezone.utc).isoformat()
             payload = _refresh_metadata(payload, snapshot_at=snapshot_at, source="live")
+
+            # Fase 4: se DASHBOARD_DATA_SOURCE=bq, sobrepõe métricas chave com leitura BQ.
+            # Fan-out continua acontecendo (pra `platform_results`, `platform_pages`,
+            # `nexd`, `attention`, etc.) — só os 3 cards do home + gráfico daily
+            # vêm do line_costs/dim_fx_daily.
+            if _dashboard_data_source() == "bq":
+                try:
+                    _overlay_bq_metrics(payload, start, end)
+                except Exception:
+                    logger.exception("Falha no overlay BQ; mantendo payload blob.")
             try:
                 discord_notify.maybe_notify_partial_after_refresh(
                     trigger=trigger, run_id=run_id, payload=payload
@@ -1088,9 +1878,144 @@ def _refresh_dashboard(start: date, end: date, trigger: str) -> dict[str, Any]:
 
             if bigquery_store.is_enabled():
                 try:
-                    written_snapshot_at = bigquery_store.write_snapshot(start, end, payload, source=trigger)
-                    payload = _refresh_metadata(payload, snapshot_at=written_snapshot_at, source="bigquery")
-                    _update_cache(start, end, payload, source="bigquery", snapshot_at=written_snapshot_at)
+                    # Fase 5+: blob aposentado. Snapshot marker é só timestamp.
+                    written_snapshot_at = datetime.now(timezone.utc).isoformat()
+                    try:
+                        line_daily_rows = _dsp_line_daily_cost_rows_bigquery(
+                            run_id=run_id,
+                            trigger=trigger,
+                            snapshot_ts=written_snapshot_at,
+                            period_start=start,
+                            period_end=end,
+                            platform_results=payload.get("platform_results") or {},
+                            exchange_rate_usd_brl=float(
+                                payload.get("exchange_rate_usd_brl") or DEFAULT_USD_BRL_RATE
+                            ),
+                            ingested_at=datetime.now(timezone.utc),
+                        )
+                        bigquery_store.write_dsp_line_daily_cost_rows(line_daily_rows)
+                    except Exception:
+                        logger.exception("Falha ao gravar dsp_line_daily_cost no BigQuery.")
+
+                    # Fase 3.2: atualiza dim_fx_daily com PTAX de hoje.
+                    try:
+                        today_utc = datetime.now(timezone.utc).date()
+                        fx_rate, fx_source = _fetch_fx_with_source(today_utc)
+                        bigquery_store.upsert_dim_fx_for_date(today_utc, fx_rate, fx_source)
+                        logger.info(
+                            "dim_fx_daily: wrote %s rate=%.4f source=%s",
+                            today_utc.isoformat(), fx_rate, fx_source,
+                        )
+                    except Exception:
+                        logger.exception("Falha ao gravar dim_fx_daily (Fase 3.2).")
+
+                    # Fase 3.1: atualiza dim_campaign (1 row por token, MERGE-like).
+                    try:
+                        if payload.get("journey_status") == "ok":
+                            journey_data = payload.get("journey_data") or []
+                            dim_rows = _dim_campaign_rows_from_journey(journey_data)
+                            if dim_rows:
+                                bigquery_store.upsert_dim_campaign(dim_rows)
+                                logger.info(
+                                    "dim_campaign: upserted %d tokens", len(dim_rows)
+                                )
+                        else:
+                            logger.warning(
+                                "dim_campaign: journey_status=%s; skipping upsert.",
+                                payload.get("journey_status"),
+                            )
+                    except Exception:
+                        logger.exception("Falha ao gravar dim_campaign (Fase 3.1).")
+
+                    # Fase 5+: dim_nexd_snapshot (campaigns/layouts/total/cap)
+                    try:
+                        nexd = payload.get("nexd") or {}
+                        if nexd.get("status") == "ok":
+                            bigquery_store.upsert_dim_nexd_snapshot(
+                                impressions=int(nexd.get("impressions") or 0),
+                                cap=int(nexd.get("cap") or 0),
+                                campaigns=list(nexd.get("campaigns") or []),
+                                layouts=list(nexd.get("layouts") or []),
+                            )
+                            logger.info(
+                                "dim_nexd_snapshot: wrote impressions=%d campaigns=%d layouts=%d",
+                                int(nexd.get("impressions") or 0),
+                                len(nexd.get("campaigns") or []),
+                                len(nexd.get("layouts") or []),
+                            )
+                    except Exception:
+                        logger.exception("Falha ao gravar dim_nexd_snapshot.")
+
+                    # Fase 5+: dim_dv360_line_meta (dimensions DV360 por line_item_id)
+                    try:
+                        dv = (payload.get("platform_results") or {}).get("DV360") or {}
+                        if dv.get("status") == "ok":
+                            meta_rows: list[dict[str, Any]] = []
+                            for line in dv.get("lines") or []:
+                                if not isinstance(line, dict):
+                                    continue
+                                lid = str(line.get("line_item_id") or "").strip()
+                                if not lid:
+                                    continue
+                                meta_rows.append({
+                                    "line_item_id": lid,
+                                    "advertiser_id": line.get("dv360_advertiser_id"),
+                                    "insertion_order_id": line.get("dv360_insertion_order_id"),
+                                    "campaign_id": line.get("dv360_campaign_id"),
+                                    "entity_status": line.get("dv360_entity_status"),
+                                    "partner_id": line.get("dv360_partner_id"),
+                                })
+                            if meta_rows:
+                                bigquery_store.upsert_dim_dv360_line_meta(meta_rows)
+                                logger.info(
+                                    "dim_dv360_line_meta: wrote %d line_items", len(meta_rows)
+                                )
+                    except Exception:
+                        logger.exception("Falha ao gravar dim_dv360_line_meta.")
+
+                    # Fase 1: popula `line_costs` a partir do `line_daily` que cada
+                    # integração agora emite (Fase 0). Escreve só cost_date = today
+                    # + last_day_of_month(today) — esse último cobre os imputed
+                    # mensais (Hivestack / Nexd) durante o mês.
+                    try:
+                        today = datetime.now(timezone.utc).date()
+                        accept_dates = {today, _last_day_of_month(today)}
+                        groups = _line_costs_rows_from_payload(
+                            platform_results=payload.get("platform_results") or {},
+                            nexd_data=payload.get("nexd") or {},
+                            rate=float(
+                                payload.get("exchange_rate_usd_brl") or DEFAULT_USD_BRL_RATE
+                            ),
+                            snapshot_at=written_snapshot_at,
+                            period_end=end,
+                            accept_dates=accept_dates,
+                        )
+                        upsert_failures: list[str] = []
+                        upsert_ok: list[str] = []
+                        for (platform_name, cd), platform_rows in groups.items():
+                            try:
+                                bigquery_store.upsert_line_costs_for_platform_and_date(
+                                    platform_name, cd, platform_rows
+                                )
+                                upsert_ok.append(
+                                    f"{platform_name}/{cd.isoformat()}({len(platform_rows)})"
+                                )
+                            except Exception as exc:
+                                upsert_failures.append(
+                                    f"{platform_name}/{cd.isoformat()}: {exc}"
+                                )
+                                logger.exception(
+                                    "line_costs upsert falhou %s/%s",
+                                    platform_name,
+                                    cd.isoformat(),
+                                )
+                        logger.info(
+                            "line_costs Fase 1: ok=%s failures=%s",
+                            upsert_ok or "[]",
+                            upsert_failures or "[]",
+                        )
+                    except Exception:
+                        logger.exception("Falha ao montar/gravar line_costs (Fase 1).")
                 except Exception:
                     logger.exception("Falha ao gravar snapshot no BigQuery.")
 
@@ -1155,12 +2080,23 @@ def get_dashboard_data(
     end: date | None = None,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
+    """Fase 5+: sempre lê de BigQuery. Sem fan-out no path da request.
+
+    Cache em RAM (~30s) só pra evitar query duplicada quando múltiplos clients
+    chegam simultaneamente. Conteúdo é o mesmo do BQ — atualização real vem
+    do worker `scheduled_hourly` que popula `line_costs` + dims em background.
+
+    `force_refresh=True` dispara fan-out completo sincronamente (caso especial,
+    rota `/api/dashboard?force_refresh=true` — provavelmente não usado mais).
+    """
     resolved_start, resolved_end = _period_range(start, end)
+
     if force_refresh:
         return line_observations_pg.merge_observations_into_payload(
             _refresh_dashboard(resolved_start, resolved_end, trigger="force_refresh")
         )
 
+    # Cache RAM de curta duração — só pra deduplicar requests simultâneas
     with _cache_lock:
         if (
             _cache["start"] == resolved_start
@@ -1170,12 +2106,15 @@ def get_dashboard_data(
         ):
             return line_observations_pg.merge_observations_into_payload(dict(_cache["data"]))
 
-    bq_payload = _load_from_bigquery(resolved_start, resolved_end)
+    # SEMPRE lê de BQ — fonte única da verdade
+    bq_payload = _build_payload_from_bq(resolved_start, resolved_end)
     if bq_payload is not None:
         return line_observations_pg.merge_observations_into_payload(bq_payload)
 
+    # Fallback (BQ indisponível): fan-out síncrono
+    logger.warning("BQ indisponível; caindo pro fan-out síncrono.")
     return line_observations_pg.merge_observations_into_payload(
-        _refresh_dashboard(resolved_start, resolved_end, trigger="cache_miss")
+        _refresh_dashboard(resolved_start, resolved_end, trigger="bq_unavailable")
     )
 
 
@@ -1225,6 +2164,15 @@ def _worker_loop(trigger_name: str, interval_seconds: float) -> None:
 
 
 def start_background_workers() -> None:
+    """Fase 5: 1 worker único a cada `WORKER_HOURLY_INTERVAL_SECONDS` (default 1h).
+    Substitui os 2 workers anteriores (`scheduled_fast` 10min + `scheduled_dv360` 30min).
+
+    O worker:
+      - Chama TODAS as DSPs (DV360, Xandr, StackAdapt, Hivestack, Nexd)
+      - Popula `line_costs` (Fase 1 hook)
+      - Popula `dim_campaign` + `dim_fx_daily` (Fase 3 hooks)
+      - Atualiza o cache em RAM
+    """
     global _worker_started
     with _worker_state_lock:
         if _worker_started:
@@ -1236,20 +2184,17 @@ def start_background_workers() -> None:
         except Exception:
             logger.exception("Falha ao preparar infraestrutura no BigQuery.")
     _worker_stop_event.clear()
-    fast_thread = threading.Thread(
+    interval = _hourly_worker_interval_seconds()
+    hourly_thread = threading.Thread(
         target=_worker_loop,
-        args=("scheduled_fast", _fast_worker_interval_seconds()),
+        args=("scheduled_hourly", interval),
         daemon=True,
-        name="dashboard-worker-fast",
+        name="dashboard-worker-hourly",
     )
-    dv360_thread = threading.Thread(
-        target=_worker_loop,
-        args=("scheduled_dv360", _dv360_worker_interval_seconds()),
-        daemon=True,
-        name="dashboard-worker-dv360",
+    hourly_thread.start()
+    logger.info(
+        "dashboard worker started: trigger=scheduled_hourly interval=%.0fs", interval
     )
-    fast_thread.start()
-    dv360_thread.start()
 
 
 def stop_background_workers() -> None:

@@ -42,6 +42,13 @@ REPORT_BACKOFF_MAX_SECONDS = 80
 DEFAULT_REPORT_POLL_TIMEOUT_SECONDS = 240
 QUERY_TITLE_PREFIX = "Cost Dashboard"
 LINE_NAME_CACHE_TTL_SECONDS = 1800
+REVENUE_METRIC = "METRIC_REVENUE_ADVERTISER"
+CURRENCY_GROUP_BY = "FILTER_ADVERTISER_CURRENCY"
+
+
+def _use_date_groupby() -> bool:
+    return os.getenv("DV360_USE_DATE_GROUPBY", "").strip() in {"1", "true", "True", "yes"}
+
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -481,6 +488,20 @@ def _safe_query_title(suffix: str, partner_id: str, advertiser_ids_raw: str) -> 
     return f"{QUERY_TITLE_PREFIX} | {suffix} | {scope}"
 
 
+def _extract_advertiser_currency(df) -> str:
+    currency_cols = [
+        c
+        for c in df.columns
+        if "advertiser" in _dv360_header_norm(c) and "currency" in _dv360_header_norm(c)
+    ]
+    for col in currency_cols:
+        values = df[col].dropna().astype(str).str.strip().str.upper()
+        for value in values:
+            if re.fullmatch(r"[A-Z]{3}", value):
+                return value
+    return "USD"
+
+
 def _list_queries(headers: dict) -> list[dict]:
     out: list[dict] = []
     page_token = None
@@ -514,7 +535,7 @@ def _ensure_query_id(title: str, group_bys: list[str], filters: list[dict], head
         "params": {
             "type": "STANDARD",
             "groupBys": group_bys,
-            "metrics": ["METRIC_REVENUE_USD"],
+            "metrics": [REVENUE_METRIC],
             "filters": filters,
         },
         "schedule": {"frequency": "ONE_TIME"},
@@ -773,18 +794,37 @@ def fetch_mtd_cost(start, end):
             )
             return df
 
-        # Query 1: por Line Item | Query 2: por Data (em paralelo via threads)
+        # Query 1: por Line Item | Query 2: por Data (em paralelo via threads).
+        # Com DV360_USE_DATE_GROUPBY=1, a query 1 ganha FILTER_DATE → linhas
+        # vêm desnormalizadas (line × dia), e derivamos `line_daily` no parser.
+        # Query 2 (daily total) continua rodando pra manter compatibilidade.
         import concurrent.futures
+        use_date = _use_date_groupby()
         reports_started_at = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-            lines_title = _safe_query_title("Lines", partner_id, advertiser_ids_raw)
-            daily_title = _safe_query_title("Daily", partner_id, advertiser_ids_raw)
-            fut_lines = ex.submit(
-                _run_report,
-                ["FILTER_LINE_ITEM", "FILTER_LINE_ITEM_NAME", "FILTER_LINE_ITEM_TYPE"],
-                lines_title,
+            lines_title_suffix = (
+                "Lines Date Advertiser Currency" if use_date else "Lines Advertiser Currency"
             )
-            fut_daily = ex.submit(_run_report, ["FILTER_DATE"], daily_title)
+            lines_title = _safe_query_title(lines_title_suffix, partner_id, advertiser_ids_raw)
+            daily_title = _safe_query_title("Daily Advertiser Currency", partner_id, advertiser_ids_raw)
+            lines_group_bys = (
+                [
+                    "FILTER_DATE",
+                    "FILTER_LINE_ITEM",
+                    "FILTER_LINE_ITEM_NAME",
+                    "FILTER_LINE_ITEM_TYPE",
+                    CURRENCY_GROUP_BY,
+                ]
+                if use_date
+                else [
+                    "FILTER_LINE_ITEM",
+                    "FILTER_LINE_ITEM_NAME",
+                    "FILTER_LINE_ITEM_TYPE",
+                    CURRENCY_GROUP_BY,
+                ]
+            )
+            fut_lines = ex.submit(_run_report, lines_group_bys, lines_title)
+            fut_daily = ex.submit(_run_report, ["FILTER_DATE", CURRENCY_GROUP_BY], daily_title)
             csv_lines = fut_lines.result()
             csv_daily = fut_daily.result()
         logger.warning("[DV360] reports parallel section duration=%.1fs", _elapsed_seconds(reports_started_at))
@@ -794,10 +834,13 @@ def fetch_mtd_cost(start, end):
         if df_lines.empty:
             logger.warning("[DV360] lines report empty total_duration=%.1fs", _elapsed_seconds(fetch_started_at))
             return {"spend": 0.0, "currency": "USD", "status": "error",
-                    "message": "Relatório não disponível. Tente novamente.", "lines": [], "cost_types": [], "daily": []}
+                    "message": "Relatório não disponível. Tente novamente.", "lines": [], "cost_types": [], "daily": [], "line_daily": []}
 
         _cols = list(df_lines.columns)
+        report_currency = _extract_advertiser_currency(df_lines)
         rev_col = next((c for c in _cols if "Revenue" in c or "Cost" in c), None)
+        # Date column existe quando o report foi pedido com FILTER_DATE no groupBys.
+        date_col_lines = next((c for c in _cols if "Date" in str(c)), None) if use_date else None
         # "Line item id" (minúsculo) não contém a substring "ID" — exigir match por coluna de line item
         id_col = next((c for c in _cols if _is_line_item_id_column_name(c)), None) or next(
             (c for c in _cols if "ID" in str(c)), None
@@ -931,14 +974,57 @@ def fetch_mtd_cost(start, end):
                     except Exception:
                         pass
 
+        # line_daily: granularidade (date × line_item) quando DV360_USE_DATE_GROUPBY=1.
+        # Requer date_col_lines + id_col + rev_col no df_lines.
+        line_daily_out: list[dict] = []
+        if use_date and date_col_lines and rev_col and id_col and not df_lines.empty:
+            try:
+                df_ld = df_lines[[date_col_lines, id_col, rev_col] + ([name_col] if name_col else [])].copy()
+                df_ld.loc[:, rev_col] = pd.to_numeric(df_ld[rev_col], errors="coerce").fillna(0)
+                # Map line_id → display name (mesma lógica de cima)
+                name_lookup = locals().get("name_by_line_id") or {}
+                meta_lookup = locals().get("line_id_to_meta") or {}
+                for _, row in df_ld.iterrows():
+                    raw_id = row[id_col]
+                    if raw_id != raw_id:
+                        continue
+                    try:
+                        line_id = str(int(raw_id)).strip()
+                    except Exception:
+                        line_id = str(raw_id).strip()
+                    if not line_id:
+                        continue
+                    raw_date = row[date_col_lines]
+                    try:
+                        d_str = pd.to_datetime(raw_date).strftime("%Y-%m-%d")
+                    except Exception:
+                        continue
+                    spend_val = float(row[rev_col])
+                    if spend_val <= 0:
+                        continue
+                    display_name = _line_display_name(line_id, name_lookup, meta_lookup) if name_lookup or meta_lookup else (
+                        str(row[name_col]).strip() if name_col and row[name_col] == row[name_col] else line_id
+                    )
+                    line_daily_out.append(
+                        {
+                            "date": d_str,
+                            "line_item_id": line_id,
+                            "name": display_name,
+                            "spend": spend_val,
+                        }
+                    )
+            except Exception:
+                logger.exception("[DV360] falha ao montar line_daily")
+
         out_payload: dict = {
             "spend": total,
-            "currency": "USD",
+            "currency": report_currency,
             "status": "ok",
             "message": "",
             "lines": lines_out,
             "cost_types": types_out,
             "daily": daily_out,
+            "line_daily": line_daily_out,
         }
         _partner = os.getenv("DV360_PARTNER_ID", "").strip()
         _adv = [x.strip() for x in os.getenv("DV360_ADVERTISER_IDS", "").split(",") if x.strip()]
@@ -948,10 +1034,11 @@ def fetch_mtd_cost(start, end):
                 "advertiser_ids": _adv,
             }
         logger.warning(
-            "[DV360] fetch completed status=ok lines=%s daily=%s spend=%.2f total_duration=%.1fs",
+            "[DV360] fetch completed status=ok lines=%s daily=%s spend=%.2f currency=%s total_duration=%.1fs",
             len(lines_out),
             len(daily_out),
             total,
+            report_currency,
             _elapsed_seconds(fetch_started_at),
         )
         return out_payload
@@ -959,4 +1046,4 @@ def fetch_mtd_cost(start, end):
     except Exception as e:
         logger.exception("[DV360] fetch failed total_duration=%.1fs", _elapsed_seconds(fetch_started_at))
         return {"spend": 0.0, "currency": "USD", "status": "error", "message": str(e),
-                "lines": [], "cost_types": [], "daily": []}
+                "lines": [], "cost_types": [], "daily": [], "line_daily": []}

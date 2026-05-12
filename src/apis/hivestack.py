@@ -6,6 +6,7 @@ Fonte padrão:
 """
 
 import base64
+import calendar
 import json
 import os
 import threading
@@ -63,6 +64,15 @@ def _get_client() -> bigquery.Client:
         return _client
 
 
+def _emit_line_daily_enabled() -> bool:
+    return os.getenv("HIVESTACK_EMIT_LINE_DAILY", "").strip() in {"1", "true", "True", "yes"}
+
+
+def _last_day_of_month(any_day: date) -> date:
+    last = calendar.monthrange(any_day.year, any_day.month)[1]
+    return date(any_day.year, any_day.month, last)
+
+
 def _to_float(value: Any) -> float:
     if value is None:
         return 0.0
@@ -83,6 +93,7 @@ def fetch_mtd_cost(start: date, end: date) -> dict[str, Any]:
             "message": "Credenciais BigQuery não configuradas para Hivestack.",
             "lines": [],
             "daily": [],
+            "line_daily": [],
         }
 
     try:
@@ -121,7 +132,10 @@ def fetch_mtd_cost(start: date, end: date) -> dict[str, Any]:
         )
         rows = list(client.query(query, job_config=job_config).result())
 
-        lines: list[dict[str, Any]] = []
+        # `lines` agrega por (line_item) somando todos os meses do range.
+        # `line_daily_raw` mantém granularidade (line_item, month) pra emitir line_daily.
+        line_daily_raw: list[dict[str, Any]] = []
+        spend_by_line: dict[str, float] = {}
         spend_by_month: dict[str, float] = {}
         total = 0.0
         for row in rows:
@@ -129,13 +143,43 @@ def fetch_mtd_cost(start: date, end: date) -> dict[str, Any]:
             spend = _to_float(row.get("spend"))
             if not line_name or spend <= 0:
                 continue
-            month = row.get("month")
-            month_key = month.isoformat() if hasattr(month, "isoformat") else str(month)
-            lines.append({"name": line_name, "spend": spend})
+            month_value = row.get("month")
+            if hasattr(month_value, "year") and hasattr(month_value, "month"):
+                month_date = date(month_value.year, month_value.month, 1)
+            else:
+                # fallback defensivo: tenta parsear ISO
+                try:
+                    month_date = date.fromisoformat(str(month_value)[:10]).replace(day=1)
+                except Exception:
+                    continue
+            month_key = month_date.isoformat()
+            spend_by_line[line_name] = spend_by_line.get(line_name, 0.0) + spend
             spend_by_month[month_key] = spend_by_month.get(month_key, 0.0) + spend
             total += spend
+            line_daily_raw.append({"month": month_date, "name": line_name, "spend": spend})
 
+        lines = [
+            {"name": name, "spend": v}
+            for name, v in sorted(spend_by_line.items(), key=lambda kv: -kv[1])
+        ]
         daily = [{"date": m, "spend": v} for m, v in sorted(spend_by_month.items())]
+
+        # line_daily: 1 row por (line_item, month) com date = last_day_of_month,
+        # marcado como granularity=monthly_imputed porque a fonte agrega no mês.
+        line_daily: list[dict[str, Any]] = []
+        if _emit_line_daily_enabled():
+            for entry in line_daily_raw:
+                line_daily.append(
+                    {
+                        "date": _last_day_of_month(entry["month"]).isoformat(),
+                        "line_item_id": None,  # Hivestack não tem ID estável
+                        "name": entry["name"],
+                        "spend": entry["spend"],
+                        "granularity": "monthly_imputed",
+                        "is_estimated": True,
+                    }
+                )
+
         return {
             "spend": total,
             "currency": "BRL",
@@ -143,6 +187,7 @@ def fetch_mtd_cost(start: date, end: date) -> dict[str, Any]:
             "message": "",
             "lines": lines,
             "daily": daily,
+            "line_daily": line_daily,
         }
     except Exception as exc:
         return {
@@ -152,4 +197,5 @@ def fetch_mtd_cost(start: date, end: date) -> dict[str, Any]:
             "message": str(exc),
             "lines": [],
             "daily": [],
+            "line_daily": [],
         }

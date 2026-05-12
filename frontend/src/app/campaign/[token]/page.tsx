@@ -11,11 +11,6 @@ import {
   BarChart,
   CartesianGrid,
   Cell,
-  Legend,
-  Line,
-  LineChart,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -25,13 +20,16 @@ import { fetchCampaign } from "@/services/api/campaign";
 import type { CampaignLineRow, CampaignResponse } from "@/services/api/types";
 import {
   brl,
-  DailyCostLegend,
   formatCurrencyAxisTick,
-  formatDonutCenterValue,
   NumberTooltip,
   PlatformLegend,
-  PlatformYAxisTick,
 } from "@/shared/charts/homeRecharts";
+import {
+  RESEND_CHART_COLORS,
+  ResendDailyLine,
+  ResendDonut,
+  ResendHbars,
+} from "@/features/dashboard/components/DeepDiveCharts";
 import { PLATFORM_COLORS } from "@/shared/constants/platform";
 import {
   getAccountManagerAvatar,
@@ -41,14 +39,17 @@ import {
 type CampaignAllLinesSortKey = "platform" | "line" | "gasto" | "pct";
 
 const SOURCE_SLUG_TO_PATH: Record<string, string> = {
+  "jornada-campanhas": "/jornada-campanhas",
   "lines-sem-token": "/lines-sem-token",
   "gasto-fora-mes-vigente": "/gasto-fora-mes-vigente",
   nexd: "/nexd",
   "stack-adapt": "/stack-adapt",
   dv360: "/dv360",
   xandr: "/xandr",
+  hivestack: "/hivestack",
   "amazon-dsp": "/amazon-dsp",
 };
+
 function safeDecodeURIComponent(value: string) {
   try {
     return decodeURIComponent(value);
@@ -69,6 +70,13 @@ function formatDateBr(value: string) {
   return `${match[3]}/${match[2]}/${match[1]}`;
 }
 
+function formatBrlAmount(value: number) {
+  return value.toLocaleString("pt-BR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 function getCampaignReferenceWhatsAppUrl(
   name: string | null | undefined,
   context: { campanha: string; token: string }
@@ -85,7 +93,7 @@ function getCampaignReferenceWhatsAppUrl(
 async function downloadElementPng(element: HTMLElement, filename: string) {
   const canvas = await html2canvas(element, {
     scale: 2,
-    backgroundColor: "#1e2a33",
+    backgroundColor: "#0a0a0a",
     useCORS: true,
     allowTaint: true,
     logging: false,
@@ -114,6 +122,21 @@ function DownloadIcon() {
   );
 }
 
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" className="buttonIcon">
+      <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path
+        d="M20 20l-3.5-3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function WhatsAppIcon() {
   return (
     <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true">
@@ -132,22 +155,31 @@ function WhatsAppIcon() {
 function CampaignDetailLoadingSkeleton() {
   return (
     <>
-      <section className="gridCards campaignKpisGrid">
-        {Array.from({ length: 3 }).map((_, index) => (
-          <article className="card platformStatCard campaignKpiCard" key={`campaign-kpi-skeleton-${index}`}>
-            <div
-              className={`skeleton skeletonTitle campaignSkeletonCardValue ${index === 0 ? "campaignSkeletonCardValuePrimary" : ""}`}
-            />
-            <div className="skeleton skeletonText campaignSkeletonCardTitle" />
-            <div className="skeleton skeletonSubtitle campaignSkeletonCardSubtitle" />
-            {index === 0 ? <div className="skeleton campaignSkeletonProgress" /> : null}
-          </article>
-        ))}
+      <section className="dspResendHero campaignResendHero">
+        <header className="dspResendHeroHead">
+          <div className="dspResendHeroBrand">
+            <div>
+              <div className="skeleton skeletonText campaignSkeletonEyebrow" />
+              <div className="skeleton skeletonTitle campaignSkeletonHeroTitle" />
+            </div>
+          </div>
+          <div className="skeleton campaignSkeletonHeroValue" />
+        </header>
+        <div className="skeleton skeletonText campaignSkeletonHeroBudget" />
+        <div className="dspResendHeroStats">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <div className="dspResendHeroStat" key={`hero-stat-skeleton-${index}`}>
+              <div className="skeleton skeletonText campaignSkeletonStatLabel" />
+              <div className="skeleton skeletonTitle campaignSkeletonStatValue" />
+              <div className="skeleton skeletonText campaignSkeletonStatHint" />
+            </div>
+          ))}
+        </div>
       </section>
 
-      <section className="gridTwo gridTwoCharts campaignChartsGrid">
+      <section className="gridTwo gridTwoCharts gridTwoChartsHome">
         {Array.from({ length: 2 }).map((_, index) => (
-          <article className="panel panelChart" key={`campaign-chart-skeleton-${index}`}>
+          <div className="panel panelChart panelChartResend" key={`chart-skeleton-${index}`}>
             <div className="chartBlockHeading">
               <div className="chartBlockHeadingTop">
                 <div className="skeleton skeletonTitle campaignSkeletonPanelHeading" />
@@ -156,26 +188,27 @@ function CampaignDetailLoadingSkeleton() {
               <div className="skeleton skeletonText campaignSkeletonPanelSubheading" />
             </div>
             <div className="skeleton skeletonChart" />
-          </article>
+          </div>
         ))}
       </section>
 
-      <section className="panel panelChart campaignLinesPanel">
+      <section className="panel panelChart panelChartResend">
         <div className="chartBlockHeading">
           <div className="chartBlockHeadingTop">
             <div className="skeleton skeletonTitle campaignSkeletonPanelHeading" />
-            <div className="skeleton skeletonText campaignSkeletonChartExport" />
           </div>
           <div className="skeleton skeletonText campaignSkeletonPanelSubheading" />
         </div>
         <div className="skeleton skeletonChart campaignSkeletonLinesChart" />
       </section>
 
-      <section className="panel panelChart">
-        <div className="panelHeading">
-          <div className="skeleton skeletonTitle campaignSkeletonPanelHeading" />
-          <div className="skeleton skeletonText campaignSkeletonPanelSubheading" />
-        </div>
+      <section className="journeyResendCard dspResendLinesCard">
+        <header className="journeyResendHeader">
+          <div className="journeyResendHeaderTitle">
+            <div className="skeleton skeletonTitle campaignSkeletonPanelHeading" />
+            <div className="skeleton skeletonText campaignSkeletonPanelSubheading" />
+          </div>
+        </header>
         <div className="skeleton skeletonTable campaignSkeletonTable" />
       </section>
     </>
@@ -200,7 +233,7 @@ export default function CampaignDetailPage() {
     key: CampaignAllLinesSortKey;
     direction: "asc" | "desc";
   }>({ key: "gasto", direction: "desc" });
-  const [campaignTimelineFocusedSeries, setCampaignTimelineFocusedSeries] = useState<string[]>([]);
+  const [campaignTimelineFocus, setCampaignTimelineFocus] = useState<string | null>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
   const tokenParam = Array.isArray(params?.token) ? params.token[0] : params?.token;
   const token = safeDecodeURIComponent(tokenParam ?? "").trim().toUpperCase();
@@ -286,6 +319,11 @@ export default function CampaignDetailPage() {
     return rows;
   }, [filteredCampaignLineRows, allLinesSort, totalLinesCost]);
 
+  const filteredLinesTotal = useMemo(
+    () => sortedCampaignLineRows.reduce((sum, row) => sum + row.gasto, 0),
+    [sortedCampaignLineRows]
+  );
+
   const toggleAllLinesSort = (key: CampaignAllLinesSortKey) => {
     setAllLinesSort((prev) => {
       if (prev.key === key) {
@@ -299,8 +337,8 @@ export default function CampaignDetailPage() {
   };
 
   const allLinesSortIndicator = (key: CampaignAllLinesSortKey) => {
-    if (allLinesSort.key !== key) return "\u2195";
-    return allLinesSort.direction === "asc" ? "\u2191" : "\u2193";
+    if (allLinesSort.key !== key) return "↕";
+    return allLinesSort.direction === "asc" ? "↑" : "↓";
   };
 
   const allLinesSortButtonClass = (key: CampaignAllLinesSortKey) =>
@@ -339,22 +377,17 @@ export default function CampaignDetailPage() {
   const shouldFallbackCampaignPie =
     campaignPlatformChartData.length <= 1 || campaignDominantShare >= 0.9;
 
-  const timelineLegendPayload = useMemo(
-    () => [
-      ...spendByDsp.map((p) => ({ value: p.platform, color: p.color })),
-      { value: "Total", color: PLATFORM_COLORS.Total ?? "#e2e8f0" },
-    ],
+  const campaignTimelinePlatforms = useMemo(
+    () => spendByDsp.map((p) => p.platform),
     [spendByDsp]
   );
 
-  const campaignTimelineAllowedKeys = useMemo(
-    () => new Set<string>(["total", ...spendByDsp.map((p) => p.platform)]),
-    [spendByDsp]
-  );
-
-  const campaignTimelineEffectiveFocusedSeries = useMemo(
-    () => campaignTimelineFocusedSeries.filter((k) => campaignTimelineAllowedKeys.has(k)),
-    [campaignTimelineFocusedSeries, campaignTimelineAllowedKeys]
+  const campaignTimelineEffectiveFocus = useMemo(
+    () =>
+      campaignTimelineFocus && campaignTimelinePlatforms.includes(campaignTimelineFocus)
+        ? campaignTimelineFocus
+        : null,
+    [campaignTimelineFocus, campaignTimelinePlatforms]
   );
 
   const timelineData = useMemo(() => {
@@ -375,6 +408,21 @@ export default function CampaignDetailPage() {
       })
       .filter((row) => row.total > 0);
   }, [data, spendByDsp]);
+
+  const hasCampaignTimelineVariation = useMemo(() => {
+    const platforms = campaignTimelineEffectiveFocus
+      ? [campaignTimelineEffectiveFocus]
+      : campaignTimelinePlatforms;
+    if (!platforms.length) return false;
+    let max = 0;
+    for (const row of timelineData) {
+      for (const p of platforms) {
+        const v = Number(row[p] ?? 0);
+        if (v > max) max = v;
+      }
+    }
+    return max > 0;
+  }, [timelineData, campaignTimelinePlatforms, campaignTimelineEffectiveFocus]);
 
   const setTransientStatus = (message: string) => {
     setCopyStatus(message);
@@ -449,106 +497,185 @@ export default function CampaignDetailPage() {
   if (!isUserLoaded || !isSignedIn || !isAllowedDomain) {
     return (
       <main className="content">
-        <section className="panel">
+        <section className="panel panelChart panelChartResend">
           <p className="alertInfo">Validando sessão...</p>
         </section>
       </main>
     );
   }
 
+  const heroBudgetPct = campaign
+    ? Math.min(100, Math.max(0, campaign.pct_investido))
+    : null;
+  const leadPlatform = spendByDsp[0];
+
   return (
     <main className="content campaignDetailPage">
       <div className="campaignTopBar">
-        <button type="button" className="button buttonSmall campaignBackButton" onClick={() => router.push(backPath)}>
+        <button type="button" className="dspResendPagerBtn campaignBackButton" onClick={() => router.push(backPath)}>
           <span aria-hidden="true">←</span> Voltar
         </button>
         <div className="campaignTopBarUserButton">
           <UserButton />
         </div>
       </div>
-      <section className="panel panelChart campaignHeroPanel">
-        <div className="campaignDetailHeader">
-          <div>
-            <p className="eyebrow">Campaign Journey</p>
-            <h1>Detalhamento da campanha</h1>
-            <div className="campaignTokenRow">
-              <span className="muted">Token</span>
+
+      <section className="dspResendHero campaignResendHero" aria-label="Resumo da campanha">
+        <header className="dspResendHeroHead">
+          <div className="dspResendHeroBrand">
+            <div>
+              <p className="dspResendHeroEyebrow">Campaign Journey</p>
               {showLoadingSkeleton ? (
-                <>
-                  <span className="skeleton campaignSkeletonTokenValue" />
-                  <span className="skeleton campaignSkeletonTokenCopy" />
-                </>
+                <div className="skeleton skeletonTitle campaignSkeletonHeroTitle" />
               ) : (
-                <>
-                  <strong>{token || "—"}</strong>
-                  <button
-                    type="button"
-                    className="copyIconButton"
-                    aria-label={`Copiar token ${token}`}
-                    onClick={() => void copyToClipboard(token, "Token")}
-                    disabled={!token}
-                  >
-                    ⧉
-                  </button>
-                </>
+                <h2 className="dspResendHeroTitle">
+                  {displayCliente || "Detalhamento da campanha"}
+                </h2>
               )}
+              {!showLoadingSkeleton && displayCampanhaNome ? (
+                <p className="campaignResendSubtitle">{displayCampanhaNome}</p>
+              ) : null}
             </div>
-            {showLoadingSkeleton ? (
-              <div className="campaignHeaderMeta campaignHeaderMetaSkeleton" aria-hidden="true">
-                <div className="skeleton campaignSkeletonHeaderLine1" />
-                <div className="skeleton campaignSkeletonHeaderLine2" />
-              </div>
-            ) : displayCliente || displayCampanhaNome || accountManagerName ? (
-              <div className="campaignHeaderMeta">
-                {displayCliente || displayCampanhaNome ? (
-                  <div className="campaignHeaderMetaLine1">
-                    {displayCliente ? <span className="campaignHeaderClient">{displayCliente}</span> : null}
-                    {displayCliente && displayCampanhaNome ? (
-                      <span className="campaignHeaderSep" aria-hidden="true">
-                        —
-                      </span>
-                    ) : null}
-                    {displayCampanhaNome ? (
-                      <span className="campaignHeaderCampaignType">{displayCampanhaNome}</span>
-                    ) : null}
-                  </div>
+          </div>
+          {showLoadingSkeleton ? (
+            <div className="skeleton campaignSkeletonHeroValue" />
+          ) : (
+            <div className="dspResendHeroValue">
+              <span className="dspResendHeroCurrency">R$</span>
+              <span className="num">{formatBrlAmount(totalLinesCost)}</span>
+            </div>
+          )}
+        </header>
+
+        {!showLoadingSkeleton ? (
+          <div className="campaignResendMeta">
+            <div className="campaignResendMetaItem">
+              <span className="campaignResendMetaLabel">Token</span>
+              <span className="campaignResendMetaValue num">{token || "—"}</span>
+              <button
+                type="button"
+                className="copyIconButton"
+                aria-label={`Copiar token ${token}`}
+                onClick={() => void copyToClipboard(token, "Token")}
+                disabled={!token}
+              >
+                ⧉
+              </button>
+            </div>
+            {accountManagerName ? (
+              <div className="campaignResendMetaItem">
+                <span className="campaignResendMetaLabel">Account</span>
+                {getAccountManagerAvatar(accountManagerName) ? (
+                  <Image
+                    src={getAccountManagerAvatar(accountManagerName)!}
+                    alt=""
+                    width={20}
+                    height={20}
+                    className="accountManagerAvatar"
+                  />
                 ) : null}
-                {accountManagerName ? (
-                  <div className="campaignHeaderMetaLine2">
-                    {getAccountManagerAvatar(accountManagerName) ? (
-                      <Image
-                        src={getAccountManagerAvatar(accountManagerName)!}
-                        alt=""
-                        width={22}
-                        height={22}
-                        className="accountManagerAvatar"
-                      />
-                    ) : null}
-                    <span className="campaignHeaderManagerName">{accountManagerName}</span>
-                    <a
-                      href={getCampaignReferenceWhatsAppUrl(accountManagerName, {
-                        campanha: displayCampanhaNome || "campanha sem nome",
-                        token,
-                      })}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="campaignHeaderWhatsappLink"
-                      aria-label={`Conversar com ${accountManagerName} no WhatsApp`}
-                    >
-                      <WhatsAppIcon />
-                      <span>WhatsApp</span>
-                    </a>
-                  </div>
-                ) : null}
+                <span className="campaignResendMetaValue">{accountManagerName}</span>
+                <a
+                  href={getCampaignReferenceWhatsAppUrl(accountManagerName, {
+                    campanha: displayCampanhaNome || "campanha sem nome",
+                    token,
+                  })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="campaignHeaderWhatsappLink"
+                  aria-label={`Conversar com ${accountManagerName} no WhatsApp`}
+                >
+                  <WhatsAppIcon />
+                  <span>WhatsApp</span>
+                </a>
               </div>
             ) : null}
           </div>
-        </div>
+        ) : null}
+
+        {!showLoadingSkeleton && campaign && heroBudgetPct !== null ? (
+          <div className="campaignResendBudgetBlock">
+            <p className="dspResendHeroBudget">
+              Orçamento <span className="num">{brl(campaign.investido)}</span>
+              <span className="dspResendHeroBudgetSep">·</span>
+              <span className="num">
+                {campaign.pct_investido.toLocaleString("pt-BR", {
+                  maximumFractionDigits: 1,
+                  minimumFractionDigits: 0,
+                })}
+                %
+              </span>{" "}
+              utilizado
+            </p>
+            <div
+              className="campaignResendProgressTrack"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(heroBudgetPct)}
+              aria-label="Percentual do orçamento utilizado"
+            >
+              <div
+                className="campaignResendProgressFill"
+                style={{ width: `${heroBudgetPct}%` }}
+              />
+            </div>
+          </div>
+        ) : null}
+
+        {showLoadingSkeleton ? (
+          <div className="dspResendHeroStats">
+            {Array.from({ length: 3 }).map((_, index) => (
+              <div className="dspResendHeroStat" key={`hero-stat-inline-skeleton-${index}`}>
+                <div className="skeleton skeletonText campaignSkeletonStatLabel" />
+                <div className="skeleton skeletonTitle campaignSkeletonStatValue" />
+                <div className="skeleton skeletonText campaignSkeletonStatHint" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="dspResendHeroStats">
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">Investido (planilha)</span>
+              <span className="dspResendHeroStatValue num">
+                {campaign ? brl(campaign.investido) : "—"}
+              </span>
+              <span className="dspResendHeroStatHint">
+                {campaign
+                  ? `${campaign.pct_investido.toLocaleString("pt-BR", { maximumFractionDigits: 1, minimumFractionDigits: 0 })}% do orçamento`
+                  : "Sem campanha vinculada"}
+              </span>
+            </div>
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">Lines com gasto</span>
+              <span className="dspResendHeroStatValue num">
+                {lineRows.length.toLocaleString("pt-BR")}
+              </span>
+              <span className="dspResendHeroStatHint">
+                {lineRows.length === 0
+                  ? "Sem linhas no período"
+                  : `${brl(totalLinesCost)} consumidos`}
+              </span>
+            </div>
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">Plataformas</span>
+              <span className="dspResendHeroStatValue num">
+                {spendByDsp.length.toLocaleString("pt-BR")}
+              </span>
+              <span className="dspResendHeroStatHint">
+                {leadPlatform
+                  ? `Maior: ${leadPlatform.platform} · ${brl(leadPlatform.gasto)}`
+                  : "Nenhuma com gasto"}
+              </span>
+            </div>
+          </div>
+        )}
+
         {copyStatus ? <p className="campaignCopyStatus">{copyStatus}</p> : null}
       </section>
 
       {error ? (
-        <section className="panel">
+        <section className="panel panelChart panelChartResend">
           <p className="alertError">{error.message}</p>
         </section>
       ) : null}
@@ -556,84 +683,25 @@ export default function CampaignDetailPage() {
       {showLoadingSkeleton ? <CampaignDetailLoadingSkeleton /> : null}
 
       {!showLoadingSkeleton && !isLoading && !error && !lineRows.length ? (
-        <section className="panel">
+        <section className="panel panelChart panelChartResend">
           <p className="alertInfo">Nenhuma line encontrada para este token no período atual.</p>
         </section>
       ) : null}
 
       {lineRows.length ? (
         <>
-          <section className="gridCards campaignKpisGrid">
-            <article className="card platformStatCard campaignKpiCard campaignKpiCardPrimary">
-              <p className="cardValue campaignKpiValue campaignKpiValuePrimary">
-                {brl(campaign?.investido ?? 0)}
-              </p>
-              <p className="cardTitle">Investido (planilha)</p>
-              {campaign ? (
-                <>
-                  <p className="campaignBudgetUtilLabel">
-                    {campaign.pct_investido.toLocaleString("pt-BR", {
-                      maximumFractionDigits: 1,
-                      minimumFractionDigits: 0,
-                    })}
-                    % do orçamento utilizado
-                  </p>
-                  <div
-                    className="campaignProgressTrack"
-                    role="progressbar"
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={Math.round(Math.min(100, Math.max(0, campaign.pct_investido)))}
-                    aria-label="Percentual do orçamento utilizado"
-                  >
-                    <div
-                      className="campaignProgressFill"
-                      style={{
-                        width: `${Math.min(100, Math.max(0, campaign.pct_investido))}%`,
-                      }}
-                    />
-                  </div>
-                </>
-              ) : (
-                <p className="cardSubtitle">Token sem campanha vinculada na planilha</p>
-              )}
-            </article>
-            <article className="card platformStatCard campaignKpiCard campaignKpiCardSecondary">
-              <p className="cardValue campaignKpiValue campaignKpiValueSecondary">{brl(totalLinesCost)}</p>
-              <p className="cardTitle">Linhas com gasto</p>
-              <p className="cardSubtitle">
-                {lineRows.length === 1
-                  ? "1 linha com investimento"
-                  : `${lineRows.length.toLocaleString("pt-BR")} linhas com investimento`}
-              </p>
-            </article>
-            <article className="card platformStatCard campaignKpiCard campaignKpiCardSecondary">
-              <p className="cardValue campaignKpiValue campaignKpiValueSecondary">
-                {spendByDsp.length.toLocaleString("pt-BR")}
-              </p>
-              <p className="cardTitle">Plataformas ativas</p>
-              {spendByDsp[0] ? (
-                <div className="campaignDspLeadBlock">
-                  <p className="campaignDspLeadLabel">Maior</p>
-                  <p className="campaignDspLeadPlatform">{spendByDsp[0].platform}</p>
-                  <p className="campaignDspLeadAmount">{brl(spendByDsp[0].gasto)}</p>
-                </div>
-              ) : (
-                <p className="cardSubtitle">Nenhuma plataforma com gasto no período</p>
-              )}
-            </article>
-          </section>
-
-          <section className="gridTwo gridTwoCharts campaignChartsGrid">
-            <article className="panel panelChart">
+          <section className="gridTwo gridTwoCharts gridTwoChartsHome">
+            <div className="panel panelChart panelChartResend" ref={spendByDspBarChartRef}>
               <div className="chartBlockHeading">
                 <div className="chartBlockHeadingTop">
                   <h2 className="chartBlockTitle">Gasto por plataforma</h2>
-                  <div className="chartBlockExport" role="group" aria-label="Exportar gasto por plataforma">
+                  <div className="chartBlockHeadingActions">
                     <button
                       type="button"
-                      className="button buttonGhost buttonSmall chartExportButton"
+                      className="chartIconButton"
                       aria-label="Copiar gasto por plataforma como CSV"
+                      title="Exportar CSV"
+                      data-html2canvas-ignore="true"
                       onClick={() =>
                         void copyObjectsAsCsv(
                           "gasto por plataforma",
@@ -648,18 +716,17 @@ export default function CampaignDetailPage() {
                         )
                       }
                     >
-                      <span className="buttonLabelWithIcon">
-                        <DownloadIcon />
-                        CSV
-                      </span>
+                      <DownloadIcon />
                     </button>
                     <button
                       type="button"
-                      className="button buttonGhost buttonSmall chartExportButton"
-                      aria-label="Exportar gráfico de gasto por plataforma como PNG"
+                      className="chartIconButton"
+                      aria-label="Baixar gasto por plataforma como PNG"
+                      title="Exportar PNG"
+                      data-html2canvas-ignore="true"
                       onClick={() => void exportChartAsPng(spendByDspBarChartRef.current, "gasto por plataforma")}
                     >
-                      PNG
+                      <DownloadIcon />
                     </button>
                   </div>
                 </div>
@@ -668,88 +735,32 @@ export default function CampaignDetailPage() {
               {!campaignPlatformChartData.length ? (
                 <p className="alertInfo">Sem dados de plataforma neste token.</p>
               ) : (
-                <div ref={spendByDspBarChartRef} className="campaignChartBody">
-                  <div
-                    className="chartWrap"
-                    role="img"
-                    aria-label={`Gasto por plataforma em valores absolutos (reais), token ${token}`}
-                  >
-                    <ResponsiveContainer width="100%" height={260}>
-                      <BarChart
-                        data={campaignBarChartData}
-                        layout="vertical"
-                        margin={{ top: 6, right: 58, bottom: 6, left: 2 }}
-                      >
-                        <CartesianGrid
-                          vertical
-                          horizontal={false}
-                          stroke="rgba(148, 163, 184, 0.07)"
-                          strokeDasharray="2 10"
-                        />
-                        <XAxis
-                          type="number"
-                          stroke="rgba(148, 163, 184, 0.28)"
-                          tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
-                          tickFormatter={formatCurrencyAxisTick}
-                          tickCount={4}
-                          tickLine={false}
-                          axisLine={false}
-                        />
-                        <YAxis
-                          type="category"
-                          dataKey="platform"
-                          stroke="#cbd5e1"
-                          width={140}
-                          tickLine={false}
-                          axisLine={false}
-                          tick={<PlatformYAxisTick />}
-                        />
-                        <Tooltip
-                          shared
-                          content={<NumberTooltip totalValue={totalLinesCost} />}
-                          cursor={{ fill: "rgba(15, 23, 42, 0.28)", stroke: "none" }}
-                          offset={{ x: 18, y: 4 }}
-                          allowEscapeViewBox={{ x: false, y: true }}
-                          animationDuration={120}
-                        />
-                        <Bar
-                          dataKey="spend_brl"
-                          name="Gasto"
-                          barSize={20}
-                          radius={[0, 10, 10, 0]}
-                          label={{
-                            position: "right",
-                            fill: "#e2e8f0",
-                            fontSize: 11,
-                            fontWeight: 650,
-                            formatter: (label) => {
-                              const raw = Array.isArray(label) ? label[label.length - 1] : label;
-                              const n = typeof raw === "number" ? raw : Number(raw);
-                              return Number.isFinite(n) ? formatCurrencyAxisTick(n) : "";
-                            },
-                          }}
-                        >
-                          {campaignBarChartData.map((entry) => {
-                            const fill = entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b";
-                            return <Cell key={entry.platform} fill={fill} />;
-                          })}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
+                <div
+                  className="chartWrap chartWrapHbars"
+                  role="img"
+                  aria-label={`Gasto por plataforma em valores absolutos (reais), token ${token}`}
+                >
+                  <ResendHbars
+                    data={campaignBarChartData}
+                    total={totalLinesCost}
+                    highlight={distributionHighlightPlatform}
+                    onHighlight={setDistributionHighlightPlatform}
+                  />
                 </div>
               )}
-            </article>
+            </div>
 
-            <article className="panel panelChart">
+            <div className="panel panelChart panelChartResend" ref={spendByDspPieChartRef}>
               <div className="chartBlockHeading">
                 <div className="chartBlockHeadingTop">
                   <h2 className="chartBlockTitle">Distribuição</h2>
-                  <div className="chartBlockExport" role="group" aria-label="Exportar distribuição de investimento">
+                  <div className="chartBlockHeadingActions">
                     <button
                       type="button"
-                      className="button buttonGhost buttonSmall chartExportButton"
+                      className="chartIconButton"
                       aria-label="Copiar distribuição de investimento como CSV"
+                      title="Exportar CSV"
+                      data-html2canvas-ignore="true"
                       onClick={() =>
                         void copyObjectsAsCsv(
                           "distribuição de investimento",
@@ -764,18 +775,17 @@ export default function CampaignDetailPage() {
                         )
                       }
                     >
-                      <span className="buttonLabelWithIcon">
-                        <DownloadIcon />
-                        CSV
-                      </span>
+                      <DownloadIcon />
                     </button>
                     <button
                       type="button"
-                      className="button buttonGhost buttonSmall chartExportButton"
-                      aria-label="Exportar gráfico de distribuição como PNG"
+                      className="chartIconButton"
+                      aria-label="Baixar distribuição como PNG"
+                      title="Exportar PNG"
+                      data-html2canvas-ignore="true"
                       onClick={() => void exportChartAsPng(spendByDspPieChartRef.current, "distribuição de investimento")}
                     >
-                      PNG
+                      <DownloadIcon />
                     </button>
                   </div>
                 </div>
@@ -783,167 +793,76 @@ export default function CampaignDetailPage() {
               </div>
               {!campaignPlatformChartData.length ? (
                 <p className="alertInfo">Sem dados de plataforma neste token.</p>
-              ) : shouldFallbackCampaignPie ? (
-                <div ref={spendByDspPieChartRef} className="campaignChartBody">
-                  <div className="chartFallback">
-                    <p className="chartFallbackTitle">Distribuição muito concentrada para donut.</p>
-                    <p className="chartFallbackSubtitle">Mostrando proporções em barras para leitura mais clara.</p>
-                    <div className="chartFallbackList">
-                      {campaignPlatformChartData.map((entry, idx) => {
-                        const pct = totalLinesCost > 0 ? (entry.spend_brl / totalLinesCost) * 100 : 0;
-                        const isDominant = idx === 0;
-                        const isHi =
-                          distributionHighlightPlatform !== null &&
-                          distributionHighlightPlatform === entry.platform;
-                        const dim =
-                          distributionHighlightPlatform !== null &&
-                          distributionHighlightPlatform !== entry.platform;
-                        return (
-                          <div
-                            key={entry.platform}
-                            className={`chartFallbackItem${isDominant ? " chartFallbackItemDominant" : ""}${isHi ? " chartFallbackItemHighlight" : ""}`}
-                            onMouseEnter={() => setDistributionHighlightPlatform(entry.platform)}
-                            onMouseLeave={() => setDistributionHighlightPlatform(null)}
-                            style={{ opacity: dim ? 0.35 : 1 }}
-                          >
-                            <div className="chartFallbackItemHeader">
-                              <span>{entry.platform}</span>
-                              <span>{pct.toFixed(1)}%</span>
-                            </div>
-                            <div className="chartFallbackBarTrack">
-                              <div
-                                className="chartFallbackBarFill"
-                                style={{
-                                  width: `${Math.min(100, Math.max(0, pct))}%`,
-                                  backgroundColor: entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b",
-                                }}
-                              />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
               ) : (
-                <div ref={spendByDspPieChartRef} className="campaignChartBody">
-                  <div
-                    className="chartDistributionSplit"
-                    role="img"
-                    aria-label={`Distribuição percentual do gasto por plataforma, token ${token}`}
-                  >
-                    <div className="chartDistributionPie">
-                      <ResponsiveContainer width="100%" height={260}>
-                        <PieChart>
-                          <Pie
-                            data={campaignPlatformChartData}
-                            dataKey="spend_brl"
-                            nameKey="platform"
-                            innerRadius={66}
-                            outerRadius={102}
-                            paddingAngle={2}
-                            stroke="rgba(28, 38, 47, 0.9)"
-                            strokeWidth={2}
-                            label={false}
-                            onMouseEnter={(_entry, index) => {
-                              const row = campaignPlatformChartData[index];
-                              if (row?.platform) setDistributionHighlightPlatform(row.platform);
-                            }}
-                            onMouseLeave={() => setDistributionHighlightPlatform(null)}
-                          >
-                            {campaignPlatformChartData.map((entry) => {
-                              const fill = entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b";
-                              const dim =
-                                distributionHighlightPlatform !== null &&
-                                distributionHighlightPlatform !== entry.platform;
-                              return (
-                                <Cell
-                                  key={entry.platform}
-                                  fill={fill}
-                                  fillOpacity={dim ? 0.3 : 1}
-                                  stroke={dim ? "rgba(28, 38, 47, 0.35)" : "rgba(28, 38, 47, 0.9)"}
+                <div
+                  className="chartWrap"
+                  role="img"
+                  aria-label={`Distribuição percentual do gasto por plataforma, token ${token}`}
+                >
+                  {shouldFallbackCampaignPie ? (
+                    <div className="chartFallback">
+                      <p className="chartFallbackTitle">Distribuição muito concentrada para donut.</p>
+                      <p className="chartFallbackSubtitle">Mostrando proporções em barras para leitura mais clara.</p>
+                      <div className="chartFallbackList">
+                        {campaignPlatformChartData.map((entry, idx) => {
+                          const pct = totalLinesCost > 0 ? (entry.spend_brl / totalLinesCost) * 100 : 0;
+                          const isDominant = idx === 0;
+                          const isHi =
+                            distributionHighlightPlatform !== null &&
+                            distributionHighlightPlatform === entry.platform;
+                          const dim =
+                            distributionHighlightPlatform !== null &&
+                            distributionHighlightPlatform !== entry.platform;
+                          return (
+                            <div
+                              key={entry.platform}
+                              className={`chartFallbackItem${isDominant ? " chartFallbackItemDominant" : ""}${isHi ? " chartFallbackItemHighlight" : ""}`}
+                              onMouseEnter={() => setDistributionHighlightPlatform(entry.platform)}
+                              onMouseLeave={() => setDistributionHighlightPlatform(null)}
+                              style={{ opacity: dim ? 0.35 : 1 }}
+                            >
+                              <div className="chartFallbackItemHeader">
+                                <span>{entry.platform}</span>
+                                <span>{pct.toFixed(1)}%</span>
+                              </div>
+                              <div className="chartFallbackBarTrack">
+                                <div
+                                  className="chartFallbackBarFill"
+                                  style={{
+                                    width: `${Math.min(100, Math.max(0, pct))}%`,
+                                    backgroundColor: entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b",
+                                  }}
                                 />
-                              );
-                            })}
-                          </Pie>
-                          <text
-                            x="50%"
-                            y="39%"
-                            textAnchor="middle"
-                            dominantBaseline="middle"
-                            className="chartDonutInvestidoLabel"
-                          >
-                            Total
-                          </text>
-                          <text
-                            x="50%"
-                            y="46%"
-                            textAnchor="middle"
-                            dominantBaseline="middle"
-                            className="chartDonutInvestidoLabel"
-                          >
-                            investido
-                          </text>
-                          <text
-                            x="50%"
-                            y="58%"
-                            textAnchor="middle"
-                            dominantBaseline="middle"
-                            className="chartDonutInvestidoValue"
-                          >
-                            {formatDonutCenterValue(totalLinesCost)}
-                          </text>
-                          <Tooltip content={<NumberTooltip totalValue={totalLinesCost} />} />
-                        </PieChart>
-                      </ResponsiveContainer>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
-                    <aside className="chartDistributionPctList" aria-label="Percentual por plataforma">
-                      {campaignPlatformChartData.map((entry, idx) => {
-                        const pct = totalLinesCost > 0 ? (entry.spend_brl / totalLinesCost) * 100 : 0;
-                        const isDominant = idx === 0;
-                        const isHi =
-                          distributionHighlightPlatform !== null &&
-                          distributionHighlightPlatform === entry.platform;
-                        const dim =
-                          distributionHighlightPlatform !== null &&
-                          distributionHighlightPlatform !== entry.platform;
-                        const fill = entry.color ?? PLATFORM_COLORS[entry.platform] ?? "#64748b";
-                        return (
-                          <div
-                            key={entry.platform}
-                            className={`chartDistributionPctRow${isDominant ? " chartDistributionPctRowDominant" : ""}${isHi ? " chartDistributionPctRowHighlight" : ""}`}
-                            onMouseEnter={() => setDistributionHighlightPlatform(entry.platform)}
-                            onMouseLeave={() => setDistributionHighlightPlatform(null)}
-                            style={{ opacity: dim ? 0.38 : 1 }}
-                          >
-                            <span className="chartDistributionPctName">
-                              <span
-                                className="chartDistributionPctSwatch"
-                                style={{ backgroundColor: fill }}
-                                aria-hidden
-                              />
-                              {entry.platform}
-                            </span>
-                            <span className="chartDistributionPctValue">{pct.toFixed(1)}%</span>
-                          </div>
-                        );
-                      })}
-                    </aside>
-                  </div>
+                  ) : (
+                    <ResendDonut
+                      data={campaignPlatformChartData}
+                      total={totalLinesCost}
+                      highlight={distributionHighlightPlatform}
+                      onHighlight={setDistributionHighlightPlatform}
+                    />
+                  )}
                 </div>
               )}
-            </article>
+            </div>
           </section>
 
-          <section className="panel panelChart campaignLinesPanel">
+          <section className="panel panelChart panelChartResend" ref={topLinesChartRef}>
             <div className="chartBlockHeading">
               <div className="chartBlockHeadingTop">
                 <h2 className="chartBlockTitle">Top lines por gasto</h2>
-                <div className="chartBlockExport" role="group" aria-label="Exportar top lines por gasto">
+                <div className="chartBlockHeadingActions">
                   <button
                     type="button"
-                    className="button buttonGhost buttonSmall chartExportButton"
+                    className="chartIconButton"
                     aria-label="Copiar top lines por gasto como CSV"
+                    title="Exportar CSV"
+                    data-html2canvas-ignore="true"
                     onClick={() =>
                       void copyObjectsAsCsv(
                         "top lines por gasto",
@@ -955,18 +874,17 @@ export default function CampaignDetailPage() {
                       )
                     }
                   >
-                    <span className="buttonLabelWithIcon">
-                      <DownloadIcon />
-                      CSV
-                    </span>
+                    <DownloadIcon />
                   </button>
                   <button
                     type="button"
-                    className="button buttonGhost buttonSmall chartExportButton"
-                    aria-label="Exportar gráfico top lines por gasto como PNG"
+                    className="chartIconButton"
+                    aria-label="Baixar top lines por gasto como PNG"
+                    title="Exportar PNG"
+                    data-html2canvas-ignore="true"
                     onClick={() => void exportChartAsPng(topLinesChartRef.current, "top lines por gasto")}
                   >
-                    PNG
+                    <DownloadIcon />
                   </button>
                 </div>
               </div>
@@ -975,7 +893,7 @@ export default function CampaignDetailPage() {
                 {lineRows.length > chartData.length ? ` de ${lineRows.length.toLocaleString("pt-BR")}` : ""}
               </p>
             </div>
-            <div ref={topLinesChartRef}>
+            <div>
               <div className="campaignLinesLegend">
                 <PlatformLegend
                   payload={spendByDsp.map((entry) => ({
@@ -1067,15 +985,36 @@ export default function CampaignDetailPage() {
           </section>
 
           {timelineData.length ? (
-            <section className="panel panelChart">
-              <div className="chartBlockHeading">
+            <section
+              className="panel panelChart panelChartResend panelChartResendDaily"
+              ref={timelineChartRef}
+            >
+              <div className="chartBlockHeading dailyChartHeading">
                 <div className="chartBlockHeadingTop">
                   <h2 className="chartBlockTitle">Tempo de investimento por DSP</h2>
-                  <div className="chartBlockExport" role="group" aria-label="Exportar tempo de investimento por DSP">
+                  <div className="dailyChartHeaderRight">
+                    <ul className="dailyChartLegendStrip" aria-hidden>
+                      {campaignTimelinePlatforms.map((platform) => (
+                        <li key={platform} className="dailyChartLegendStripItem">
+                          <span
+                            className="dailyChartLegendStripSwatch"
+                            style={{
+                              background:
+                                RESEND_CHART_COLORS[platform] ??
+                                PLATFORM_COLORS[platform] ??
+                                "#A1A1A1",
+                            }}
+                          />
+                          <span>{platform}</span>
+                        </li>
+                      ))}
+                    </ul>
                     <button
                       type="button"
-                      className="button buttonGhost buttonSmall chartExportButton"
+                      className="chartIconButton"
                       aria-label="Copiar tempo de investimento por DSP como CSV"
+                      title="Exportar CSV"
+                      data-html2canvas-ignore="true"
                       onClick={() =>
                         void copyObjectsAsCsv(
                           "tempo de investimento por DSP",
@@ -1092,133 +1031,103 @@ export default function CampaignDetailPage() {
                         )
                       }
                     >
-                      <span className="buttonLabelWithIcon">
-                        <DownloadIcon />
-                        CSV
-                      </span>
+                      <DownloadIcon />
                     </button>
                     <button
                       type="button"
-                      className="button buttonGhost buttonSmall chartExportButton"
-                      aria-label="Exportar gráfico tempo de investimento por DSP como PNG"
+                      className="chartIconButton"
+                      aria-label="Baixar tempo de investimento por DSP como PNG"
+                      title="Exportar PNG"
+                      data-html2canvas-ignore="true"
                       onClick={() => void exportChartAsPng(timelineChartRef.current, "tempo de investimento por DSP")}
                     >
-                      PNG
+                      <DownloadIcon />
                     </button>
                   </div>
                 </div>
-                <p className="chartBlockSubtitle">Evolução diária agregada no período disponível</p>
-              </div>
-              <div ref={timelineChartRef}>
-                <div className="chartWrap chartWrapTall">
-                  <ResponsiveContainer width="100%" height={300}>
-                    <LineChart data={timelineData}>
-                      <CartesianGrid
-                        vertical
-                        horizontal={false}
-                        stroke="rgba(148, 163, 184, 0.07)"
-                        strokeDasharray="2 10"
-                      />
-                      <XAxis
-                        dataKey="date"
-                        stroke="rgba(148, 163, 184, 0.28)"
-                        tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
-                        tickFormatter={(value) => formatDateBr(String(value))}
-                        tickCount={6}
-                        tickLine={false}
-                        axisLine={false}
-                      />
-                      <YAxis
-                        stroke="rgba(148, 163, 184, 0.28)"
-                        tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
-                        tickFormatter={formatCurrencyAxisTick}
-                        tickCount={4}
-                        tickLine={false}
-                        axisLine={false}
-                      />
-                      <Tooltip
-                        shared
-                        content={<NumberTooltip labelFormatter={(label) => formatDateBr(String(label))} />}
-                        cursor={{ fill: "rgba(15, 23, 42, 0.28)", stroke: "none" }}
-                        offset={{ x: 18, y: 4 }}
-                        allowEscapeViewBox={{ x: false, y: true }}
-                        animationDuration={120}
-                      />
-                      <Legend
-                        content={
-                          <DailyCostLegend
-                            entries={timelineLegendPayload}
-                            activeKeys={campaignTimelineEffectiveFocusedSeries}
-                            onToggle={(seriesKey) =>
-                              setCampaignTimelineFocusedSeries((current) =>
-                                current.includes(seriesKey)
-                                  ? current.filter((value) => value !== seriesKey)
-                                  : [...current, seriesKey]
-                              )
-                            }
-                          />
-                        }
-                      />
-                      {spendByDsp.map((platformItem) => {
-                        if (
-                          campaignTimelineEffectiveFocusedSeries.length > 0 &&
-                          !campaignTimelineEffectiveFocusedSeries.includes(platformItem.platform)
-                        ) {
-                          return null;
-                        }
-                        return (
-                          <Line
-                            key={`line-${platformItem.platform}`}
-                            type="monotone"
-                            dataKey={platformItem.platform}
-                            stroke={platformItem.color}
-                            strokeWidth={2.5}
-                            dot={false}
-                            activeDot={{ r: 5, strokeWidth: 2, stroke: "#1c262f" }}
-                          />
-                        );
-                      })}
-                      {campaignTimelineEffectiveFocusedSeries.length === 0 ||
-                      campaignTimelineEffectiveFocusedSeries.includes("total") ? (
-                        <Line
-                          type="monotone"
-                          dataKey="total"
-                          stroke="#e2e8f0"
-                          strokeWidth={2.5}
-                          strokeDasharray="4 4"
-                          dot={false}
-                          activeDot={{ r: 5, strokeWidth: 2, stroke: "#1c262f" }}
-                        />
-                      ) : null}
-                    </LineChart>
-                  </ResponsiveContainer>
+                <div className="dailyChartHeaderBottom">
+                  <p className="chartBlockSubtitle">Evolução diária agregada no período disponível</p>
+                  {campaignTimelinePlatforms.length ? (
+                    <div
+                      className="dailyChartSegmented"
+                      role="tablist"
+                      aria-label="Filtro de plataformas"
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={campaignTimelineEffectiveFocus === null}
+                        className={`dailyChartSegmentedItem${campaignTimelineEffectiveFocus === null ? " is-active" : ""}`}
+                        onClick={() => setCampaignTimelineFocus(null)}
+                      >
+                        Tudo
+                      </button>
+                      {campaignTimelinePlatforms.map((platform) => (
+                        <button
+                          key={platform}
+                          type="button"
+                          role="tab"
+                          aria-selected={campaignTimelineEffectiveFocus === platform}
+                          className={`dailyChartSegmentedItem${campaignTimelineEffectiveFocus === platform ? " is-active" : ""}`}
+                          onClick={() => setCampaignTimelineFocus(platform)}
+                        >
+                          {platform}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               </div>
+              {!hasCampaignTimelineVariation ? (
+                <p className="alertInfo">Sem variação diária neste período.</p>
+              ) : (
+                <div
+                  className="dailyChartContainer"
+                  role="img"
+                  aria-label={`Evolução diária do gasto por plataforma, token ${token}`}
+                >
+                  <ResendDailyLine
+                    rows={timelineData}
+                    platforms={campaignTimelinePlatforms}
+                    focused={campaignTimelineEffectiveFocus}
+                    todayIso={new Date().toISOString().slice(0, 10)}
+                  />
+                </div>
+              )}
             </section>
           ) : null}
 
-          <section className="panel panelChart">
-            <div className="panelHeading">
-              <h2>Gastos por DSP</h2>
-              <p>Tabela consolidada por plataforma</p>
-            </div>
+          <section className="journeyResendCard dspResendLinesCard">
+            <header className="journeyResendHeader">
+              <div className="journeyResendHeaderTitle">
+                <h2>Gastos por DSP</h2>
+                <p className="journeyResendHeaderSubtitle">
+                  <span className="num">{spendByDsp.length.toLocaleString("pt-BR")}</span>{" "}
+                  {spendByDsp.length === 1 ? "plataforma" : "plataformas"}
+                  <span className="journeyResendSep" aria-hidden="true">·</span>
+                  <span className="num">{brl(totalLinesCost)}</span> consolidado
+                </p>
+              </div>
+            </header>
             <div className="tableWrap">
-              <table className="campaignDataTable">
+              <table className="campaignJourneyTable dspResendLinesTable campaignDspTable">
                 <thead>
                   <tr>
                     <th>DSP</th>
-                    <th>Gasto</th>
-                    <th>Lines</th>
-                    <th>% do total</th>
+                    <th className="stackThFinancial stackThNumeric">Gasto</th>
+                    <th className="stackThNumeric">Lines</th>
+                    <th className="stackThNumeric">% do total</th>
                   </tr>
                 </thead>
                 <tbody>
                   {spendByDsp.map((row) => (
-                    <tr key={`dsp-row-${row.platform}`}>
+                    <tr key={`dsp-row-${row.platform}`} className="campaignJourneyRow">
                       <td>{row.platform}</td>
-                      <td>{brl(row.gasto)}</td>
-                      <td>{row.lines.toLocaleString("pt-BR")}</td>
-                      <td>{totalLinesCost > 0 ? `${((row.gasto / totalLinesCost) * 100).toFixed(1)}%` : "0.0%"}</td>
+                      <td className="stackNumericCellRight stackNumericCellFinancial">{brl(row.gasto)}</td>
+                      <td className="stackNumericCellRight">{row.lines.toLocaleString("pt-BR")}</td>
+                      <td className="stackNumericCellRight">
+                        {totalLinesCost > 0 ? `${((row.gasto / totalLinesCost) * 100).toFixed(1)}%` : "0.0%"}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1226,39 +1135,28 @@ export default function CampaignDetailPage() {
             </div>
           </section>
 
-          <section className="panel panelChart">
-            <div className="stackDetailHeader">
-              <div>
-                <h2 className="chartBlockTitle">Todas as lines</h2>
-                <p className="chartBlockSubtitle">Padrão de leitura alinhado com a tabela de DSP</p>
+          <section className="journeyResendCard dspResendLinesCard">
+            <header className="journeyResendHeader">
+              <div className="journeyResendHeaderTitle">
+                <h2>Todas as lines</h2>
+                <p className="journeyResendHeaderSubtitle">
+                  <span className="num">{sortedCampaignLineRows.length.toLocaleString("pt-BR")}</span>{" "}
+                  {sortedCampaignLineRows.length === 1 ? "linha" : "linhas"}
+                  {allLinesSearchNormalized ? (
+                    <>
+                      <span className="journeyResendSep" aria-hidden="true">·</span>
+                      filtradas de {lineRows.length.toLocaleString("pt-BR")}
+                    </>
+                  ) : null}
+                  <span className="journeyResendSep" aria-hidden="true">·</span>
+                  <span className="num">{brl(filteredLinesTotal)}</span>{" "}
+                  no filtro
+                </p>
               </div>
-              <div className="stackDetailHeaderActions stackDetailHeaderActionsColumn">
-                <div className="tableTopActions">
-                  <button
-                    type="button"
-                    className="button buttonGhost buttonSmall"
-                    onClick={() =>
-                      void copyObjectsAsCsv(
-                        "todas as lines",
-                        sortedCampaignLineRows.map((row) => ({
-                          DSP: row.platform,
-                          Line: row.line,
-                          Gasto: row.gasto,
-                          "Pct do total":
-                            totalLinesCost > 0 ? Number(((row.gasto / totalLinesCost) * 100).toFixed(2)) : 0,
-                        }))
-                      )
-                    }
-                  >
-                    <span className="buttonLabelWithIcon">
-                      <DownloadIcon />
-                      CSV
-                    </span>
-                  </button>
-                </div>
-                <div className="stackDetailFilterInline">
+              <div className="journeyResendHeaderActions">
+                <div className="dspResendSearch">
+                  <SearchIcon />
                   <input
-                    className="stackSearchInput"
                     type="search"
                     value={allLinesSearch}
                     onChange={(event) => setAllLinesSearch(event.target.value)}
@@ -1266,23 +1164,37 @@ export default function CampaignDetailPage() {
                     aria-label="Buscar lines por nome"
                   />
                 </div>
+                <button
+                  type="button"
+                  className="journeyResendHeaderIconBtn"
+                  onClick={() =>
+                    void copyObjectsAsCsv(
+                      "todas as lines",
+                      sortedCampaignLineRows.map((row) => ({
+                        DSP: row.platform,
+                        Line: row.line,
+                        Gasto: row.gasto,
+                        "Pct do total":
+                          totalLinesCost > 0 ? Number(((row.gasto / totalLinesCost) * 100).toFixed(2)) : 0,
+                      }))
+                    )
+                  }
+                  title="Exportar CSV"
+                  aria-label="Exportar CSV"
+                >
+                  <DownloadIcon />
+                </button>
               </div>
-            </div>
-            <p className="stackDetailCounter">
-              {sortedCampaignLineRows.length.toLocaleString("pt-BR")} line(s)
-              {allLinesSearchNormalized
-                ? ` • filtradas de ${lineRows.length.toLocaleString("pt-BR")}`
-                : ""}
-            </p>
+            </header>
             {!sortedCampaignLineRows.length ? (
-              <p className="alertInfo">
+              <p className="alertInfo campaignLinesEmpty">
                 {allLinesSearchNormalized
                   ? "Nenhuma line corresponde à busca."
                   : "Nenhuma line neste período."}
               </p>
             ) : (
               <div className="tableWrap">
-                <table className="campaignDataTable">
+                <table className="campaignJourneyTable dspResendLinesTable campaignAllLinesTable">
                   <thead>
                     <tr>
                       <th className={allLinesSort.key === "platform" ? "stackThSorted" : undefined}>
@@ -1339,30 +1251,33 @@ export default function CampaignDetailPage() {
                   </thead>
                   <tbody>
                     {sortedCampaignLineRows.map((row, index) => (
-                      <tr key={`${row.platform}-${row.line}-${row.cliente}-${row.campanha}-${index}`}>
+                      <tr
+                        key={`${row.platform}-${row.line}-${row.cliente}-${row.campanha}-${index}`}
+                        className="campaignJourneyRow"
+                      >
                         <td>{row.platform}</td>
-                        <td className="campaignLineCell">
-                          <div className="copyCell">
+                        <td className="campaignLineCell dspResendLineCell">
+                          <div className="copyCell dspResendLineCellInner">
+                            <span className="dspResendLineText">{row.line}</span>
                             <button
                               type="button"
-                              className="copyIconButton"
+                              className="copyIconButton dspResendLineCopy"
                               aria-label={`Copiar line ${row.line}`}
                               onClick={() => void copyToClipboard(row.line, "Line")}
                             >
-                              {"\u29c9"}
+                              {"⧉"}
                             </button>
-                            <span>{row.line}</span>
                           </div>
                         </td>
-                        <td className="stackNumericCellRight">{brl(row.gasto)}</td>
+                        <td className="stackNumericCellRight stackNumericCellFinancial">{brl(row.gasto)}</td>
                         <td className="stackNumericCellRight">
                           {totalLinesCost > 0 ? `${((row.gasto / totalLinesCost) * 100).toFixed(1)}%` : "0.0%"}
                         </td>
                       </tr>
                     ))}
-                </tbody>
-              </table>
-            </div>
+                  </tbody>
+                </table>
+              </div>
             )}
           </section>
         </>

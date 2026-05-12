@@ -26,5 +26,5 @@ export type CampaignJourneySortKey =
   | "campaign_end"
   | `platform:${string}`;
 
-export type AnalysisViewMode = "month" | "year";
+export type AnalysisViewMode = "day" | "week" | "month" | "year";
 export type RefreshPhase = "idle" | "starting" | "running" | "success" | "error";

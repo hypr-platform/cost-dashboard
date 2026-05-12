@@ -470,7 +470,16 @@ Timeouts:
 - `DASHBOARD_INTEGRATION_TIMEOUT_SECONDS=45`: limite para integracoes rapidas e fontes auxiliares.
 - `DV360_REPORT_POLL_TIMEOUT_SECONDS=240`: limite interno esperando o relatorio assíncrono da DV360 ficar pronto.
 - `DASHBOARD_DV360_TIMEOUT_SECONDS=240`: limite dedicado para a integracao DV360 inteira.
+- `XANDR_REPORT_POLL_TIMEOUT_SECONDS=90`: limite interno esperando o relatorio assíncrono da Xandr ficar pronto.
+- `DASHBOARD_XANDR_TIMEOUT_SECONDS=150`: limite dedicado para a integracao Xandr inteira.
 - O cliente do frontend busca `/api/dashboard` com timeout de 15s, mas o botao de atualizacao manual nao espera o payload completo; ele dispara um job assincrono.
+
+Para Xandr em producao, mantenha o timeout do dashboard maior que o poll interno:
+
+```env
+XANDR_REPORT_POLL_TIMEOUT_SECONDS=120
+DASHBOARD_XANDR_TIMEOUT_SECONDS=180
+```
 
 Quando a DV360 estiver demorando para gerar relatorios, aumente os dois limites mantendo `DASHBOARD_DV360_TIMEOUT_SECONDS` maior que `DV360_REPORT_POLL_TIMEOUT_SECONDS`. Exemplo recomendado para dar ate 8 min ao relatorio e 10 min ao fluxo completo:
 
@@ -576,6 +585,8 @@ Referencias completas em `.env.example`.
 - `DASHBOARD_INTEGRATION_TIMEOUT_SECONDS`
 - `DASHBOARD_DV360_TIMEOUT_SECONDS`
 - `DV360_REPORT_POLL_TIMEOUT_SECONDS`
+- `DASHBOARD_XANDR_TIMEOUT_SECONDS`
+- `XANDR_REPORT_POLL_TIMEOUT_SECONDS`
 - `DASHBOARD_FAST_WORKER_INTERVAL_SECONDS`
 - `DASHBOARD_DV360_WORKER_INTERVAL_SECONDS`
 

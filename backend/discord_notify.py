@@ -156,6 +156,59 @@ def notify_dashboard_partial_errors(
     _post_embed(title="Cost Dashboard — integrações com erro", description=desc)
 
 
+def notify_claude_ingestion_failed(
+    *,
+    run_id: str,
+    trigger: str,
+    period_start: date,
+    period_end: date,
+    error_message: str,
+    duration_seconds: float,
+    next_run_hint: str = "amanhã 06:00 UTC",
+) -> None:
+    if not webhook_configured():
+        return
+    period = f"{period_start.isoformat()} → {period_end.isoformat()}"
+    truncated = (error_message or "").strip()[:1000]
+    desc = (
+        f"**Run ID:** `{run_id}`\n"
+        f"**Trigger:** `{trigger}`\n"
+        f"**Período:** {period}\n"
+        f"**Duração:** {duration_seconds:.1f}s\n"
+        f"**Próxima execução:** {next_run_hint}\n\n"
+        f"```{truncated}```"
+    )
+    _post_embed(
+        title="🚨 Falha na ingestão de custo do Claude",
+        description=desc,
+    )
+
+
+def notify_claude_ingestion_partial(
+    *,
+    run_id: str,
+    trigger: str,
+    period_start: date,
+    period_end: date,
+    warning_message: str,
+) -> None:
+    if not webhook_configured():
+        return
+    period = f"{period_start.isoformat()} → {period_end.isoformat()}"
+    truncated = (warning_message or "").strip()[:1000]
+    desc = (
+        f"**Run ID:** `{run_id}`\n"
+        f"**Trigger:** `{trigger}`\n"
+        f"**Período:** {period}\n\n"
+        f"```{truncated}```"
+    )
+    _post_embed(
+        title="⚠️ Ingestão de custo do Claude terminou parcial",
+        description=desc,
+        color=15844367,
+    )
+
+
 def maybe_notify_partial_after_refresh(
     *,
     trigger: str,

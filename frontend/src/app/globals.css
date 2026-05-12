@@ -11,12 +11,27 @@
   --brand-support-teal: #018376;
   --brand-support-violet: #4e1e9c;
 
-  /* App theme (dark) */
-  --bg: #020a16;
-  --panel: #24313c;
-  --surface: #1e2a33;
-  --surface-raised: #26303a;
-  --border: rgba(83, 104, 114, 0.55);
+  /* App theme (dark — Resend-style flat black) */
+  --bg: #0a0a0a;
+  --panel: #0a0a0a;
+  --surface: #0a0a0a;
+  --surface-raised: #111111;
+  --border: rgba(255, 255, 255, 0.06);
+
+  /* Design system tokens */
+  --bg-app: #0a0a0a;
+  --bg-surface: #0f0f0f;
+  --bg-hover: #161616;
+  --fg-primary: #ededed;
+  --fg-secondary: #a1a1a1;
+  --fg-tertiary: #6b6b6b;
+  --line: rgba(255, 255, 255, 0.06);
+  --amber: #f5a623;
+  --red: #f87171;
+  --green: #4ade80;
+  --fg-quaternary: #404040;
+  --line-strong: rgba(255, 255, 255, 0.1);
+  --bg-elev: #141414;
   --muted: #a8b8c0;
   --text: var(--brand-paper);
 
@@ -58,4 +73,7 @@ body {
 
 body {
   font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg-primary);
 }

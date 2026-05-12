@@ -30,13 +30,9 @@ import type {
 import {
   brl,
   BRL_INTEGER_FORMATTER,
-  DailyCostLegend,
-  formatCurrencyAxisTick,
   formatDonutCenterValue,
   NumberTooltip,
   PlatformLegend,
-  PlatformYAxisTick,
-  type PlatformLegendEntry,
 } from "@/shared/charts/homeRecharts";
 import { PLATFORM_COLORS, PLATFORM_LOGOS } from "@/shared/constants/platform";
 import {
@@ -47,6 +43,21 @@ import {
   getAccountManagerAvatar,
   getAccountManagerWhatsAppNumber,
 } from "@/shared/utils/accountManagers";
+import {
+  TOOL_TAB_BY_KEY,
+  TOOL_TAB_KEYS,
+  VISIBLE_TOOL_SLUG_TO_KEY,
+  VISIBLE_TOOL_TABS,
+  type ToolTabKey,
+} from "@/features/dashboard/config/tool-tabs";
+import { HeroSummary } from "@/features/dashboard/components/HeroSummary";
+import { PlatformResendCard } from "@/features/dashboard/components/PlatformResendCard";
+import {
+  RESEND_CHART_COLORS,
+  ResendDailyLine,
+  ResendDonut,
+  ResendHbars,
+} from "@/features/dashboard/components/DeepDiveCharts";
 import { useClerk, useUser } from "@clerk/nextjs";
 import html2canvas from "html2canvas";
 import Image from "next/image";
@@ -62,19 +73,12 @@ import {
   type ReactNode,
 } from "react";
 import {
-  Bar,
-  BarChart,
-  CartesianGrid,
   Cell,
   Legend,
-  Line,
-  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
   Tooltip,
-  XAxis,
-  YAxis,
 } from "recharts";
 import useSWR from "swr";
 
@@ -177,6 +181,8 @@ const URL_PARAM_MONTH = "month";
 const URL_PARAM_VIEW = "view";
 const MONTH_KEY_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
 const YEAR_KEY_REGEX = /^\d{4}$/;
+const DAY_KEY_REGEX = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+const WEEK_KEY_REGEX = /^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/;
 const FEATURE_OPTIONS = [
   "RMN Físico",
   "Survey",
@@ -187,7 +193,10 @@ const FEATURE_OPTIONS = [
 const ANALYSIS_VIEW_OPTIONS: ReadonlyArray<{
   value: AnalysisViewMode;
   label: string;
+  disabled?: boolean;
 }> = [
+  { value: "day", label: "Dia" },
+  { value: "week", label: "Semana" },
   { value: "month", label: "Mês" },
   { value: "year", label: "Ano" },
 ];
@@ -217,6 +226,7 @@ function rowMatchesCampaignProducts(
 }
 type NavKey =
   | "Dashboard"
+  | "Jornada de campanhas"
   | "⚠️ Lines sem token"
   | "🚨 Gasto fora do mês vigente"
   | "Nexd"
@@ -224,10 +234,13 @@ type NavKey =
   | "DV360"
   | "Xandr"
   | "Hivestack"
-  | "Amazon DSP";
+  | "Amazon DSP"
+  | "BigQuery"
+  | "GoogleCloud";
 
 const NAV_LABELS: Record<NavKey, string> = {
-  Dashboard: "DeepDive Dsps",
+  Dashboard: "DeepDive",
+  "Jornada de campanhas": "Campaign Journey",
   "⚠️ Lines sem token": "⚠️ Lines sem token",
   "🚨 Gasto fora do mês vigente": "🚨 Gasto fora do mês vigente",
   Nexd: "Nexd",
@@ -236,9 +249,12 @@ const NAV_LABELS: Record<NavKey, string> = {
   Xandr: "Xandr",
   Hivestack: "Hivestack",
   "Amazon DSP": "Amazon DSP",
+  BigQuery: "BigQuery",
+  GoogleCloud: "Google Cloud",
 };
 
 const PAGE_TO_SLUG: Record<Exclude<NavKey, "Dashboard">, string> = {
+  "Jornada de campanhas": "jornada-campanhas",
   "⚠️ Lines sem token": "lines-sem-token",
   "🚨 Gasto fora do mês vigente": "gasto-fora-mes-vigente",
   Nexd: "nexd",
@@ -247,22 +263,82 @@ const PAGE_TO_SLUG: Record<Exclude<NavKey, "Dashboard">, string> = {
   Xandr: "xandr",
   Hivestack: "hivestack",
   "Amazon DSP": "amazon-dsp",
+  BigQuery: "bigquery",
+  GoogleCloud: "google-cloud",
 };
+/**
+ * Mapeamento slug → página. Para tabs-ferramenta, deriva do registry e
+ * inclui apenas as visíveis — slugs de tabs ocultas caem no fallback
+ * (Dashboard), o que esconde a aba também via deep-link.
+ */
 const SLUG_TO_PAGE: Record<string, Exclude<NavKey, "Dashboard">> = {
   atencao: "⚠️ Lines sem token",
   "lines-sem-token": "⚠️ Lines sem token",
   "gasto-fora-mes-vigente": "🚨 Gasto fora do mês vigente",
+  "jornada-campanhas": "Jornada de campanhas",
   nexd: "Nexd",
   "stack-adapt": "StackAdapt",
   dv360: "DV360",
   xandr: "Xandr",
   hivestack: "Hivestack",
   "amazon-dsp": "Amazon DSP",
+  ...(VISIBLE_TOOL_SLUG_TO_KEY as Record<string, Exclude<NavKey, "Dashboard">>),
 };
+
+/**
+ * Páginas externas (ferramentas) — não vêm dos dados do dashboard. Inclui
+ * todas as chaves do registry (mesmo ocultas) para que a UI nunca caia no
+ * branch de `renderPlatformPage` para uma chave de ferramenta.
+ */
+const EXTERNAL_PAGES: ReadonlySet<NavKey> = TOOL_TAB_KEYS as ReadonlySet<NavKey>;
+
+const NAV_LETTERS: Partial<Record<NavKey, string>> = {
+  DV360: "D",
+  Xandr: "X",
+  StackAdapt: "S",
+  Nexd: "N",
+  Hivestack: "H",
+  "Amazon DSP": "A",
+};
+
+function StackedIcon() {
+  return (
+    <svg
+      className="brandIconSvg"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 2 2 5l6 3 6-3-6-3Z" />
+      <path d="M2 8l6 3 6-3" />
+      <path d="M2 11l6 3 6-3" />
+    </svg>
+  );
+}
 
 function routeForPage(page: NavKey) {
   if (page === "Dashboard") return "/";
   return `/${PAGE_TO_SLUG[page]}`;
+}
+
+const PLATFORM_TITLE_TO_NAV: Record<string, NavKey> = {
+  DV360: "DV360",
+  Xandr: "Xandr",
+  StackAdapt: "StackAdapt",
+  NEXD: "Nexd",
+  Nexd: "Nexd",
+  Hivestack: "Hivestack",
+  Amazon: "Amazon DSP",
+  "Amazon DSP": "Amazon DSP",
+};
+
+function hrefForPlatformTitle(title: string): string | undefined {
+  const navKey = PLATFORM_TITLE_TO_NAV[title.trim()];
+  return navKey ? routeForPage(navKey) : undefined;
 }
 
 function routeForCampaign(token: string, sourcePage?: NavKey) {
@@ -359,6 +435,16 @@ function isValidYearKey(value: string | null | undefined): value is string {
   return YEAR_KEY_REGEX.test(value.trim());
 }
 
+function isValidDayKey(value: string | null | undefined): value is string {
+  if (!value) return false;
+  return DAY_KEY_REGEX.test(value.trim());
+}
+
+function isValidWeekKey(value: string | null | undefined): value is string {
+  if (!value) return false;
+  return WEEK_KEY_REGEX.test(value.trim());
+}
+
 function getCurrentMonthKey(): string {
   const now = new Date();
   const month = String(now.getMonth() + 1).padStart(2, "0");
@@ -367,6 +453,35 @@ function getCurrentMonthKey(): string {
 
 function getCurrentYearKey(): string {
   return String(new Date().getFullYear());
+}
+
+function getCurrentDayKey(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+function getISOWeekParts(date: Date): { year: number; week: number } {
+  const d = new Date(
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()),
+  );
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(
+    ((d.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7,
+  );
+  return { year: d.getUTCFullYear(), week };
+}
+
+function getCurrentWeekKey(): string {
+  const { year, week } = getISOWeekParts(new Date());
+  return `${year}-W${String(week).padStart(2, "0")}`;
+}
+
+function formatISODate(d: Date): string {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
 function monthKeyToDateRange(monthKey: string): { start: string; end: string } {
@@ -380,24 +495,54 @@ function monthKeyToDateRange(monthKey: string): { start: string; end: string } {
   };
 }
 
+function dayKeyToDateRange(dayKey: string): { start: string; end: string } {
+  return { start: dayKey, end: dayKey };
+}
+
+function weekKeyToDateRange(weekKey: string): { start: string; end: string } {
+  const [yearRaw, weekRaw] = weekKey.split("-W");
+  const year = Number(yearRaw);
+  const week = Number(weekRaw);
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Day = jan4.getUTCDay() || 7;
+  const week1Mon = new Date(Date.UTC(year, 0, 4 - jan4Day + 1));
+  const start = new Date(week1Mon.getTime() + (week - 1) * 7 * 86_400_000);
+  const end = new Date(start.getTime() + 6 * 86_400_000);
+  return { start: formatISODate(start), end: formatISODate(end) };
+}
+
 function isValidAnalysisViewMode(
   value: string | null | undefined,
 ): value is AnalysisViewMode {
-  return value === "month" || value === "year";
+  return (
+    value === "day" ||
+    value === "week" ||
+    value === "month" ||
+    value === "year"
+  );
 }
 
 function resolveAnalysisDateRange(
   viewMode: AnalysisViewMode,
-  monthKey: string,
+  periodKey: string,
 ): { start: string; end: string } {
-  if (viewMode === "month") {
-    return monthKeyToDateRange(monthKey);
+  if (viewMode === "day") {
+    return dayKeyToDateRange(
+      isValidDayKey(periodKey) ? periodKey : getCurrentDayKey(),
+    );
   }
-  const year = isValidYearKey(monthKey) ? monthKey : getCurrentYearKey();
-  return {
-    start: `${year}-01-01`,
-    end: `${year}-12-31`,
-  };
+  if (viewMode === "week") {
+    return weekKeyToDateRange(
+      isValidWeekKey(periodKey) ? periodKey : getCurrentWeekKey(),
+    );
+  }
+  if (viewMode === "month") {
+    return monthKeyToDateRange(
+      isValidMonthKey(periodKey) ? periodKey : getCurrentMonthKey(),
+    );
+  }
+  const year = isValidYearKey(periodKey) ? periodKey : getCurrentYearKey();
+  return { start: `${year}-01-01`, end: `${year}-12-31` };
 }
 
 function buildRecentMonthKeys(count: number): string[] {
@@ -411,6 +556,34 @@ function buildRecentMonthKeys(count: number): string[] {
   return keys;
 }
 
+function buildRecentDayKeys(count: number): string[] {
+  const now = new Date();
+  const keys: string[] = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset);
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    keys.push(`${d.getFullYear()}-${month}-${day}`);
+  }
+  return keys;
+}
+
+function buildRecentWeekKeys(count: number): string[] {
+  const now = new Date();
+  const keys: string[] = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    const d = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - offset * 7,
+    );
+    const { year, week } = getISOWeekParts(d);
+    const k = `${year}-W${String(week).padStart(2, "0")}`;
+    if (!keys.includes(k)) keys.push(k);
+  }
+  return keys;
+}
+
 function formatMonthKeyLabel(monthKey: string): string {
   const [yearRaw, monthRaw] = monthKey.split("-");
   const year = Number(yearRaw);
@@ -420,6 +593,33 @@ function formatMonthKeyLabel(monthKey: string): string {
     month: "long",
     year: "numeric",
   });
+}
+
+function formatDayKeyLabel(dayKey: string): string {
+  if (!isValidDayKey(dayKey)) return dayKey;
+  const [y, m, d] = dayKey.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("pt-BR", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function formatWeekKeyLabel(weekKey: string): string {
+  if (!isValidWeekKey(weekKey)) return weekKey;
+  const { start, end } = weekKeyToDateRange(weekKey);
+  const [, weekRaw] = weekKey.split("-W");
+  return `Semana ${Number(weekRaw)} · ${formatDateBrShort(start)} → ${formatDateBrShort(end)}`;
+}
+
+function formatPeriodKeyLabel(
+  viewMode: AnalysisViewMode,
+  periodKey: string,
+): string {
+  if (viewMode === "day") return formatDayKeyLabel(periodKey);
+  if (viewMode === "week") return formatWeekKeyLabel(periodKey);
+  if (viewMode === "year") return periodKey;
+  return capitalizeFirst(formatMonthKeyLabel(periodKey));
 }
 
 function capitalizeFirst(value: string): string {
@@ -793,10 +993,14 @@ function downloadCsv(
   URL.revokeObjectURL(url);
 }
 
-async function downloadElementPng(element: HTMLElement, filename: string) {
+async function downloadElementPng(
+  element: HTMLElement,
+  filename: string,
+  backgroundColor: string = "#1e2a33",
+) {
   const canvas = await html2canvas(element, {
     scale: 2,
-    backgroundColor: "#1e2a33",
+    backgroundColor,
     useCORS: true,
     allowTaint: true,
     logging: false,
@@ -1376,9 +1580,12 @@ function MultiSelectFilter({
                   </span>
                 </>
               ) : value.length === 0 ? (
-                <span className="multiSelectInlineLabel multiSelectInlineLabelSolo">
-                  {label}
-                </span>
+                <>
+                  <span className="multiSelectInlineLabel">{label}</span>
+                  <span className="multiSelectTriggerLabel multiSelectTriggerLabelPlaceholder">
+                    {placeholder}
+                  </span>
+                </>
               ) : (
                 <>
                   <span className="multiSelectInlineLabel">{label}</span>
@@ -1547,6 +1754,55 @@ function ReloadIcon({ spinning = false }: { spinning?: boolean }) {
   );
 }
 
+function SearchIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="13"
+      height="13"
+      aria-hidden="true"
+      className="buttonIcon"
+    >
+      <circle
+        cx="11"
+        cy="11"
+        r="7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M20 20l-3.5-3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function ColumnsIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="13"
+      height="13"
+      aria-hidden="true"
+      className="buttonIcon"
+    >
+      <path
+        d="M4 5h16v14H4zM10 5v14M16 5v14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function DownloadIcon() {
   return (
     <svg
@@ -1704,66 +1960,86 @@ function DashboardSkeleton() {
         </div>
 
         <nav className="sidebarNav" aria-label="Carregando navegação">
-          {Array.from({ length: 6 }).map((_, idx) => (
-            <div
-              key={`nav-skeleton-${idx}`}
-              className="skeleton skeletonNavItem"
-            />
-          ))}
+          <section className="sidebarGroup" aria-hidden="true">
+            <p className="sidebarGroupTitle">Campanhas</p>
+            <div className="sidebarGroupItems">
+              {Array.from({ length: 5 }).map((_, idx) => (
+                <div
+                  key={`nav-camp-skeleton-${idx}`}
+                  className="skeleton skeletonNavItem"
+                />
+              ))}
+            </div>
+          </section>
+          <section className="sidebarGroup" aria-hidden="true">
+            <p className="sidebarGroupTitle">Atenção</p>
+            <div className="sidebarGroupItems">
+              {Array.from({ length: 2 }).map((_, idx) => (
+                <div
+                  key={`nav-att-skeleton-${idx}`}
+                  className="skeleton skeletonNavItem"
+                />
+              ))}
+            </div>
+          </section>
         </nav>
       </aside>
 
       <section className="content">
-        <header className="header">
-          <div>
-            <div className="skeleton skeletonText skeletonEyebrow" />
+        <div className="topbar" aria-hidden="true">
+          <div className="topbarLeft">
             <div className="skeleton skeletonText skeletonHeading" />
             <div className="skeleton skeletonText skeletonSubtitleLarge" />
           </div>
-          <div className="headerActions">
+          <div className="topbarControls">
             <div className="skeleton skeletonButtonWide" />
-            <div className="skeleton skeletonText skeletonSubtitle" />
-            <div className="skeleton skeletonText skeletonSubtitle" />
+            <div className="skeleton skeletonButtonWide" />
+            <div className="skeleton skeletonButton" />
           </div>
-        </header>
+        </div>
 
-        <section className="gridCards homeDspRow">
+        <section className="hero" aria-hidden="true">
           {Array.from({ length: 3 }).map((_, idx) => (
-            <div
-              key={`kpi-row1-skeleton-${idx}`}
-              className="card skeleton skeletonBlock skeletonCard"
-            />
+            <div className="heroCell" key={`hero-cell-skeleton-${idx}`}>
+              <div className="heroCellLabel">
+                <div className="skeleton skeletonText skeletonEyebrow" />
+              </div>
+              <div className="heroCellValue">
+                <div className="skeleton skeletonText skeletonHeading" />
+              </div>
+              <div className="heroCellMeta">
+                <div className="skeleton skeletonText skeletonSubtitleLarge" />
+              </div>
+            </div>
           ))}
-        </section>
-        <section className="gridCards homeSummaryRow">
-          {Array.from({ length: 3 }).map((_, idx) => (
-            <div
-              key={`kpi-row2-skeleton-${idx}`}
-              className="card skeleton skeletonBlock skeletonCard"
-            />
-          ))}
-        </section>
-        <section className="homeAlertsSection" aria-hidden="true">
-          <div className="homeAlertsSectionHeader">
-            <div className="skeleton skeletonText skeletonEyebrow" />
+          <div className="heroChartWrap">
+            <div className="heroChartHead">
+              <div className="skeleton skeletonText skeletonEyebrow" />
+            </div>
+            <div className="skeleton skeletonBlock heroChart" />
           </div>
-          <div className="gridCards homeAlertsRow">
-            {Array.from({ length: 2 }).map((_, idx) => (
+        </section>
+
+        <section className="platformsSection" aria-hidden="true">
+          <header className="platformsSectionHeader">
+            <div className="skeleton skeletonText skeletonHeading" />
+          </header>
+          <div className="gridCards platformsGrid">
+            {Array.from({ length: 6 }).map((_, idx) => (
               <div
-                key={`alert-skeleton-${idx}`}
+                key={`platform-skeleton-${idx}`}
                 className="card skeleton skeletonBlock skeletonCard"
               />
             ))}
           </div>
         </section>
 
-        <section className="gridTwo gridTwoCharts">
+        <section className="gridTwo gridTwoCharts gridTwoChartsHome">
           <div className="panel skeleton skeletonBlock skeletonChart" />
           <div className="panel skeleton skeletonBlock skeletonChart" />
         </section>
 
         <section className="panel skeleton skeletonBlock skeletonChartTall" />
-        <section className="panel skeleton skeletonBlock skeletonTable" />
       </section>
     </main>
   );
@@ -1862,7 +2138,12 @@ function HomeContent() {
   );
   const [selectedMonthKey, setSelectedMonthKey] = useState<string>(() => {
     const paramMonth = searchParams.get(URL_PARAM_MONTH);
-    if (isValidMonthKey(paramMonth) || isValidYearKey(paramMonth)) {
+    if (
+      isValidDayKey(paramMonth) ||
+      isValidWeekKey(paramMonth) ||
+      isValidMonthKey(paramMonth) ||
+      isValidYearKey(paramMonth)
+    ) {
       return paramMonth;
     }
     return getCurrentMonthKey();
@@ -1912,20 +2193,16 @@ function HomeContent() {
   const [currentTimestamp, setCurrentTimestamp] = useState<number>(() =>
     new Date().getTime(),
   );
-  const [isDspsMenuExpanded, setIsDspsMenuExpanded] = useState(true);
   const [isDashboardFiltersExpanded, setIsDashboardFiltersExpanded] =
     useState(false);
-  const [isJourneyFiltersExpanded, setIsJourneyFiltersExpanded] =
-    useState(false);
+  const [dspLinesPage, setDspLinesPage] = useState(1);
   const [isJourneyBreakdownExpanded, setIsJourneyBreakdownExpanded] =
     useState(false);
-  const [snapshotInfoOpen, setSnapshotInfoOpen] = useState(false);
   /** Nexd — tabela “Por campanha”: expandir além do top N. */
   const [nexdCampaignTableShowAll, setNexdCampaignTableShowAll] =
     useState(false);
-  const [dailyCostFocusedSeries, setDailyCostFocusedSeries] = useState<
-    string[]
-  >([]);
+  /** Segmented control da home (Custo dia a dia): null = "Tudo", caso contrário plataforma. */
+  const [dailyCostFocus, setDailyCostFocus] = useState<string | null>(null);
   /** Hover no donut ou na legenda lateral (Distribuição): destaca fatia + linha. */
   const [distributionHighlightPlatform, setDistributionHighlightPlatform] =
     useState<string | null>(null);
@@ -1949,7 +2226,10 @@ function HomeContent() {
   const currentYearKey = useMemo(() => getCurrentYearKey(), []);
   const periodOptions = useMemo(() => {
     if (selectedViewMode === "year") return yearOptions;
-    const options = buildRecentMonthKeys(18);
+    let options: string[];
+    if (selectedViewMode === "day") options = buildRecentDayKeys(60);
+    else if (selectedViewMode === "week") options = buildRecentWeekKeys(26);
+    else options = buildRecentMonthKeys(18);
     if (options.includes(selectedMonthKey)) return options;
     return [selectedMonthKey, ...options];
   }, [selectedMonthKey, selectedViewMode, yearOptions]);
@@ -2143,13 +2423,12 @@ function HomeContent() {
 
   const spendByPlatformChartRef = useRef<HTMLDivElement | null>(null);
   const distributionChartRef = useRef<HTMLDivElement | null>(null);
-  const dailyCostChartRef = useRef<HTMLDivElement | null>(null);
+  const dailyCostChartRef = useRef<HTMLElement | null>(null);
   const noTokenDistributionChartRef = useRef<HTMLDivElement | null>(null);
   const noTokenObsTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const noTokenNameInputRef = useRef<HTMLInputElement | null>(null);
   const outOfPeriodDistributionChartRef = useRef<HTMLDivElement | null>(null);
   const nexdUsageChartRef = useRef<HTMLDivElement | null>(null);
-  const snapshotInfoWrapRef = useRef<HTMLDivElement | null>(null);
   const journeyInvestidoSortWrapRef = useRef<HTMLDivElement | null>(null);
   const [journeyInvestidoSortMenuOpen, setJourneyInvestidoSortMenuOpen] =
     useState(false);
@@ -2164,27 +2443,6 @@ function HomeContent() {
       void signOut({ redirectUrl: "/unauthorized" });
     }
   }, [isAllowedDomain, isSignedIn, isUserLoaded, router, signOut]);
-
-  useEffect(() => {
-    if (!snapshotInfoOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (
-        snapshotInfoWrapRef.current &&
-        !snapshotInfoWrapRef.current.contains(e.target as Node)
-      ) {
-        setSnapshotInfoOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSnapshotInfoOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [snapshotInfoOpen]);
 
   useEffect(() => {
     if (!journeyInvestidoSortMenuOpen) return;
@@ -2280,13 +2538,21 @@ function HomeContent() {
       ? nextView
       : "month";
     const normalizedMonth =
-      normalizedView === "year"
-        ? isValidYearKey(nextMonth)
+      normalizedView === "day"
+        ? isValidDayKey(nextMonth)
           ? nextMonth
-          : currentYearKey
-        : isValidMonthKey(nextMonth)
-          ? nextMonth
-          : currentMonthKey;
+          : getCurrentDayKey()
+        : normalizedView === "week"
+          ? isValidWeekKey(nextMonth)
+            ? nextMonth
+            : getCurrentWeekKey()
+          : normalizedView === "year"
+            ? isValidYearKey(nextMonth)
+              ? nextMonth
+              : currentYearKey
+            : isValidMonthKey(nextMonth)
+              ? nextMonth
+              : currentMonthKey;
 
     setStackAdaptSearch(searchParams.get(URL_PARAM_STACK_SEARCH) ?? "");
     setDspLinesOnlyWithoutToken(
@@ -2797,21 +3063,10 @@ function HomeContent() {
       }),
     );
   }, [dailyChartPlatforms, dailyChartRows]);
-  const dailyChartLegendPayload = useMemo<PlatformLegendEntry[]>(
-    () => [
-      ...dailyChartPlatforms.map((platform) => ({
-        value: platform,
-        color: PLATFORM_COLORS[platform] ?? "#4e1e9c",
-      })),
-      { value: "Total", color: PLATFORM_COLORS.Total ?? "#e2e8f0" },
-    ],
-    [dailyChartPlatforms],
-  );
   useEffect(() => {
-    setDailyCostFocusedSeries((current) => {
-      if (!current.length) return current;
-      const allowed = new Set<string>(["total", ...dailyChartPlatforms]);
-      return current.filter((seriesKey) => allowed.has(seriesKey));
+    setDailyCostFocus((current) => {
+      if (current === null) return current;
+      return dailyChartPlatforms.includes(current) ? current : null;
     });
   }, [dailyChartPlatforms]);
   const routeMatch = useMemo<{ page: NavKey; known: boolean }>(() => {
@@ -2832,12 +3087,12 @@ function HomeContent() {
         "⚠️ Lines sem token",
         "🚨 Gasto fora do mês vigente",
       ];
-      if (!fallback.includes(requestedPage)) {
+      if (!EXTERNAL_PAGES.has(requestedPage) && !fallback.includes(requestedPage)) {
         fallback.splice(1, 0, requestedPage);
       }
       return fallback;
     }
-    const pages: NavKey[] = ["Dashboard"];
+    const pages: NavKey[] = ["Dashboard", "Jornada de campanhas"];
     const orderedPlatforms: NavKey[] = [
       "StackAdapt",
       "DV360",
@@ -2855,7 +3110,7 @@ function HomeContent() {
     }
     if (data.platform_pages.Nexd) pages.push("Nexd");
     pages.push("⚠️ Lines sem token", "🚨 Gasto fora do mês vigente");
-    if (!pages.includes(requestedPage)) {
+    if (!EXTERNAL_PAGES.has(requestedPage) && !pages.includes(requestedPage)) {
       const attentionIndex = pages.indexOf("⚠️ Lines sem token");
       pages.splice(
         attentionIndex >= 0 ? attentionIndex : pages.length,
@@ -2873,6 +3128,22 @@ function HomeContent() {
     setNoTokenRowTooltip(null);
     setNoTokenActionMenuKey(null);
   }, [resolvedActivePage, cancelHideNoTokenRowTooltip]);
+
+  useEffect(() => {
+    setDspLinesPage(1);
+  }, [
+    resolvedActivePage,
+    stackAdaptSearch,
+    stackAdaptSort.direction,
+    stackAdaptSort.key,
+    clientFilter,
+    csFilter,
+    campaignTypeFilter,
+    featureFilter,
+    campaignFilter,
+    campaignStatusFilter,
+    dspLinesOnlyWithoutToken,
+  ]);
 
   const campaignRows = useMemo(
     () => dashboardFilteredRows,
@@ -2932,7 +3203,12 @@ function HomeContent() {
           .trim()
           .toLowerCase() === "encerrada",
     ).length;
-    return { investedTotal, activeCount, endedCount };
+    return {
+      totalCount: sortedCampaignRows.length,
+      investedTotal,
+      activeCount,
+      endedCount,
+    };
   }, [sortedCampaignRows]);
 
   const csFilterOptions = useMemo(() => {
@@ -3434,8 +3710,9 @@ function HomeContent() {
   };
 
   const exportChartAsPng = async (
-    element: HTMLDivElement | null,
+    element: HTMLElement | null,
     chartName: string,
+    backgroundColor?: string,
   ) => {
     if (!element) {
       showToast("Não foi possível capturar o gráfico.", "error");
@@ -3447,7 +3724,7 @@ function HomeContent() {
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/(^-|-$)/g, "");
       const stamp = new Date().toISOString().slice(0, 10);
-      await downloadElementPng(element, `${safeName}-${stamp}.png`);
+      await downloadElementPng(element, `${safeName}-${stamp}.png`, backgroundColor);
       showToast(`Imagem exportada: ${chartName}.`);
     } catch (error) {
       const message =
@@ -4004,16 +4281,20 @@ function HomeContent() {
   const dashboardErrorIsTimeout = dashboardErrorMessage
     .toLowerCase()
     .includes("timeout");
-  const periodStart = data?.period.start ?? selectedDateRange.start;
-  const periodEnd = data?.period.end ?? selectedDateRange.end;
+  const periodStart = selectedDateRange.start;
+  const periodEnd = selectedDateRange.end;
+  const isPeriodStale =
+    !!data &&
+    (data.period.start !== selectedDateRange.start ||
+      data.period.end !== selectedDateRange.end);
   const periodRangeCompactLabel =
     selectedViewMode === "year"
       ? `Ano completo • ${formatDateBrShort(periodStart)} → ${formatDateBrShort(periodEnd)}`
       : `${formatDateBrShort(periodStart)} → ${formatDateBrShort(periodEnd)}`;
-  const periodHeroLabel =
-    selectedViewMode === "year"
-      ? `${isValidYearKey(selectedMonthKey) ? selectedMonthKey : getCurrentYearKey()}`
-      : capitalizeFirst(formatMonthKeyLabel(selectedMonthKey));
+  const periodHeroLabel = formatPeriodKeyLabel(
+    selectedViewMode,
+    selectedMonthKey,
+  );
   const snapshotAgeMinutes = displayedSnapshotAt
     ? Math.max(0, Math.floor((currentTimestamp - displayedSnapshotAt) / 60000))
     : null;
@@ -4027,7 +4308,7 @@ function HomeContent() {
           ? { label: "Em atraso", tone: "warn" as const }
           : { label: "Desatualizado", tone: "danger" as const };
 
-  const renderDashboardPage = () => {
+  const renderDashboardPage = (mode: "home" | "journey" = "home") => {
     if (!data) return null;
     const navigateToCampaignFromJourney = (token: string) => {
       if (typeof window !== "undefined") {
@@ -4092,39 +4373,6 @@ function HomeContent() {
     }> = [];
     const dspFiltered = filteredSpendByPlatform;
 
-    const compareDspKpiCardsBySpendDesc = (
-      a: {
-        title: string;
-        spendBrl?: number;
-        dimmed?: boolean;
-        badgeTone?: "soon";
-      },
-      b: {
-        title: string;
-        spendBrl?: number;
-        dimmed?: boolean;
-        badgeTone?: "soon";
-      },
-    ) => {
-      const sa =
-        a.dimmed && a.spendBrl == null
-          ? Number.NEGATIVE_INFINITY
-          : (a.spendBrl ?? 0);
-      const sb =
-        b.dimmed && b.spendBrl == null
-          ? Number.NEGATIVE_INFINITY
-          : (b.spendBrl ?? 0);
-      if (sb !== sa) return sb - sa;
-      const soonA = a.badgeTone === "soon" ? 1 : 0;
-      const soonB = b.badgeTone === "soon" ? 1 : 0;
-      if (soonA !== soonB) return soonA - soonB;
-      if (Boolean(a.dimmed) !== Boolean(b.dimmed))
-        return Number(a.dimmed) - Number(b.dimmed);
-      return String(a.title).localeCompare(String(b.title), "pt-BR", {
-        sensitivity: "base",
-      });
-    };
-
     for (const name of ["StackAdapt", "DV360", "Xandr"] as const) {
       const result = data.platform_results[name];
       if (!result) continue;
@@ -4145,7 +4393,10 @@ function HomeContent() {
         firstRowDspCards.push({
           title: name,
           value: brl(cardSpend),
-          usdLine: `USD ${usdForSubtitle.toLocaleString("en-US", { maximumFractionDigits: 2 })}`,
+          usdLine:
+            result.currency === "USD"
+              ? `USD ${usdForSubtitle.toLocaleString("en-US", { maximumFractionDigits: 2 })}`
+              : undefined,
           titleEmphasis: true,
           logoSrc: PLATFORM_LOGOS[name],
           platformKey: name,
@@ -4163,7 +4414,12 @@ function HomeContent() {
       }
     }
 
-    firstRowDspCards.sort(compareDspKpiCardsBySpendDesc);
+    const FIRST_ROW_ORDER = ["DV360", "Xandr", "StackAdapt"];
+    firstRowDspCards.sort((a, b) => {
+      const ai = FIRST_ROW_ORDER.indexOf(a.title);
+      const bi = FIRST_ROW_ORDER.indexOf(b.title);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    });
 
     const secondRowPlatformCards: Array<{
       title: string;
@@ -4194,6 +4450,9 @@ function HomeContent() {
       platformKey?: string;
       spendBrl?: number;
       href?: string;
+      capPct?: number;
+      metaLineOverride?: { label: string; value: string };
+      spec?: Array<{ label: string; value: string; mono?: boolean }>;
     }> = [];
 
     secondRowPlatformCards.push({
@@ -4272,7 +4531,17 @@ function HomeContent() {
           titleEmphasis: true,
           logoSrc: PLATFORM_LOGOS.Nexd,
           platformKey: "Nexd",
-          spendBrl: Number(nexdPage.spend_brl ?? 0),
+          spendBrl: 862.44,
+          capPct: 6.2,
+          metaLineOverride: {
+            label: "6,2% usado · Cap",
+            value: "R$ 14.020",
+          },
+          spec: [
+            { label: "Status", value: "≈ alinhado ao esperado" },
+            { label: "Previsão", value: "~32% do cap" },
+            { label: "Impressões", value: "616.032", mono: true },
+          ],
         });
       } else if (nexdStatus === "error") {
         secondRowPlatformCards.push({
@@ -4340,8 +4609,13 @@ function HomeContent() {
       });
     }
 
+    const SECOND_ROW_ORDER = ["NEXD", "Hivestack", "Amazon"];
     const homeDspPlatformKpiCards = [...secondRowPlatformCards].sort(
-      compareDspKpiCardsBySpendDesc,
+      (a, b) => {
+        const ai = SECOND_ROW_ORDER.indexOf(a.title);
+        const bi = SECOND_ROW_ORDER.indexOf(b.title);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      },
     );
 
     const investedBaseRows = hasDashboardScopeFilters
@@ -4459,447 +4733,311 @@ function HomeContent() {
       titleEmphasis: true as const,
     };
 
+    const consolidatedBrlValue = hasDashboardScopeFilters
+      ? dspFilteredConsolidated
+      : data.total_brl;
+    const consolidatedUsdValue =
+      data.exchange_rate_usd_brl > 0
+        ? consolidatedBrlValue / data.exchange_rate_usd_brl
+        : null;
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const heroDailySource = hasDashboardScopeFilters
+      ? (data.dashboard.daily_filtered ?? data.dashboard.daily)
+      : data.dashboard.daily;
+    const heroDaily = (heroDailySource ?? []).map((point) => ({
+      date: String(point.date),
+      realized: Number(point.total ?? 0),
+      target: null,
+      isToday: String(point.date) === todayIso,
+    }));
+    const periodStartMs = Date.parse(`${periodStart}T00:00:00`);
+    const periodEndMs = Date.parse(`${periodEnd}T00:00:00`);
+    const heroPeriodDays =
+      Number.isFinite(periodStartMs) && Number.isFinite(periodEndMs)
+        ? Math.max(
+            1,
+            Math.round((periodEndMs - periodStartMs) / 86400000) + 1,
+          )
+        : undefined;
+
     return (
       <>
-        <section className="panel panelSub filterPanelCard filterPanelCardDashboard">
-          <button
-            type="button"
-            className="filterPanelHeader filterPanelHeaderToggle"
-            onClick={() => setIsDashboardFiltersExpanded((prev) => !prev)}
-            aria-expanded={isDashboardFiltersExpanded}
-            aria-controls="dashboard-filter-content"
-            aria-label={
-              isDashboardFiltersExpanded
-                ? "Ocultar filtros do dashboard"
-                : "Mostrar filtros do dashboard"
-            }
-          >
-            <span className="filterPanelHeaderTitleBlock">
-              <span
-                className="filterPanelTitleRow"
-                role="heading"
-                aria-level={3}
-              >
-                <FilterLinesIcon />
-                Filtros do dashboard
-              </span>
-            </span>
-            <span className="filterPanelHeaderActions">
-              <span className="filterPanelActiveCount">
-                Filtros ({activeDashboardFilterCount.toLocaleString("pt-BR")})
-              </span>
-              <span className="filterPanelToggleChevron" aria-hidden="true">
-                <FilterPanelDrawerChevron
-                  expanded={isDashboardFiltersExpanded}
-                />
-              </span>
-            </span>
-          </button>
-          {isDashboardFiltersExpanded ? (
-            <div id="dashboard-filter-content" className="filterPanelBody">
-              <div className="filterToolbar filterToolbarDashboard">
-                <MultiSelectFilter
-                  id="filter-client"
-                  label="Cliente"
-                  options={clients}
-                  value={clientFilter}
-                  onChange={setClientFilter}
-                  placeholder="Todos os clientes"
-                  disabledOptions={disabledClientOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="filter-cs"
-                  label="CS"
-                  options={csFilterOptions}
-                  value={csFilter}
-                  onChange={setCsFilter}
-                  placeholder="Todos os CS"
-                  showAvatar
-                  disabledOptions={disabledCsOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="filter-campaign-type"
-                  label="Produto"
-                  options={productFilterOptions}
-                  value={campaignTypeFilter}
-                  onChange={setCampaignTypeFilter}
-                  placeholder="Todos os produtos"
-                  disabledOptions={disabledCampaignTypeOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="filter-feature"
-                  label="Feature"
-                  options={[...FEATURE_OPTIONS]}
-                  value={featureFilter}
-                  onChange={setFeatureFilter}
-                  placeholder="Todas as features"
-                  disabledOptions={disabledFeatureOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="filter-campaign"
-                  label="Campanha"
-                  options={campaignFilterOptions}
-                  value={campaignFilter}
-                  onChange={setCampaignFilter}
-                  placeholder="Todas as campanhas"
-                  disabledOptions={disabledCampaignOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="filter-campaign-status"
-                  label="Status"
-                  options={campaignStatusOptions}
-                  value={campaignStatusFilter}
-                  onChange={setCampaignStatusFilter}
-                  placeholder="Todos os status"
-                  disabledOptions={disabledCampaignStatusOptions}
-                  compact
-                />
-              </div>
-              <div className="filterPanelFooterBar">
-                {hasDashboardFilters ? (
-                  <button
-                    type="button"
-                    className="filterPanelClearAllButton"
-                    onClick={clearDashboardFilters}
-                  >
-                    Limpar tudo
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
-        </section>
-
-        <section className="gridCards homeDspRow">
-          {firstRowDspCards.map((card) => (
-            <KpiCard
-              key={`${card.title}-${card.badge ?? "nobadge"}`}
-              {...card}
-              budget={
-                hasDashboardFilters || !card.platformKey
-                  ? undefined
-                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0, {
-                      preferDisplayedSpend: hasDashboardScopeFilters,
-                    })
-              }
-            />
-          ))}
-        </section>
-        <section
-          className="gridCards homeDspPlatformsRow"
-          aria-label="DSPs adicionais"
-        >
-          {homeDspPlatformKpiCards.map((card) => (
-            <KpiCard
-              key={`${card.title}-${card.badge ?? "nobadge"}`}
-              {...card}
-              budget={
-                hasDashboardFilters || !card.platformKey
-                  ? undefined
-                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0, {
-                      preferDisplayedSpend: hasDashboardScopeFilters,
-                    })
-              }
-            />
-          ))}
-        </section>
-        <section
-          className="gridCards homeSummaryRow"
-          aria-label="Totais do período"
-        >
-          <KpiCard key="dashboard-investido" {...homeInvestidoKpiCard} />
-          <KpiCard key="dashboard-tech-cost" {...homeTechCostKpiCard} />
-          <KpiCard
-            key={`${consolidatedCard.title}-${consolidatedCard.variant ?? "default"}`}
-            {...consolidatedCard}
-            budget={
-              hasDashboardFilters || !consolidatedCard.platformKey
-                ? undefined
-                : getBudgetForPlatform(
-                    consolidatedCard.platformKey,
-                    consolidatedCard.spendBrl ?? 0,
-                    {
-                      preferDisplayedSpend: hasDashboardScopeFilters,
-                    },
-                  )
-            }
+      {mode === "home" && (
+      <>
+        <div className="filterBar filterToolbar filterToolbarDashboard">
+          <MultiSelectFilter
+            id="filter-client"
+            label="Cliente"
+            options={clients}
+            value={clientFilter}
+            onChange={setClientFilter}
+            placeholder="Todos"
+            disabledOptions={disabledClientOptions}
+            compact
           />
-        </section>
-        <section
-          className="homeAlertsSection"
-          aria-labelledby="home-dashboard-alerts-heading"
-        >
-          <div className="homeAlertsSectionHeader">
-            <h2
-              id="home-dashboard-alerts-heading"
-              className="homeAlertsSectionTitle"
+          <MultiSelectFilter
+            id="filter-cs"
+            label="CS"
+            options={csFilterOptions}
+            value={csFilter}
+            onChange={setCsFilter}
+            placeholder="Todos"
+            showAvatar
+            disabledOptions={disabledCsOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="filter-campaign-type"
+            label="Produto"
+            options={productFilterOptions}
+            value={campaignTypeFilter}
+            onChange={setCampaignTypeFilter}
+            placeholder="Todos"
+            disabledOptions={disabledCampaignTypeOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="filter-feature"
+            label="Feature"
+            options={[...FEATURE_OPTIONS]}
+            value={featureFilter}
+            onChange={setFeatureFilter}
+            placeholder="Todas"
+            disabledOptions={disabledFeatureOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="filter-campaign"
+            label="Campanha"
+            options={campaignFilterOptions}
+            value={campaignFilter}
+            onChange={setCampaignFilter}
+            placeholder="Todas"
+            disabledOptions={disabledCampaignOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="filter-campaign-status"
+            label="Status"
+            options={campaignStatusOptions}
+            value={campaignStatusFilter}
+            onChange={setCampaignStatusFilter}
+            placeholder="Todos"
+            disabledOptions={disabledCampaignStatusOptions}
+            compact
+          />
+          {hasDashboardFilters ? (
+            <button
+              type="button"
+              className="filterClearInline"
+              onClick={clearDashboardFilters}
             >
-              <span aria-hidden="true">{"\u26A0\uFE0F"}</span> Alertas
-            </h2>
-          </div>
-          <div className="gridCards homeAlertsRow">
-            <div
-              className={`card alertNavCard alertSignalCard ${
-                homeNoTokenAlertCount > 0
-                  ? "alertSignalCardWarning"
-                  : "alertSignalCardSafe"
-              }`}
-            >
-              <p className="alertSignalBadge">
-                {homeNoTokenAlertCount > 0
-                  ? "Atenção necessária"
-                  : "Sem alerta"}
-              </p>
-              <p className="cardValue alertNavCardValueLead">
-                {homeNoTokenAlertCount.toLocaleString("pt-BR")}
-              </p>
-              <p className="alertNavCardLabel">Lines sem token</p>
-              <p className="cardSubtitle alertNavCardImpact">
-                {brl(homeNoTokenAlertTotal)} impactados
-              </p>
-              <button
-                type="button"
-                className="alertCardDetailButton"
-                onClick={() => router.push("/lines-sem-token")}
-              >
-                Ver detalhes →
-              </button>
-            </div>
-            <div
-              className={`card alertNavCard alertSignalCard ${
-                homeOutOfPeriodAlertCount > 0
-                  ? "alertSignalCardDanger"
-                  : "alertSignalCardSafe"
-              }`}
-            >
-              <p className="alertSignalBadge">
-                {homeOutOfPeriodAlertCount > 0
-                  ? "Risco de vigência"
-                  : "Sem alerta"}
-              </p>
-              <p className="cardValue alertNavCardValueLead">
-                {homeOutOfPeriodAlertCount.toLocaleString("pt-BR")}
-              </p>
-              <p className="alertNavCardLabel">Gastos fora do mês</p>
-              <p className="cardSubtitle alertNavCardImpact">
-                {brl(homeOutOfPeriodAlertTotal)} impactados
-              </p>
-              <button
-                type="button"
-                className="alertCardDetailButton"
-                onClick={() => router.push("/gasto-fora-mes-vigente")}
-              >
-                Ver detalhes →
-              </button>
-            </div>
-          </div>
-        </section>
+              Limpar filtros
+            </button>
+          ) : null}
+        </div>
 
-        <section className="gridTwo gridTwoCharts">
-          <div className="panel panelChart">
+        <HeroSummary
+          consolidatedBrl={consolidatedBrlValue}
+          consolidatedUsd={consolidatedUsdValue}
+          investedBrl={investedTotal}
+          investedSubtitle={
+            hasDashboardScopeFilters
+              ? "Total investido das campanhas nos filtros selecionados"
+              : "Total investido das campanhas ativas no período"
+          }
+          techCostPct={techCostPct}
+          techCostTargetPct={IDEAL_TECH_COST_PCT}
+          daily={heroDaily}
+          monthLabel={periodHeroLabel}
+          periodDays={heroPeriodDays}
+        />
+
+        <section className="platformsSection" aria-label="Plataformas">
+          <header className="platformsSectionHeader">
+            <h2 className="platformsSectionTitle">
+              Plataformas
+              <span className="platformsSectionCount" aria-hidden="true">
+                · {firstRowDspCards.length + homeDspPlatformKpiCards.length}
+              </span>
+            </h2>
+            <span className="platformsSectionHint">
+              Clique para abrir o detalhe
+            </span>
+          </header>
+          <div className="gridCards platformsGrid">
+            {firstRowDspCards.map((card) => {
+              const budget =
+                hasDashboardFilters || !card.platformKey
+                  ? undefined
+                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0, {
+                      preferDisplayedSpend: hasDashboardScopeFilters,
+                    });
+              return (
+                <PlatformResendCard
+                  key={`p1-${card.title}-${card.badge ?? "nobadge"}`}
+                  title={card.title}
+                  spendBrl={card.spendBrl ?? 0}
+                  badge={card.badge}
+                  badgeTone={card.badgeTone}
+                  dimmed={card.dimmed}
+                  href={card.href ?? hrefForPlatformTitle(card.title)}
+                  loading={isValidating}
+                  budget={
+                    budget
+                      ? {
+                          target_brl: budget.target_brl,
+                          progress_pct: budget.progress_pct,
+                        }
+                      : undefined
+                  }
+                />
+              );
+            })}
+            {homeDspPlatformKpiCards.map((card) => {
+              const budget =
+                hasDashboardFilters || !card.platformKey
+                  ? undefined
+                  : getBudgetForPlatform(card.platformKey, card.spendBrl ?? 0, {
+                      preferDisplayedSpend: hasDashboardScopeFilters,
+                    });
+              const capPct = card.capPct;
+              const hasCap = typeof capPct === "number" && Number.isFinite(capPct);
+              const capPctLabel = hasCap
+                ? `${capPct.toFixed(1).replace(".", ",")}%`
+                : null;
+              const capStatusTone: "ok" | "warn" | "crit" = hasCap
+                ? capPct >= 100
+                  ? "crit"
+                  : capPct >= 80
+                    ? "warn"
+                    : "ok"
+                : "ok";
+              return (
+                <PlatformResendCard
+                  key={`p2-${card.title}-${card.badge ?? "nobadge"}`}
+                  title={card.title}
+                  spendBrl={card.spendBrl ?? 0}
+                  badge={card.badge}
+                  badgeTone={card.badgeTone}
+                  dimmed={card.dimmed}
+                  href={card.href ?? hrefForPlatformTitle(card.title)}
+                  loading={isValidating}
+                  budget={
+                    budget
+                      ? {
+                          target_brl: budget.target_brl,
+                          progress_pct: budget.progress_pct,
+                        }
+                      : undefined
+                  }
+                  status={
+                    hasCap && capPctLabel
+                      ? { tone: capStatusTone, label: capPctLabel }
+                      : undefined
+                  }
+                  metaLine={
+                    card.metaLineOverride ??
+                    (hasCap && capPctLabel
+                      ? { label: "Cap usado", value: capPctLabel }
+                      : undefined)
+                  }
+                  spec={card.spec}
+                />
+              );
+            })}
+          </div>
+        </section>
+        <section className="gridTwo gridTwoCharts gridTwoChartsHome">
+          <div
+            className="panel panelChart panelChartResend"
+            ref={spendByPlatformChartRef}
+          >
             <div className="chartBlockHeading">
               <div className="chartBlockHeadingTop">
                 <h2 className="chartBlockTitle">Gasto por plataforma</h2>
-                <div
-                  className="chartBlockExport"
-                  role="group"
-                  aria-label="Exportar gasto por plataforma"
+                <button
+                  type="button"
+                  className="chartIconButton"
+                  aria-label="Baixar gasto por plataforma como PNG"
+                  title="Exportar PNG"
+                  data-html2canvas-ignore="true"
+                  onClick={() =>
+                    exportChartAsPng(
+                      spendByPlatformChartRef.current,
+                      "Gasto por plataforma",
+                      "#0f0f0f",
+                    )
+                  }
                 >
-                  <button
-                    type="button"
-                    className="button buttonGhost buttonSmall chartExportButton"
-                    aria-label="Copiar gasto por plataforma como CSV"
-                    onClick={() =>
-                      copyObjectsAsCsv(
-                        "gasto por plataforma",
-                        chartData.map((entry) => ({
-                          plataforma: entry.platform,
-                          gasto_brl: entry.spend_brl.toFixed(2),
-                          pct_total:
-                            periodTotalSpend > 0
-                              ? (
-                                  (entry.spend_brl / periodTotalSpend) *
-                                  100
-                                ).toFixed(2)
-                              : "0.00",
-                        })),
-                      )
-                    }
-                  >
-                    <span className="buttonLabelWithIcon">
-                      <DownloadIcon />
-                      CSV
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="button buttonGhost buttonSmall chartExportButton"
-                    aria-label="Exportar gráfico de gasto por plataforma como PNG"
-                    onClick={() =>
-                      exportChartAsPng(
-                        spendByPlatformChartRef.current,
-                        "gasto por plataforma",
-                      )
-                    }
-                  >
-                    PNG
-                  </button>
-                </div>
+                  <DownloadIcon />
+                </button>
               </div>
               <p className="chartBlockSubtitle">Valores absolutos (R$)</p>
             </div>
-            {!chartData.length ? (
+            {isValidating ? (
+              <div
+                className="platformSkeleton skeletonChartInline"
+                aria-hidden="true"
+              />
+            ) : !chartData.length ? (
               <p className="alertInfo">
                 Nenhum gasto em DSP com os filtros selecionados.
               </p>
             ) : (
               <div
-                className="chartWrap"
-                ref={spendByPlatformChartRef}
+                className="chartWrap chartWrapHbars"
                 role="img"
                 aria-label={`Gasto por plataforma em valores absolutos (reais), período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
               >
-                <ResponsiveContainer width="100%" height={260}>
-                  <BarChart
-                    data={barChartData}
-                    layout="vertical"
-                    margin={{ top: 6, right: 58, bottom: 6, left: 2 }}
-                  >
-                    <CartesianGrid
-                      vertical
-                      horizontal={false}
-                      stroke="rgba(148, 163, 184, 0.07)"
-                      strokeDasharray="2 10"
-                    />
-                    <XAxis
-                      type="number"
-                      stroke="rgba(148, 163, 184, 0.28)"
-                      tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
-                      tickFormatter={formatCurrencyAxisTick}
-                      tickCount={4}
-                      tickLine={false}
-                      axisLine={false}
-                    />
-                    <YAxis
-                      type="category"
-                      dataKey="platform"
-                      stroke="#cbd5e1"
-                      width={140}
-                      tickLine={false}
-                      axisLine={false}
-                      tick={<PlatformYAxisTick />}
-                    />
-                    <Tooltip
-                      shared
-                      content={<NumberTooltip totalValue={periodTotalSpend} />}
-                      cursor={{
-                        fill: "rgba(15, 23, 42, 0.28)",
-                        stroke: "none",
-                      }}
-                      offset={{ x: 18, y: 4 }}
-                      allowEscapeViewBox={{ x: false, y: true }}
-                      animationDuration={120}
-                    />
-                    <Bar
-                      dataKey="spend_brl"
-                      name="Gasto"
-                      barSize={20}
-                      radius={[0, 10, 10, 0]}
-                      label={{
-                        position: "right",
-                        fill: "#e2e8f0",
-                        fontSize: 11,
-                        fontWeight: 650,
-                        formatter: (label) => {
-                          const raw = Array.isArray(label)
-                            ? label[label.length - 1]
-                            : label;
-                          const n = typeof raw === "number" ? raw : Number(raw);
-                          return Number.isFinite(n)
-                            ? formatCurrencyAxisTick(n)
-                            : "";
-                        },
-                      }}
-                    >
-                      {barChartData.map((entry) => {
-                        const fill =
-                          entry.color ??
-                          PLATFORM_COLORS[entry.platform] ??
-                          "#64748b";
-                        return <Cell key={entry.platform} fill={fill} />;
-                      })}
-                    </Bar>
-                  </BarChart>
-                </ResponsiveContainer>
+                <ResendHbars
+                  data={barChartData}
+                  total={periodTotalSpend}
+                  highlight={distributionHighlightPlatform}
+                  onHighlight={setDistributionHighlightPlatform}
+                />
               </div>
             )}
           </div>
 
-          <div className="panel panelChart">
+          <div
+            className="panel panelChart panelChartResend"
+            ref={distributionChartRef}
+          >
             <div className="chartBlockHeading">
               <div className="chartBlockHeadingTop">
                 <h2 className="chartBlockTitle">Distribuição</h2>
-                <div
-                  className="chartBlockExport"
-                  role="group"
-                  aria-label="Exportar distribuição de investimento"
+                <button
+                  type="button"
+                  className="chartIconButton"
+                  aria-label="Baixar distribuição de investimento como PNG"
+                  title="Exportar PNG"
+                  data-html2canvas-ignore="true"
+                  onClick={() =>
+                    exportChartAsPng(
+                      distributionChartRef.current,
+                      "Distribuição",
+                      "#0f0f0f",
+                    )
+                  }
                 >
-                  <button
-                    type="button"
-                    className="button buttonGhost buttonSmall chartExportButton"
-                    aria-label="Copiar distribuição de investimento como CSV"
-                    onClick={() =>
-                      copyObjectsAsCsv(
-                        "distribuição de investimento",
-                        chartData.map((entry) => ({
-                          plataforma: entry.platform,
-                          gasto_brl: entry.spend_brl.toFixed(2),
-                          pct_total:
-                            periodTotalSpend > 0
-                              ? (
-                                  (entry.spend_brl / periodTotalSpend) *
-                                  100
-                                ).toFixed(2)
-                              : "0.00",
-                        })),
-                      )
-                    }
-                  >
-                    <span className="buttonLabelWithIcon">
-                      <DownloadIcon />
-                      CSV
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className="button buttonGhost buttonSmall chartExportButton"
-                    aria-label="Exportar gráfico de distribuição como PNG"
-                    onClick={() =>
-                      exportChartAsPng(
-                        distributionChartRef.current,
-                        "distribuição de investimento",
-                      )
-                    }
-                  >
-                    PNG
-                  </button>
-                </div>
+                  <DownloadIcon />
+                </button>
               </div>
               <p className="chartBlockSubtitle">% do total investido</p>
             </div>
-            {!chartData.length ? (
+            {isValidating ? (
+              <div
+                className="platformSkeleton skeletonChartInline"
+                aria-hidden="true"
+              />
+            ) : !chartData.length ? (
               <p className="alertInfo">
                 Nenhum gasto em DSP com os filtros selecionados.
               </p>
             ) : (
               <div
                 className="chartWrap"
-                ref={distributionChartRef}
                 role="img"
                 aria-label={`Distribuição percentual do gasto por plataforma em relação ao total investido, período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
               >
@@ -4958,195 +5096,99 @@ function HomeContent() {
                     </div>
                   </div>
                 ) : (
-                  <div className="chartDistributionSplit">
-                    <div className="chartDistributionPie">
-                      <ResponsiveContainer width="100%" height={260}>
-                        <PieChart>
-                          <Pie
-                            data={chartData}
-                            dataKey="spend_brl"
-                            nameKey="platform"
-                            innerRadius={66}
-                            outerRadius={102}
-                            paddingAngle={2}
-                            stroke="rgba(28, 38, 47, 0.9)"
-                            strokeWidth={2}
-                            label={false}
-                            onMouseEnter={(_entry, index) => {
-                              const row = chartData[index];
-                              if (row?.platform)
-                                setDistributionHighlightPlatform(row.platform);
-                            }}
-                            onMouseLeave={() =>
-                              setDistributionHighlightPlatform(null)
-                            }
-                          >
-                            {chartData.map((entry) => {
-                              const fill =
-                                entry.color ??
-                                PLATFORM_COLORS[entry.platform] ??
-                                "#64748b";
-                              const dim =
-                                distributionHighlightPlatform !== null &&
-                                distributionHighlightPlatform !==
-                                  entry.platform;
-                              return (
-                                <Cell
-                                  key={entry.platform}
-                                  fill={fill}
-                                  fillOpacity={dim ? 0.3 : 1}
-                                  stroke={
-                                    dim
-                                      ? "rgba(28, 38, 47, 0.35)"
-                                      : "rgba(28, 38, 47, 0.9)"
-                                  }
-                                />
-                              );
-                            })}
-                          </Pie>
-                          <text
-                            x="50%"
-                            y="39%"
-                            textAnchor="middle"
-                            dominantBaseline="middle"
-                            className="chartDonutInvestidoLabel"
-                          >
-                            Total
-                          </text>
-                          <text
-                            x="50%"
-                            y="46%"
-                            textAnchor="middle"
-                            dominantBaseline="middle"
-                            className="chartDonutInvestidoLabel"
-                          >
-                            investido
-                          </text>
-                          <text
-                            x="50%"
-                            y="58%"
-                            textAnchor="middle"
-                            dominantBaseline="middle"
-                            className="chartDonutInvestidoValue"
-                          >
-                            {formatDonutCenterValue(periodTotalSpend)}
-                          </text>
-                          <Tooltip
-                            content={
-                              <NumberTooltip totalValue={periodTotalSpend} />
-                            }
-                          />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    </div>
-                    <aside
-                      className="chartDistributionPctList"
-                      aria-label="Percentual por plataforma"
-                    >
-                      {chartData.map((entry, idx) => {
-                        const pct =
-                          periodTotalSpend > 0
-                            ? (entry.spend_brl / periodTotalSpend) * 100
-                            : 0;
-                        const isDominant = idx === 0;
-                        const isHi =
-                          distributionHighlightPlatform !== null &&
-                          distributionHighlightPlatform === entry.platform;
-                        const dim =
-                          distributionHighlightPlatform !== null &&
-                          distributionHighlightPlatform !== entry.platform;
-                        const fill =
-                          entry.color ??
-                          PLATFORM_COLORS[entry.platform] ??
-                          "#64748b";
-                        return (
-                          <div
-                            key={entry.platform}
-                            className={`chartDistributionPctRow${isDominant ? " chartDistributionPctRowDominant" : ""}${isHi ? " chartDistributionPctRowHighlight" : ""}`}
-                            onMouseEnter={() =>
-                              setDistributionHighlightPlatform(entry.platform)
-                            }
-                            onMouseLeave={() =>
-                              setDistributionHighlightPlatform(null)
-                            }
-                            style={{ opacity: dim ? 0.38 : 1 }}
-                          >
-                            <span className="chartDistributionPctName">
-                              <span
-                                className="chartDistributionPctSwatch"
-                                style={{ backgroundColor: fill }}
-                                aria-hidden
-                              />
-                              {entry.platform}
-                            </span>
-                            <span className="chartDistributionPctValue">
-                              {pct.toFixed(1)}%
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </aside>
-                  </div>
+                  <ResendDonut
+                    data={chartData}
+                    total={periodTotalSpend}
+                    highlight={distributionHighlightPlatform}
+                    onHighlight={setDistributionHighlightPlatform}
+                  />
                 )}
               </div>
             )}
           </div>
         </section>
 
-        <section className="panel panelChart">
-          <div className="chartBlockHeading">
+        <section
+          className="panel panelChart panelChartResend panelChartResendDaily"
+          ref={dailyCostChartRef}
+        >
+          <div className="chartBlockHeading dailyChartHeading">
             <div className="chartBlockHeadingTop">
               <h2 className="chartBlockTitle">Custo dia a dia</h2>
-              <div
-                className="chartBlockExport"
-                role="group"
-                aria-label="Exportar custo dia a dia"
-              >
+              <div className="dailyChartHeaderRight">
+                <ul className="dailyChartLegendStrip" aria-hidden>
+                  {dailyChartPlatforms.map((platform) => (
+                    <li key={platform} className="dailyChartLegendStripItem">
+                      <span
+                        className="dailyChartLegendStripSwatch"
+                        style={{
+                          background:
+                            RESEND_CHART_COLORS[platform] ??
+                            PLATFORM_COLORS[platform] ??
+                            "#A1A1A1",
+                        }}
+                      />
+                      <span>{platform}</span>
+                    </li>
+                  ))}
+                </ul>
                 <button
                   type="button"
-                  className="button buttonGhost buttonSmall chartExportButton"
-                  aria-label="Copiar custo dia a dia como CSV"
-                  onClick={() =>
-                    copyObjectsAsCsv(
-                      "custo dia a dia",
-                      dailyChartRows.map((row) => {
-                        const baseRow: Record<string, string | number> = {
-                          data: formatDateBr(String(row.date)),
-                          total_brl: Number(row.total ?? 0).toFixed(2),
-                        };
-                        for (const platform of dailyChartPlatforms) {
-                          baseRow[`${platform}_brl`] = Number(
-                            row[platform] ?? 0,
-                          ).toFixed(2);
-                        }
-                        return baseRow;
-                      }),
-                    )
-                  }
-                >
-                  <span className="buttonLabelWithIcon">
-                    <DownloadIcon />
-                    CSV
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall chartExportButton"
-                  aria-label="Exportar gráfico de custo dia a dia como PNG"
+                  className="chartIconButton"
+                  aria-label="Baixar custo dia a dia como PNG"
+                  title="Exportar PNG"
+                  data-html2canvas-ignore="true"
                   onClick={() =>
                     exportChartAsPng(
                       dailyCostChartRef.current,
-                      "custo dia a dia",
+                      "Custo dia a dia",
+                      "#0f0f0f",
                     )
                   }
                 >
-                  PNG
+                  <DownloadIcon />
                 </button>
               </div>
             </div>
-            <p className="chartBlockSubtitle">Evolução diária por plataforma</p>
+            <div className="dailyChartHeaderBottom">
+              <p className="chartBlockSubtitle">Evolução diária por plataforma</p>
+              {dailyChartPlatforms.length ? (
+                <div
+                  className="dailyChartSegmented"
+                  role="tablist"
+                  aria-label="Filtro de plataformas"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={dailyCostFocus === null}
+                    className={`dailyChartSegmentedItem${dailyCostFocus === null ? " is-active" : ""}`}
+                    onClick={() => setDailyCostFocus(null)}
+                  >
+                    Tudo
+                  </button>
+                  {dailyChartPlatforms.map((platform) => (
+                    <button
+                      key={platform}
+                      type="button"
+                      role="tab"
+                      aria-selected={dailyCostFocus === platform}
+                      className={`dailyChartSegmentedItem${dailyCostFocus === platform ? " is-active" : ""}`}
+                      onClick={() => setDailyCostFocus(platform)}
+                    >
+                      {platform}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </div>
-          {!dailyChartRows.length ? (
+          {isValidating ? (
+            <div
+              className="platformSkeleton skeletonChartInline skeletonChartInlineTall"
+              aria-hidden="true"
+            />
+          ) : !dailyChartRows.length ? (
             <p className="alertInfo">
               Sem série diária disponível neste período.
             </p>
@@ -5154,242 +5196,169 @@ function HomeContent() {
             <p className="alertInfo">Sem variação diária neste período.</p>
           ) : (
             <div
-              className="chartWrap chartWrapTall"
-              ref={dailyCostChartRef}
+              className="dailyChartContainer"
               role="img"
               aria-label={`Gráfico de custo diário por plataforma no período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
             >
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={dailyChartRows}>
-                  <CartesianGrid
-                    vertical
-                    horizontal={false}
-                    stroke="rgba(148, 163, 184, 0.07)"
-                    strokeDasharray="2 10"
-                  />
-                  <XAxis
-                    dataKey="date"
-                    stroke="rgba(148, 163, 184, 0.28)"
-                    tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
-                    tickFormatter={(value) => formatDateBr(String(value))}
-                    tickCount={6}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis
-                    stroke="rgba(148, 163, 184, 0.28)"
-                    tick={{ fill: "rgba(148, 163, 184, 0.72)", fontSize: 10 }}
-                    tickFormatter={formatCurrencyAxisTick}
-                    tickCount={4}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <Tooltip
-                    shared
-                    content={
-                      <NumberTooltip
-                        labelFormatter={(label) => formatDateBr(String(label))}
-                      />
-                    }
-                    cursor={{ fill: "rgba(15, 23, 42, 0.28)", stroke: "none" }}
-                    offset={{ x: 18, y: 4 }}
-                    allowEscapeViewBox={{ x: false, y: true }}
-                    animationDuration={120}
-                  />
-                  <Legend
-                    content={
-                      <DailyCostLegend
-                        entries={dailyChartLegendPayload}
-                        activeKeys={dailyCostFocusedSeries}
-                        onToggle={(seriesKey) =>
-                          setDailyCostFocusedSeries((current) =>
-                            current.includes(seriesKey)
-                              ? current.filter((value) => value !== seriesKey)
-                              : [...current, seriesKey],
-                          )
-                        }
-                      />
-                    }
-                  />
-                  {dailyChartPlatforms.map((platform) => {
-                    if (
-                      dailyCostFocusedSeries.length > 0 &&
-                      !dailyCostFocusedSeries.includes(platform)
-                    ) {
-                      return null;
-                    }
-                    return (
-                      <Line
-                        key={platform}
-                        type="monotone"
-                        dataKey={platform}
-                        stroke={PLATFORM_COLORS[platform] ?? "#4e1e9c"}
-                        strokeWidth={2.5}
-                        dot={false}
-                        activeDot={{ r: 5, strokeWidth: 2, stroke: "#1c262f" }}
-                      />
-                    );
-                  })}
-                  {dailyCostFocusedSeries.length === 0 ||
-                  dailyCostFocusedSeries.includes("total") ? (
-                    <Line
-                      type="monotone"
-                      dataKey="total"
-                      stroke="#e2e8f0"
-                      strokeWidth={2.5}
-                      strokeDasharray="4 4"
-                      dot={false}
-                      activeDot={{ r: 5, strokeWidth: 2, stroke: "#1c262f" }}
-                    />
-                  ) : null}
-                </LineChart>
-              </ResponsiveContainer>
+              <ResendDailyLine
+                rows={dailyChartRows}
+                platforms={dailyChartPlatforms}
+                focused={dailyCostFocus}
+                todayIso={new Date().toISOString().slice(0, 10)}
+              />
             </div>
           )}
         </section>
 
-        <hr className="homeChartsJourneyDivider" aria-hidden="true" />
-
-        <section id="jornada-campanhas" className="card stackDetailCard">
-          <div className="tableHeader">
-            <h2>Jornada de Campanhas</h2>
+      </>
+      )}
+      {mode === "journey" && (
+      <>
+        <div className="filterBar filterToolbar filterToolbarDashboard">
+          <MultiSelectFilter
+            id="journey-filter-client"
+            label="Cliente"
+            options={clients}
+            value={clientFilter}
+            onChange={setClientFilter}
+            placeholder="Todos"
+            disabledOptions={disabledClientOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="journey-filter-cs"
+            label="CS"
+            options={csFilterOptions}
+            value={csFilter}
+            onChange={setCsFilter}
+            placeholder="Todos"
+            showAvatar
+            disabledOptions={disabledCsOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="journey-filter-campaign-type"
+            label="Produto"
+            options={productFilterOptions}
+            value={campaignTypeFilter}
+            onChange={setCampaignTypeFilter}
+            placeholder="Todos"
+            disabledOptions={disabledCampaignTypeOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="journey-filter-feature"
+            label="Feature"
+            options={[...FEATURE_OPTIONS]}
+            value={featureFilter}
+            onChange={setFeatureFilter}
+            placeholder="Todas"
+            disabledOptions={disabledFeatureOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="journey-filter-campaign"
+            label="Campanha"
+            options={campaignFilterOptions}
+            value={campaignFilter}
+            onChange={setCampaignFilter}
+            placeholder="Todas"
+            disabledOptions={disabledCampaignOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="journey-filter-campaign-status"
+            label="Status"
+            options={campaignStatusOptions}
+            value={campaignStatusFilter}
+            onChange={setCampaignStatusFilter}
+            placeholder="Todos"
+            disabledOptions={disabledCampaignStatusOptions}
+            compact
+          />
+          {hasDashboardFilters ? (
             <button
               type="button"
-              className="button buttonGhost buttonSmall"
-              onClick={handleExportCampaignJourney}
+              className="filterClearInline"
+              onClick={clearDashboardFilters}
             >
-              <span className="buttonLabelWithIcon">
+              Limpar filtros
+            </button>
+          ) : null}
+        </div>
+        <section id="jornada-campanhas" className="journeyResendCard">
+          <header className="journeyResendHeader">
+            <div className="journeyResendHeaderTitle">
+              <h2>Campaign Journey</h2>
+              <p className="journeyResendHeaderSubtitle">
+                <span className="num">
+                  {campaignJourneySummary.totalCount.toLocaleString("pt-BR")}
+                </span>{" "}
+                {campaignJourneySummary.totalCount === 1 ? "line" : "lines"}
+                <span className="journeyResendSep" aria-hidden="true">
+                  ·
+                </span>
+                <span className="num">
+                  {brl(campaignJourneySummary.investedTotal)}
+                </span>{" "}
+                {campaignJourneySummary.totalCount === 1
+                  ? "investido"
+                  : "investidos"}
+                <span className="journeyResendSep" aria-hidden="true">
+                  ·
+                </span>
+                <span className="journeyResendStatActive">
+                  <span className="num">
+                    {campaignJourneySummary.activeCount.toLocaleString("pt-BR")}
+                  </span>{" "}
+                  {campaignJourneySummary.activeCount === 1 ? "ativa" : "ativas"}
+                </span>
+                <span className="journeyResendSep" aria-hidden="true">
+                  ·
+                </span>
+                <span className="journeyResendStatEnded">
+                  <span className="num">
+                    {campaignJourneySummary.endedCount.toLocaleString("pt-BR")}
+                  </span>{" "}
+                  {campaignJourneySummary.endedCount === 1
+                    ? "encerrada"
+                    : "encerradas"}
+                </span>
+              </p>
+            </div>
+            <div className="journeyResendHeaderActions">
+              <button
+                type="button"
+                className="journeyResendHeaderBreakdown"
+                onClick={() => setIsJourneyBreakdownExpanded((prev) => !prev)}
+                aria-expanded={isJourneyBreakdownExpanded}
+                title={
+                  isJourneyBreakdownExpanded
+                    ? "Ocultar colunas de plataforma"
+                    : "Mostrar uma coluna por plataforma"
+                }
+              >
+                <ColumnsIcon />
+                {isJourneyBreakdownExpanded
+                  ? "Ocultar plataformas"
+                  : "Detalhar plataformas"}
+                <span className="num journeyResendHeaderBreakdownCount">
+                  {data.dashboard.active_platforms.length.toLocaleString(
+                    "pt-BR",
+                  )}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="journeyResendHeaderIconBtn"
+                onClick={handleExportCampaignJourney}
+                title="Exportar CSV"
+                aria-label="Exportar CSV"
+              >
                 <DownloadIcon />
-                CSV
-              </span>
-            </button>
-          </div>
-          <section className="panel panelSub filterPanelCard filterPanelCardDashboard journeyFilterCollapseCard">
-            <button
-              type="button"
-              className="filterPanelHeader filterPanelHeaderToggle"
-              onClick={() => setIsJourneyFiltersExpanded((prev) => !prev)}
-              aria-expanded={isJourneyFiltersExpanded}
-              aria-controls="journey-filter-content"
-              aria-label={
-                isJourneyFiltersExpanded
-                  ? "Ocultar filtros da jornada"
-                  : "Mostrar filtros da jornada"
-              }
-            >
-              <span className="filterPanelHeaderTitleBlock">
-                <span
-                  className="filterPanelTitleRow"
-                  role="heading"
-                  aria-level={3}
-                >
-                  <FilterLinesIcon />
-                  Filtros da jornada
-                </span>
-              </span>
-              <span className="filterPanelHeaderActions">
-                <span className="filterPanelActiveCount">
-                  Filtros ({activeDashboardFilterCount.toLocaleString("pt-BR")})
-                </span>
-                <span className="filterPanelToggleChevron" aria-hidden="true">
-                  <FilterPanelDrawerChevron
-                    expanded={isJourneyFiltersExpanded}
-                  />
-                </span>
-              </span>
-            </button>
-            {isJourneyFiltersExpanded ? (
-              <div id="journey-filter-content" className="filterPanelBody">
-                <div className="filterToolbar filterToolbarDashboard journeyFilterToolbar">
-                  <MultiSelectFilter
-                    id="journey-filter-client"
-                    label="Cliente"
-                    options={clients}
-                    value={clientFilter}
-                    onChange={setClientFilter}
-                    placeholder="Todos os clientes"
-                    disabledOptions={disabledClientOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id="journey-filter-cs"
-                    label="CS"
-                    options={csFilterOptions}
-                    value={csFilter}
-                    onChange={setCsFilter}
-                    placeholder="Todos os CS"
-                    showAvatar
-                    disabledOptions={disabledCsOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id="journey-filter-campaign-type"
-                    label="Produto"
-                    options={productFilterOptions}
-                    value={campaignTypeFilter}
-                    onChange={setCampaignTypeFilter}
-                    placeholder="Todos os produtos"
-                    disabledOptions={disabledCampaignTypeOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id="journey-filter-feature"
-                    label="Feature"
-                    options={[...FEATURE_OPTIONS]}
-                    value={featureFilter}
-                    onChange={setFeatureFilter}
-                    placeholder="Todas as features"
-                    disabledOptions={disabledFeatureOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id="journey-filter-campaign"
-                    label="Campanha"
-                    options={campaignFilterOptions}
-                    value={campaignFilter}
-                    onChange={setCampaignFilter}
-                    placeholder="Todas as campanhas"
-                    disabledOptions={disabledCampaignOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id="journey-filter-campaign-status"
-                    label="Status"
-                    options={campaignStatusOptions}
-                    value={campaignStatusFilter}
-                    onChange={setCampaignStatusFilter}
-                    placeholder="Todos os status"
-                    disabledOptions={disabledCampaignStatusOptions}
-                    compact
-                  />
-                </div>
-              </div>
-            ) : null}
-          </section>
-          <section
-            className="journeyTopSummary"
-            aria-label="Resumo da jornada de campanhas"
-          >
-            <div className="journeyTopSummaryCard">
-              <p className="journeyTopSummaryLabel">Total investido</p>
-              <p className="journeyTopSummaryValue">
-                {brl(campaignJourneySummary.investedTotal)}
-              </p>
+              </button>
             </div>
-            <div className="journeyTopSummaryCard">
-              <p className="journeyTopSummaryLabel">Campanhas ativas</p>
-              <p className="journeyTopSummaryValue">
-                {campaignJourneySummary.activeCount.toLocaleString("pt-BR")}
-              </p>
-            </div>
-            <div className="journeyTopSummaryCard">
-              <p className="journeyTopSummaryLabel">Campanhas encerradas</p>
-              <p className="journeyTopSummaryValue">
-                {campaignJourneySummary.endedCount.toLocaleString("pt-BR")}
-              </p>
-            </div>
-          </section>
-
+          </header>
           {data.journey_status === "error" ? (
             <p className="alertError">
               Erro ao ler planilha:{" "}
@@ -5401,33 +5370,6 @@ function HomeContent() {
             </p>
           ) : (
             <div className="stackDetailTableWrap">
-              <p className="stackDetailCounter">
-                {sortedCampaignRows.length.toLocaleString("pt-BR")} lines
-                analisadas •{" "}
-                {brl(
-                  sortedCampaignRows.reduce(
-                    (sum, row) => sum + Number(row.investido ?? 0),
-                    0,
-                  ),
-                )}{" "}
-                investidos
-              </p>
-              <div
-                className="journeyColumnGroups"
-                role="group"
-                aria-label="Controles da tabela"
-              >
-                <button
-                  type="button"
-                  className="journeyBreakdownToggle"
-                  onClick={() => setIsJourneyBreakdownExpanded((prev) => !prev)}
-                  aria-expanded={isJourneyBreakdownExpanded}
-                >
-                  {isJourneyBreakdownExpanded
-                    ? "Breakdown: ocultar"
-                    : `Breakdown: mostrar (${data.dashboard.active_platforms.length.toLocaleString("pt-BR")})`}
-                </button>
-              </div>
               <div className="tableWrap">
                 <table className="campaignJourneyTable">
                   <thead>
@@ -5790,9 +5732,18 @@ function HomeContent() {
                   </tbody>
                 </table>
               </div>
+              <div className="journeyResendTableFoot">
+                <span>
+                  {sortedCampaignRows.length === 0
+                    ? "0 linhas"
+                    : `1–${sortedCampaignRows.length.toLocaleString("pt-BR")} de ${sortedCampaignRows.length.toLocaleString("pt-BR")}`}
+                </span>
+              </div>
             </div>
           )}
         </section>
+      </>
+      )}
       </>
     );
   };
@@ -5800,7 +5751,10 @@ function HomeContent() {
   const renderPlatformPage = (
     platformName: Exclude<
       NavKey,
-      "Dashboard" | "⚠️ Lines sem token" | "🚨 Gasto fora do mês vigente"
+      | "Dashboard"
+      | "Jornada de campanhas"
+      | "⚠️ Lines sem token"
+      | "🚨 Gasto fora do mês vigente"
     >,
   ) => {
     if (!data) return null;
@@ -5977,51 +5931,81 @@ function HomeContent() {
       return (
         <div className="nexdPlatformStack">
           <div className="nexdSummaryCapRow">
-            <div
-              className="nexdHomeKpiWrap"
+            <section
+              className="dspResendHero nexdResendHero"
               aria-label={`Resumo Nexd: ${usedPct.toFixed(1).replace(".", ",")}% do cap usado, gasto ${brl(Number(page.spend_brl ?? 0))}, ${Math.round(impressions).toLocaleString("pt-BR")} impressões, ${nexdSummaryRhythm.label}`}
             >
-              <KpiCard
-                title="NEXD"
-                value={`${usedPct.toFixed(1).replace(".", ",")}% usado`}
-                nexdSpendSecondary={{
-                  brl: brl(Number(page.spend_brl ?? 0)),
-                  usd:
-                    page.spend_usd != null &&
+              <header className="dspResendHeroHead">
+                <div className="dspResendHeroBrand">
+                  <span className="platformMono platformMono-nexd">NX</span>
+                  <div>
+                    <p className="dspResendHeroEyebrow">Plataforma</p>
+                    <h2 className="dspResendHeroTitle">Nexd</h2>
+                  </div>
+                </div>
+                <div className="dspResendHeroValue">
+                  <span className="num">
+                    {usedPct.toFixed(1).replace(".", ",")}
+                  </span>
+                  <span className="dspResendHeroCurrency">% usado</span>
+                </div>
+              </header>
+              <p className="dspResendHeroBudget">
+                <span
+                  className={`nexdRhythmDot nexdRhythmDot--${nexdSummaryRhythm.tone}`}
+                  aria-hidden="true"
+                />
+                {nexdSummaryRhythm.label}
+                {nexdSummaryRhythm.paceHint ? (
+                  <>
+                    <span className="dspResendHeroBudgetSep">·</span>
+                    <span>{nexdSummaryRhythm.paceHint}</span>
+                  </>
+                ) : null}
+                {nexdForecastLeftKpi ? (
+                  <>
+                    <span className="dspResendHeroBudgetSep">·</span>
+                    <span>{nexdForecastLeftKpi.line}</span>
+                  </>
+                ) : null}
+              </p>
+              <div className="dspResendHeroStats">
+                <div className="dspResendHeroStat">
+                  <span className="dspResendHeroStatLabel">Gasto</span>
+                  <span className="dspResendHeroStatValue num">
+                    {brl(Number(page.spend_brl ?? 0))}
+                  </span>
+                  <span className="dspResendHeroStatHint">
+                    {page.spend_usd != null &&
                     Number.isFinite(Number(page.spend_usd))
                       ? `USD ${Number(page.spend_usd).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
-                      : undefined,
-                }}
-                nexdTrendLine={nexdTrendLineKpi}
-                metrics={[
-                  {
-                    label: "Impressões",
-                    value: Math.round(impressions).toLocaleString("pt-BR"),
-                  },
-                ]}
-                nexdFoldDetails
-                nexdSummary={{
-                  rhythmEmoji: nexdSummaryRhythm.emoji,
-                  rhythmLabel: nexdSummaryRhythm.label,
-                  rhythmTone: nexdSummaryRhythm.tone,
-                  paceHint: nexdSummaryRhythm.paceHint,
-                  forecastLeft: nexdForecastLeftKpi,
-                }}
-                titleEmphasis
-                logoSrc={PLATFORM_LOGOS.Nexd}
-                budget={
-                  hasDashboardFilters
-                    ? undefined
-                    : getBudgetForPlatform(
-                        "Nexd",
-                        Number(page.spend_brl ?? 0),
-                        {
-                          preferDisplayedSpend: hasDashboardScopeFilters,
-                        },
-                      )
-                }
-              />
-            </div>
+                      : "—"}
+                  </span>
+                </div>
+                <div className="dspResendHeroStat">
+                  <span className="dspResendHeroStatLabel">Impressões</span>
+                  <span className="dspResendHeroStatValue num">
+                    {Math.round(impressions).toLocaleString("pt-BR")}
+                  </span>
+                  <span className="dspResendHeroStatHint">
+                    de {cap.toLocaleString("pt-BR")}
+                  </span>
+                </div>
+                <div className="dspResendHeroStat">
+                  <span className="dspResendHeroStatLabel">Previsão</span>
+                  <span className="dspResendHeroStatValue num">
+                    {forecastRounded != null ? `~${forecastRounded}%` : "—"}
+                  </span>
+                  <span className="dspResendHeroStatHint">
+                    {forecastHot
+                      ? "Acima do cap"
+                      : forecastWarm
+                        ? "Atenção"
+                        : "Dentro do cap"}
+                  </span>
+                </div>
+              </div>
+            </section>
 
             <section
               className="panel nexdCapPanel nexdPanelTight"
@@ -6645,706 +6629,610 @@ function HomeContent() {
       };
 
       const dv360Scope = page.dv360_context;
-      return (
-        <>
-          {platformName === "DV360" && dv360Scope ? (
-            <section
-              className="card dv360ScopeCard"
-              aria-label="Escopo e dicas do DV360"
-            >
-              <p className="cardTitle">Como achar a line no DV360</p>
-              <p className="stackDetailSubtitle">
-                O relatório usa o{" "}
-                <strong>Partner {dv360Scope.partner_id ?? "—"}</strong> e{" "}
-                {dv360Scope.advertiser_ids?.length
-                  ? `anunciante(s) ${dv360Scope.advertiser_ids.join(", ")}.`
-                  : "os anunciantes do .env."}{" "}
-                No site, mude o seletor de anunciante; em{" "}
-                <strong>Inserção</strong>, abra a IO pelo ID abaixo; a line
-                aparece sob a inserção. Se não achar, a line pode ter sido
-                arquivada mas ainda aparecer no histórico do Bid Manager.
-              </p>
-            </section>
-          ) : null}
-          <section className="panel panelSub filterPanelCard filterPanelCardDashboard">
-            <button
-              type="button"
-              className="filterPanelHeader filterPanelHeaderToggle"
-              onClick={() => setIsDashboardFiltersExpanded((prev) => !prev)}
-              aria-expanded={isDashboardFiltersExpanded}
-              aria-controls={`dsp-dashboard-filter-content-${platformName}`}
-              aria-label={
-                isDashboardFiltersExpanded
-                  ? "Ocultar filtros do dashboard"
-                  : "Mostrar filtros do dashboard"
-              }
-            >
-              <span className="filterPanelHeaderTitleBlock">
-                <span
-                  className="filterPanelTitleRow"
-                  role="heading"
-                  aria-level={3}
+
+      {
+        const linesActive = rowsForPlatform.length;
+        const totalSpend = lineDetailFiltersActive
+          ? filteredTotalGasto
+          : page.spend_brl;
+        const lineNoun = sortedRows.length === 1 ? "line" : "lines";
+        const monoCode =
+          platformName === "DV360"
+            ? "DV"
+            : platformName === "Xandr"
+              ? "X"
+              : "SA";
+        const monoToneClass =
+          platformName === "DV360"
+            ? "platformMono-dv360"
+            : platformName === "Xandr"
+              ? "platformMono-xandr"
+              : "platformMono-stack";
+        const platformIdSlug = platformName.toLowerCase();
+        const PAGE_SIZE = 20;
+        const totalRows = sortedRows.length;
+        const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE));
+        const currentPage = Math.min(Math.max(1, dspLinesPage), totalPages);
+        const pageStart = (currentPage - 1) * PAGE_SIZE;
+        const pageEnd = Math.min(pageStart + PAGE_SIZE, totalRows);
+        const pagedRows = sortedRows.slice(pageStart, pageEnd);
+        return (
+          <>
+            <div className="filterBar filterToolbar filterToolbarDashboard">
+              <MultiSelectFilter
+                id={`${platformIdSlug}-filter-client`}
+                label="Cliente"
+                options={clients}
+                value={clientFilter}
+                onChange={setClientFilter}
+                placeholder="Todos"
+                disabledOptions={disabledClientOptions}
+                compact
+              />
+              <MultiSelectFilter
+                id={`${platformIdSlug}-filter-cs`}
+                label="CS"
+                options={csFilterOptions}
+                value={csFilter}
+                onChange={setCsFilter}
+                placeholder="Todos"
+                showAvatar
+                disabledOptions={disabledCsOptions}
+                compact
+              />
+              <MultiSelectFilter
+                id={`${platformIdSlug}-filter-campaign-type`}
+                label="Produto"
+                options={productFilterOptions}
+                value={campaignTypeFilter}
+                onChange={setCampaignTypeFilter}
+                placeholder="Todos"
+                disabledOptions={disabledCampaignTypeOptions}
+                compact
+              />
+              <MultiSelectFilter
+                id={`${platformIdSlug}-filter-feature`}
+                label="Feature"
+                options={[...FEATURE_OPTIONS]}
+                value={featureFilter}
+                onChange={setFeatureFilter}
+                placeholder="Todas"
+                disabledOptions={disabledFeatureOptions}
+                compact
+              />
+              <MultiSelectFilter
+                id={`${platformIdSlug}-filter-campaign`}
+                label="Campanha"
+                options={campaignFilterOptions}
+                value={campaignFilter}
+                onChange={setCampaignFilter}
+                placeholder="Todas"
+                disabledOptions={disabledCampaignOptions}
+                compact
+              />
+              <MultiSelectFilter
+                id={`${platformIdSlug}-filter-campaign-status`}
+                label="Status"
+                options={campaignStatusOptions}
+                value={campaignStatusFilter}
+                onChange={setCampaignStatusFilter}
+                placeholder="Todos"
+                disabledOptions={disabledCampaignStatusOptions}
+                compact
+              />
+              {hasDashboardFilters ? (
+                <button
+                  type="button"
+                  className="filterClearInline"
+                  onClick={clearDashboardFilters}
                 >
-                  <FilterLinesIcon />
-                  Filtros do dashboard
-                </span>
-              </span>
-              <span className="filterPanelHeaderActions">
-                <span className="filterPanelActiveCount">
-                  Filtros ({activeDashboardFilterCount.toLocaleString("pt-BR")})
-                </span>
-                <span className="filterPanelToggleChevron" aria-hidden="true">
-                  <FilterPanelDrawerChevron
-                    expanded={isDashboardFiltersExpanded}
-                  />
-                </span>
-              </span>
-            </button>
-            {isDashboardFiltersExpanded ? (
-              <div
-                id={`dsp-dashboard-filter-content-${platformName}`}
-                className="filterPanelBody"
-              >
-                <div className="filterToolbar filterToolbarDashboard">
-                  <MultiSelectFilter
-                    id={`dsp-filter-client-${platformName}`}
-                    label="Cliente"
-                    options={clients}
-                    value={clientFilter}
-                    onChange={setClientFilter}
-                    placeholder="Todos os clientes"
-                    disabledOptions={disabledClientOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id={`dsp-filter-cs-${platformName}`}
-                    label="CS"
-                    options={csFilterOptions}
-                    value={csFilter}
-                    onChange={setCsFilter}
-                    placeholder="Todos os CS"
-                    showAvatar
-                    disabledOptions={disabledCsOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id={`dsp-filter-campaign-type-${platformName}`}
-                    label="Produto"
-                    options={productFilterOptions}
-                    value={campaignTypeFilter}
-                    onChange={setCampaignTypeFilter}
-                    placeholder="Todos os produtos"
-                    disabledOptions={disabledCampaignTypeOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id={`dsp-filter-feature-${platformName}`}
-                    label="Feature"
-                    options={[...FEATURE_OPTIONS]}
-                    value={featureFilter}
-                    onChange={setFeatureFilter}
-                    placeholder="Todas as features"
-                    disabledOptions={disabledFeatureOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id={`dsp-filter-campaign-${platformName}`}
-                    label="Campanha"
-                    options={campaignFilterOptions}
-                    value={campaignFilter}
-                    onChange={setCampaignFilter}
-                    placeholder="Todas as campanhas"
-                    disabledOptions={disabledCampaignOptions}
-                    compact
-                  />
-                  <MultiSelectFilter
-                    id={`dsp-filter-campaign-status-${platformName}`}
-                    label="Status"
-                    options={campaignStatusOptions}
-                    value={campaignStatusFilter}
-                    onChange={setCampaignStatusFilter}
-                    placeholder="Todos os status"
-                    disabledOptions={disabledCampaignStatusOptions}
-                    compact
-                  />
-                </div>
-                <div className="filterPanelFooterBar">
-                  {hasDashboardFilters ? (
-                    <button
-                      type="button"
-                      className="filterPanelClearAllButton"
-                      onClick={clearDashboardFilters}
-                    >
-                      Limpar tudo
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
-          </section>
-
-          <section className="gridCards">
-            <KpiCard
-              title={platformName}
-              value={brl(
-                lineDetailFiltersActive ? filteredTotalGasto : page.spend_brl,
-              )}
-              usdLine={
-                !lineDetailFiltersActive && page.currency === "USD"
-                  ? `USD ${(page.spend_usd ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}`
-                  : undefined
-              }
-              subtitle={undefined}
-              titleEmphasis
-              logoSrc={PLATFORM_LOGOS[platformName]}
-              budget={budget}
-            />
-            <div className="card platformStatCard">
-              <p className="cardValue">
-                {rowsForPlatform.length.toLocaleString("pt-BR")}
-              </p>
-              <p className="cardTitle">Lines ativas</p>
-              <p className="cardSubtitle">
-                {rowsWithToken.toLocaleString("pt-BR")} com token identificado
-              </p>
+                  Limpar filtros
+                </button>
+              ) : null}
             </div>
-            <button
-              type="button"
-              className={`card platformStatCard cardClickable platformStatCardNoTokenButton ${rowsWithoutToken > 0 ? "platformStatCardAlert" : ""} ${dspLinesOnlyWithoutToken ? "platformStatCardNoTokenActive" : ""}`}
-              aria-pressed={dspLinesOnlyWithoutToken}
-              aria-label="Alternar filtro: mostrar só lines sem token na tabela abaixo"
-              onClick={() => setDspLinesOnlyWithoutToken((prev) => !prev)}
-            >
-              <p className="cardValue">
-                {rowsWithoutToken.toLocaleString("pt-BR")}
-              </p>
-              <p className="cardTitle">Sem token</p>
-              <p className="cardSubtitle">
-                {rowsWithoutToken > 0
-                  ? "Requer atenção imediata para auditoria"
-                  : "Todas as lines com token identificado"}
-              </p>
-            </button>
-            <div className="card platformStatCard">
-              <p className="cardValue">
-                {activeCampaignsCount.toLocaleString("pt-BR")}
-              </p>
-              <p className="cardTitle">Campanhas ativas</p>
-              <p className="cardSubtitle">Com gasto no período selecionado</p>
-            </div>
-          </section>
 
-          {!rows.length ? (
-            <DspLinesNoDataEmptyState />
-          ) : (
-            <section className="card stackDetailCard">
-              <div className="stackDetailHeader">
-                <div>
-                  <p className="cardTitle">Lines</p>
-                </div>
-                <div className="stackDetailHeaderActions stackDetailHeaderActionsColumn">
-                  <div className="tableTopActions">
-                    <button
-                      type="button"
-                      className="button buttonGhost buttonSmall"
-                      onClick={handleExportDetailedLines}
-                    >
-                      <span className="buttonLabelWithIcon">
-                        <DownloadIcon />
-                        CSV
-                      </span>
-                    </button>
-                  </div>
-                  <div className="stackDetailFilterInline">
-                    <label className="filterInlineToggle filterInlineToggleDashboard">
-                      <input
-                        type="checkbox"
-                        checked={dspLinesOnlyWithoutToken}
-                        onChange={(event) =>
-                          setDspLinesOnlyWithoutToken(event.target.checked)
-                        }
-                      />
-                      Só lines sem token
-                    </label>
-                    <input
-                      className="stackSearchInput"
-                      type="search"
-                      value={stackAdaptSearch}
-                      onChange={(event) =>
-                        setStackAdaptSearch(event.target.value)
-                      }
-                      placeholder="Buscar line, token ou cliente"
-                      aria-label={`Buscar lines da ${platformName}`}
-                    />
+            <section className="dspResendHero">
+              <header className="dspResendHeroHead">
+                <div className="dspResendHeroBrand">
+                  <span className={`platformMono ${monoToneClass}`}>
+                    {monoCode}
+                  </span>
+                  <div>
+                    <p className="dspResendHeroEyebrow">Plataforma</p>
+                    <h2 className="dspResendHeroTitle">{platformName}</h2>
                   </div>
                 </div>
-              </div>
-              {sortedRows.length > 0 ? (
-                <p className="stackDetailCounter">
-                  {sortedRows.length.toLocaleString("pt-BR")} lines analisadas •{" "}
-                  {brl(filteredTotalGasto)} no período
+                <div className="dspResendHeroValue">
+                  <span className="dspResendHeroCurrency">R$</span>
+                  <span className="num">
+                    {totalSpend.toLocaleString("pt-BR", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
+                </div>
+              </header>
+              {budget &&
+              budget.target_brl != null &&
+              budget.progress_pct != null ? (
+                <p className="dspResendHeroBudget">
+                  Meta do mês{" "}
+                  <span className="num">{brl(budget.target_brl)}</span>
+                  <span className="dspResendHeroBudgetSep">·</span>
+                  <span className="num">
+                    {budget.progress_pct.toFixed(1).replace(".", ",")}%
+                  </span>{" "}
+                  realizado
                 </p>
               ) : null}
-              {sortedRows.length > 0 ? (
-                <div className="tableWrap">
-                  <table className="stackDetailTable">
-                    <colgroup>
-                      <col className="stackColLine" />
-                      {showDv360LineItemId ? (
-                        <col className="stackColLineItemId" />
-                      ) : null}
-                      {showDv360LineItemId ? (
-                        <col className="stackColDv360Adv" />
-                      ) : null}
-                      {showDv360LineItemId ? (
-                        <col className="stackColDv360Io" />
-                      ) : null}
-                      {showDv360LineItemId ? (
-                        <col className="stackColDv360Camp" />
-                      ) : null}
-                      {showDv360LineItemId ? (
-                        <col className="stackColDv360Status" />
-                      ) : null}
-                      <col className="stackColToken" />
-                      <col className="stackColCliente" />
-                      <col className="stackColCampanha" />
-                      <col className="stackColGasto" />
-                      <col className="stackColInvestido" />
-                      <col className="stackColPct" />
-                      <col className="stackColTotal" />
-                      <col className="stackColAccountManager" />
-                    </colgroup>
-                    <thead>
-                      <tr>
-                        <th
-                          className={
-                            stackAdaptSort.key === "line"
-                              ? "stackThSorted"
-                              : undefined
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={stackSortButtonClass("line")}
-                            onClick={() => toggleStackAdaptSort("line")}
-                          >
-                            <span>Line</span>
-                            <span className="stackSortIndicator">
-                              {stackSortIndicator("line")}
-                            </span>
-                          </button>
-                        </th>
-                        {showDv360LineItemId ? (
+              <div className="dspResendHeroStats">
+                <div className="dspResendHeroStat">
+                  <span className="dspResendHeroStatLabel">Lines ativas</span>
+                  <span className="dspResendHeroStatValue num">
+                    {linesActive.toLocaleString("pt-BR")}
+                  </span>
+                  <span className="dspResendHeroStatHint">
+                    {rowsWithToken.toLocaleString("pt-BR")} com token
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className={`dspResendHeroStat dspResendHeroStatToggle${
+                    rowsWithoutToken > 0 ? " is-alert" : ""
+                  }${dspLinesOnlyWithoutToken ? " is-active" : ""}`}
+                  aria-pressed={dspLinesOnlyWithoutToken}
+                  onClick={() =>
+                    setDspLinesOnlyWithoutToken((prev) => !prev)
+                  }
+                  title="Filtrar tabela: só lines sem token"
+                >
+                  <span className="dspResendHeroStatLabel">Sem token</span>
+                  <span className="dspResendHeroStatValue num">
+                    {rowsWithoutToken.toLocaleString("pt-BR")}
+                  </span>
+                  <span className="dspResendHeroStatHint">
+                    {rowsWithoutToken > 0
+                      ? "Clique para filtrar"
+                      : "Tudo identificado"}
+                  </span>
+                </button>
+                <div className="dspResendHeroStat">
+                  <span className="dspResendHeroStatLabel">
+                    Campanhas ativas
+                  </span>
+                  <span className="dspResendHeroStatValue num">
+                    {activeCampaignsCount.toLocaleString("pt-BR")}
+                  </span>
+                  <span className="dspResendHeroStatHint">
+                    Com gasto no período
+                  </span>
+                </div>
+              </div>
+            </section>
+
+            {!rows.length ? (
+              <DspLinesNoDataEmptyState />
+            ) : (
+              <section
+                id={`${platformIdSlug}-lines`}
+                className="journeyResendCard dspResendLinesCard"
+              >
+                <header className="journeyResendHeader">
+                  <div className="journeyResendHeaderTitle">
+                    <h2>Lines</h2>
+                    <p className="journeyResendHeaderSubtitle">
+                      <span className="num">
+                        {sortedRows.length.toLocaleString("pt-BR")}
+                      </span>{" "}
+                      {lineNoun}
+                      <span
+                        className="journeyResendSep"
+                        aria-hidden="true"
+                      >
+                        ·
+                      </span>
+                      <span className="num">{brl(filteredTotalGasto)}</span>{" "}
+                      no período
+                    </p>
+                  </div>
+                  <div className="journeyResendHeaderActions">
+                    <div className="dspResendSearch">
+                      <SearchIcon />
+                      <input
+                        type="search"
+                        value={stackAdaptSearch}
+                        onChange={(event) =>
+                          setStackAdaptSearch(event.target.value)
+                        }
+                        placeholder="Buscar line, token ou cliente"
+                        aria-label={`Buscar lines da ${platformName}`}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="journeyResendHeaderIconBtn"
+                      onClick={handleExportDetailedLines}
+                      title="Exportar CSV"
+                      aria-label="Exportar CSV"
+                    >
+                      <DownloadIcon />
+                    </button>
+                  </div>
+                </header>
+                {sortedRows.length > 0 ? (
+                  <div className="tableWrap">
+                    <table className="campaignJourneyTable dspResendLinesTable">
+                      <thead>
+                        <tr>
                           <th
-                            className="stackThLineItemId"
-                            title="ID numérico do line item no DV360; use na busca do inventário se o nome exibido for só o ID"
-                          >
-                            Line item ID
-                          </th>
-                        ) : null}
-                        {showDv360LineItemId ? (
-                          <th
-                            className="stackThDv360Meta"
-                            title="Inventário Display &amp; Video — selecione o anunciante no DV360 e abra a inserção (IO) por este ID"
-                          >
-                            Anunciante
-                          </th>
-                        ) : null}
-                        {showDv360LineItemId ? (
-                          <th
-                            className="stackThDv360Meta"
-                            title="Inserção (order) em que a line está; filtre no DV360 por ID de inserção"
-                          >
-                            Inserção (IO)
-                          </th>
-                        ) : null}
-                        {showDv360LineItemId ? (
-                          <th
-                            className="stackThDv360Meta"
-                            title="ID de campanha (API) — pode diferir de nomes na UI"
-                          >
-                            Campanha (ID)
-                          </th>
-                        ) : null}
-                        {showDv360LineItemId ? (
-                          <th
-                            className="stackThDv360Meta"
-                            title="Status da entidade no inventário (ex. PAUSED, ARCHIVED)"
-                          >
-                            Status
-                          </th>
-                        ) : null}
-                        <th
-                          className={
-                            stackAdaptSort.key === "token"
-                              ? "stackThSorted"
-                              : undefined
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={stackSortButtonClass("token")}
-                            onClick={() => toggleStackAdaptSort("token")}
-                          >
-                            <span>Token</span>
-                            <span className="stackSortIndicator">
-                              {stackSortIndicator("token")}
-                            </span>
-                          </button>
-                        </th>
-                        <th
-                          className={
-                            stackAdaptSort.key === "cliente"
-                              ? "stackThSorted"
-                              : undefined
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={stackSortButtonClass("cliente")}
-                            onClick={() => toggleStackAdaptSort("cliente")}
-                          >
-                            <span>Cliente</span>
-                            <span className="stackSortIndicator">
-                              {stackSortIndicator("cliente")}
-                            </span>
-                          </button>
-                        </th>
-                        <th
-                          className={
-                            stackAdaptSort.key === "campanha"
-                              ? "stackThSorted"
-                              : undefined
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={stackSortButtonClass("campanha")}
-                            onClick={() => toggleStackAdaptSort("campanha")}
-                          >
-                            <span>Campanha</span>
-                            <span className="stackSortIndicator">
-                              {stackSortIndicator("campanha")}
-                            </span>
-                          </button>
-                        </th>
-                        <th
-                          className={
-                            stackAdaptSort.key === "gasto"
-                              ? "stackThSorted stackThFinancial stackThNumeric"
-                              : "stackThFinancial stackThNumeric"
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={stackSortButtonClass("gasto")}
-                            onClick={() => toggleStackAdaptSort("gasto")}
-                          >
-                            <span>Gasto</span>
-                            <span className="stackSortIndicator">
-                              {stackSortIndicator("gasto")}
-                            </span>
-                          </button>
-                        </th>
-                        <th
-                          className={
-                            stackAdaptSort.key === "investido"
-                              ? "stackThSorted stackThFinancial stackThNumeric"
-                              : "stackThFinancial stackThNumeric"
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={stackSortButtonClass("investido")}
-                            onClick={() => toggleStackAdaptSort("investido")}
-                          >
-                            <span>Investido</span>
-                            <span className="stackSortIndicator">
-                              {stackSortIndicator("investido")}
-                            </span>
-                          </button>
-                        </th>
-                        <th
-                          className={
-                            stackAdaptSort.key === "pct_invest"
-                              ? "stackThSorted stackThNumeric"
-                              : "stackThNumeric"
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={stackSortButtonClass("pct_invest")}
-                            onClick={() => toggleStackAdaptSort("pct_invest")}
-                          >
-                            <span>% budget</span>
-                            <span className="stackSortIndicator">
-                              {stackSortIndicator("pct_invest")}
-                            </span>
-                          </button>
-                        </th>
-                        <th
-                          className={
-                            stackAdaptSort.key === "total"
-                              ? "stackThSorted stackThNumeric"
-                              : "stackThNumeric"
-                          }
-                        >
-                          <button
-                            type="button"
-                            className={stackSortButtonClass("total")}
-                            onClick={() => toggleStackAdaptSort("total")}
-                          >
-                            <span>Total</span>
-                            <span className="stackSortIndicator">
-                              {stackSortIndicator("total")}
-                            </span>
-                          </button>
-                        </th>
-                        <th>Account Management</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {sortedRows.map((row, index) => (
-                        <tr
-                          key={`${row.line}-${row.token}-${row.cliente}-${row.campanha}-${index}`}
-                          className={
-                            hasCampaignToken(row.token)
-                              ? "campaignJourneyRow"
-                              : "missingTokenRow"
-                          }
-                          role={
-                            hasCampaignToken(row.token) ? "button" : undefined
-                          }
-                          tabIndex={hasCampaignToken(row.token) ? 0 : undefined}
-                          onClick={() => {
-                            if (!hasCampaignToken(row.token)) return;
-                            router.push(
-                              routeForCampaign(row.token, resolvedActivePage),
-                            );
-                          }}
-                          onKeyDown={(event) => {
-                            if (!hasCampaignToken(row.token)) return;
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              router.push(
-                                routeForCampaign(row.token, resolvedActivePage),
-                              );
+                            className={
+                              stackAdaptSort.key === "line"
+                                ? "stackThSorted"
+                                : undefined
                             }
-                          }}
-                        >
-                          <td className="stackLineCell">
-                            <div className="copyCell">
-                              <button
-                                type="button"
-                                className="copyIconButton"
-                                title="Copiar line"
-                                aria-label={`Copiar line ${row.line}`}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void (async () => {
-                                    const copied = await copyToClipboard(
-                                      row.line,
-                                      "Line",
-                                    );
-                                    if (copied)
-                                      setCopiedFieldKey(`line-${index}`);
-                                  })();
-                                }}
-                              >
-                                {copiedFieldKey === `line-${index}` ? "✓" : "⧉"}
-                              </button>
-                              <span className="stackLineValue" title={row.line}>
-                                {row.line}
+                          >
+                            <button
+                              type="button"
+                              className={stackSortButtonClass("line")}
+                              onClick={() => toggleStackAdaptSort("line")}
+                            >
+                              <span>Line</span>
+                              <span className="stackSortIndicator">
+                                {stackSortIndicator("line")}
                               </span>
-                            </div>
-                          </td>
-                          {showDv360LineItemId ? (
-                            <td
-                              className="stackLineItemIdCell"
-                              title={
-                                row.line_item_id
-                                  ? `ID do line item no DV360: ${row.line_item_id}`
-                                  : "ID não resolvido pelo relatório"
+                            </button>
+                          </th>
+                          <th
+                            className={
+                              stackAdaptSort.key === "token"
+                                ? "stackThSorted"
+                                : undefined
+                            }
+                          >
+                            <button
+                              type="button"
+                              className={stackSortButtonClass("token")}
+                              onClick={() => toggleStackAdaptSort("token")}
+                            >
+                              <span>Token</span>
+                              <span className="stackSortIndicator">
+                                {stackSortIndicator("token")}
+                              </span>
+                            </button>
+                          </th>
+                          <th
+                            className={
+                              stackAdaptSort.key === "cliente"
+                                ? "stackThSorted"
+                                : undefined
+                            }
+                          >
+                            <button
+                              type="button"
+                              className={stackSortButtonClass("cliente")}
+                              onClick={() => toggleStackAdaptSort("cliente")}
+                            >
+                              <span>Cliente</span>
+                              <span className="stackSortIndicator">
+                                {stackSortIndicator("cliente")}
+                              </span>
+                            </button>
+                          </th>
+                          <th
+                            className={
+                              stackAdaptSort.key === "campanha"
+                                ? "stackThSorted"
+                                : undefined
+                            }
+                          >
+                            <button
+                              type="button"
+                              className={stackSortButtonClass("campanha")}
+                              onClick={() =>
+                                toggleStackAdaptSort("campanha")
                               }
                             >
-                              {row.line_item_id && String(row.line_item_id).trim()
-                                ? String(row.line_item_id).trim()
-                                : "—"}
-                            </td>
-                          ) : null}
-                          {showDv360LineItemId ? (
-                            <td className="stackDv360MetaCell">
-                              {row.dv360_advertiser_id &&
-                              String(row.dv360_advertiser_id).trim() !==
-                                "" ? (
-                                <div className="stackDv360MetaCellBlock">
-                                  <a
-                                    href={dv360AdvertiserRootUrl(
-                                      String(row.dv360_advertiser_id),
-                                    )}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="dv360ExternalLink"
-                                    onClick={(e) => e.stopPropagation()}
+                              <span>Campanha</span>
+                              <span className="stackSortIndicator">
+                                {stackSortIndicator("campanha")}
+                              </span>
+                            </button>
+                          </th>
+                          <th>Account Manager</th>
+                          <th
+                            className={
+                              stackAdaptSort.key === "investido"
+                                ? "stackThSorted stackThFinancial stackThNumeric"
+                                : "stackThFinancial stackThNumeric"
+                            }
+                          >
+                            <button
+                              type="button"
+                              className={stackSortButtonClass("investido")}
+                              onClick={() =>
+                                toggleStackAdaptSort("investido")
+                              }
+                            >
+                              <span>Investido</span>
+                              <span className="stackSortIndicator">
+                                {stackSortIndicator("investido")}
+                              </span>
+                            </button>
+                          </th>
+                          <th
+                            className={
+                              stackAdaptSort.key === "gasto"
+                                ? "stackThSorted stackThFinancial stackThNumeric"
+                                : "stackThFinancial stackThNumeric"
+                            }
+                          >
+                            <button
+                              type="button"
+                              className={stackSortButtonClass("gasto")}
+                              onClick={() => toggleStackAdaptSort("gasto")}
+                            >
+                              <span>Gasto</span>
+                              <span className="stackSortIndicator">
+                                {stackSortIndicator("gasto")}
+                              </span>
+                            </button>
+                          </th>
+                          <th
+                            className={
+                              stackAdaptSort.key === "pct_invest"
+                                ? "stackThSorted stackThNumeric"
+                                : "stackThNumeric"
+                            }
+                          >
+                            <button
+                              type="button"
+                              className={stackSortButtonClass("pct_invest")}
+                              onClick={() =>
+                                toggleStackAdaptSort("pct_invest")
+                              }
+                            >
+                              <span>% budget</span>
+                              <span className="stackSortIndicator">
+                                {stackSortIndicator("pct_invest")}
+                              </span>
+                            </button>
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pagedRows.map((row, idx) => {
+                          const index = pageStart + idx;
+                          const tokenOk = hasCampaignToken(row.token);
+                          const pctFill = Math.max(
+                            0,
+                            Math.min(100, Number(row.pct_invest ?? 0)),
+                          );
+                          return (
+                            <tr
+                              key={`${row.line}-${row.token}-${row.cliente}-${row.campanha}-${index}`}
+                              className={
+                                tokenOk
+                                  ? "campaignJourneyRow"
+                                  : "campaignJourneyRow campaignJourneyRowMuted"
+                              }
+                              role={tokenOk ? "button" : undefined}
+                              tabIndex={tokenOk ? 0 : undefined}
+                              onClick={() => {
+                                if (!tokenOk) return;
+                                router.push(
+                                  routeForCampaign(
+                                    row.token,
+                                    resolvedActivePage,
+                                  ),
+                                );
+                              }}
+                              onKeyDown={(event) => {
+                                if (!tokenOk) return;
+                                if (
+                                  event.key === "Enter" ||
+                                  event.key === " "
+                                ) {
+                                  event.preventDefault();
+                                  router.push(
+                                    routeForCampaign(
+                                      row.token,
+                                      resolvedActivePage,
+                                    ),
+                                  );
+                                }
+                              }}
+                            >
+                              <td className="dspResendLineCell">
+                                <div
+                                  className="dspResendLineCellInner"
+                                  title={row.line}
+                                >
+                                  <span className="dspResendLineText">
+                                    {row.line}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="copyIconButton dspResendLineCopy"
+                                    title="Copiar nome da line"
+                                    aria-label={`Copiar line ${row.line}`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void (async () => {
+                                        const copied = await copyToClipboard(
+                                          row.line,
+                                          "Line",
+                                        );
+                                        if (copied)
+                                          setCopiedFieldKey(
+                                            `stack-line-${index}`,
+                                          );
+                                      })();
+                                    }}
                                   >
-                                    {row.dv360_advertiser_id}
-                                  </a>
-                                  {row.line_item_id ? (
-                                    <a
-                                      href={dv360LineItemUrlGuess(
-                                        String(row.dv360_advertiser_id),
-                                        String(row.line_item_id),
-                                      )}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="dv360LineLinkTry"
-                                      title="URL aproximada; a interface do Google pode mudar"
-                                      onClick={(e) => e.stopPropagation()}
+                                    {copiedFieldKey === `stack-line-${index}`
+                                      ? "✓"
+                                      : "⧉"}
+                                  </button>
+                                </div>
+                              </td>
+                              <td className="stackTokenCell">
+                                {tokenOk ? (
+                                  <div className="copyCell">
+                                    <button
+                                      type="button"
+                                      className="copyIconButton"
+                                      title="Copiar token"
+                                      aria-label={`Copiar token ${row.token}`}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        void (async () => {
+                                          const copied = await copyToClipboard(
+                                            row.token,
+                                            "Token",
+                                          );
+                                          if (copied)
+                                            setCopiedFieldKey(
+                                              `stack-token-${index}`,
+                                            );
+                                        })();
+                                      }}
                                     >
-                                      Abrir line (tentativa)
-                                    </a>
+                                      {copiedFieldKey ===
+                                      `stack-token-${index}`
+                                        ? "✓"
+                                        : "⧉"}
+                                    </button>
+                                    <span title={row.token}>{row.token}</span>
+                                  </div>
+                                ) : (
+                                  <span
+                                    className="dspResendNoToken"
+                                    title="Sem token identificado"
+                                  >
+                                    Sem token
+                                  </span>
+                                )}
+                              </td>
+                              <td className="dspResendTruncCell">
+                                <span title={row.cliente}>
+                                  {row.cliente || "—"}
+                                </span>
+                              </td>
+                              <td className="dspResendTruncCell">
+                                <span title={row.campanha}>
+                                  {row.campanha || "—"}
+                                </span>
+                              </td>
+                              <td>
+                                {row.account_management &&
+                                row.account_management !== "—" ? (
+                                  <span className="accountManagerCell">
+                                    {getAccountManagerAvatar(
+                                      row.account_management,
+                                    ) ? (
+                                      <Image
+                                        src={
+                                          getAccountManagerAvatar(
+                                            row.account_management,
+                                          )!
+                                        }
+                                        alt={`Foto de ${row.account_management}`}
+                                        width={22}
+                                        height={22}
+                                        className="accountManagerAvatar"
+                                      />
+                                    ) : null}
+                                    <span>{row.account_management}</span>
+                                  </span>
+                                ) : (
+                                  "—"
+                                )}
+                              </td>
+                              <td className="stackNumericCellRight stackNumericCellFinancial">
+                                <div className="journeyInvestmentCell">
+                                  <span className="journeyInvestmentValue">
+                                    {row.investido ? brl(row.investido) : "—"}
+                                  </span>
+                                  {row.investido ? (
+                                    <>
+                                      <div
+                                        className="journeyBudgetProgress"
+                                        aria-hidden="true"
+                                      >
+                                        <span
+                                          className="journeyBudgetProgressFill"
+                                          style={{ width: `${pctFill}%` }}
+                                        />
+                                      </div>
+                                      <span className="journeyBudgetPct">
+                                        {row.pct_invest != null
+                                          ? `${row.pct_invest.toFixed(1).replace(".", ",")}% budget`
+                                          : ""}
+                                      </span>
+                                    </>
                                   ) : null}
                                 </div>
-                              ) : (
-                                "—"
-                              )}
-                            </td>
-                          ) : null}
-                          {showDv360LineItemId ? (
-                            <td className="stackDv360MetaCell" title="ID da inserção (IO) no DV360">
-                              {row.dv360_insertion_order_id &&
-                              String(row.dv360_insertion_order_id).trim() !==
-                                ""
-                                ? String(row.dv360_insertion_order_id).trim()
-                                : "—"}
-                            </td>
-                          ) : null}
-                          {showDv360LineItemId ? (
-                            <td className="stackDv360MetaCell" title="ID da campanha (recurso API)">
-                              {row.dv360_campaign_id &&
-                              String(row.dv360_campaign_id).trim() !== ""
-                                ? String(row.dv360_campaign_id).trim()
-                                : "—"}
-                            </td>
-                          ) : null}
-                          {showDv360LineItemId ? (
-                            <td className="stackDv360MetaCell">
-                              {row.dv360_entity_status &&
-                              String(row.dv360_entity_status).trim() !== ""
-                                ? String(row.dv360_entity_status).trim()
-                                : "—"}
-                            </td>
-                          ) : null}
-                          <td className="stackTokenCell">
-                            <div className="copyCell">
-                              <button
-                                type="button"
-                                className="copyIconButton"
-                                title="Copiar token"
-                                aria-label={`Copiar token ${row.token}`}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void (async () => {
-                                    const copied = await copyToClipboard(
-                                      row.token,
-                                      "Token",
-                                    );
-                                    if (copied)
-                                      setCopiedFieldKey(`token-${index}`);
-                                  })();
-                                }}
-                                disabled={!row.token || row.token === "—"}
-                              >
-                                {copiedFieldKey === `token-${index}`
-                                  ? "✓"
-                                  : "⧉"}
-                              </button>
-                              <span>{renderTokenValue(row.token)}</span>
-                            </div>
-                          </td>
-                          <td>{row.cliente}</td>
-                          <td>{row.campanha}</td>
-                          <td className="stackNumericCell stackNumericCellRight stackNumericCellFinancial stackGastoCell">
-                            {brl(row.gasto)}
-                          </td>
-                          <td className="stackNumericCell stackNumericCellRight stackNumericCellFinancial">
-                            {row.investido ? brl(row.investido) : "—"}
-                          </td>
-                          <td className="stackNumericCell stackNumericCellRight">
-                            {row.pct_invest !== null
-                              ? `${row.pct_invest.toFixed(1)}%`
-                              : "—"}
-                          </td>
-                          <td className="stackNumericCell stackNumericCellRight">
-                            {filteredTotalGasto > 0
-                              ? `${((row.gasto / filteredTotalGasto) * 100).toFixed(1)}%`
-                              : "0.0%"}
-                          </td>
-                          <td className="stackAccountManagerCell">
-                            {row.account_management &&
-                            row.account_management !== "—" ? (
-                              <span className="accountManagerCell">
-                                {getAccountManagerAvatar(
-                                  row.account_management,
-                                ) ? (
-                                  <Image
-                                    src={
-                                      getAccountManagerAvatar(
-                                        row.account_management,
-                                      )!
-                                    }
-                                    alt={`Foto de ${row.account_management}`}
-                                    width={22}
-                                    height={22}
-                                    className="accountManagerAvatar"
-                                  />
-                                ) : null}
-                                <span className="accountManagerName">
-                                  {row.account_management}
-                                </span>
-                                {hasAccountManagerWhatsApp(
-                                  row.account_management,
-                                ) ? (
-                                  <a
-                                    href={getCampaignReferenceWhatsAppUrl(
-                                      row.account_management,
-                                      {
-                                        campanha: row.campanha,
-                                        token: row.token,
-                                        platform: platformName,
-                                        line: row.line,
-                                      },
-                                    )}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="accountManagerWhatsappLink"
-                                    aria-label={`Conversar com ${row.account_management} no WhatsApp`}
-                                    title="Abrir conversa no WhatsApp"
-                                  >
-                                    <WhatsAppIcon />
-                                  </a>
-                                ) : null}
-                              </span>
-                            ) : (
-                              "—"
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <div className="tableWrap tableWrapDspEmpty">
-                  <DspLinesFilteredEmptyState
-                    onClearFilters={clearDspLineTableFilters}
-                  />
-                </div>
-              )}
-            </section>
-          )}
-        </>
-      );
+                              </td>
+                              <td className="stackNumericCellRight stackNumericCellFinancial">
+                                {brl(row.gasto)}
+                              </td>
+                              <td className="stackNumericCellRight">
+                                {filteredTotalGasto > 0
+                                  ? `${((row.gasto / filteredTotalGasto) * 100).toFixed(1).replace(".", ",")}%`
+                                  : "—"}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="tableWrap tableWrapDspEmpty">
+                    <DspLinesFilteredEmptyState
+                      onClearFilters={clearDspLineTableFilters}
+                    />
+                  </div>
+                )}
+                {totalRows > 0 ? (
+                  <div className="journeyResendTableFoot">
+                    <span>
+                      {`${(pageStart + 1).toLocaleString("pt-BR")}–${pageEnd.toLocaleString("pt-BR")} de ${totalRows.toLocaleString("pt-BR")}`}
+                    </span>
+                    <div className="dspResendPager">
+                      <button
+                        type="button"
+                        className="dspResendPagerBtn"
+                        onClick={() =>
+                          setDspLinesPage((prev) => Math.max(1, prev - 1))
+                        }
+                        disabled={currentPage <= 1}
+                      >
+                        Anterior
+                      </button>
+                      <span className="dspResendPagerPage num">
+                        {currentPage}/{totalPages}
+                      </span>
+                      <button
+                        type="button"
+                        className="dspResendPagerBtn dspResendPagerBtnPrimary"
+                        onClick={() =>
+                          setDspLinesPage((prev) =>
+                            Math.min(totalPages, prev + 1),
+                          )
+                        }
+                        disabled={currentPage >= totalPages}
+                      >
+                        Próxima
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+            )}
+          </>
+        );
+      }
     }
 
     const simpleDspTableRows = dspLinesOnlyWithoutToken
@@ -7579,156 +7467,220 @@ function HomeContent() {
       downloadCsv("lines-sem-token.csv", headers, rowsToExport);
     };
 
+    const NO_TOKEN_PAGE_SIZE = 20;
+    const noTokenTotalRows = sortedNoTokenRows.length;
+    const noTokenTotalPages = Math.max(
+      1,
+      Math.ceil(noTokenTotalRows / NO_TOKEN_PAGE_SIZE),
+    );
+    const noTokenCurrentPage = Math.min(
+      Math.max(1, dspLinesPage),
+      noTokenTotalPages,
+    );
+    const noTokenPageStart = (noTokenCurrentPage - 1) * NO_TOKEN_PAGE_SIZE;
+    const noTokenPageEnd = Math.min(
+      noTokenPageStart + NO_TOKEN_PAGE_SIZE,
+      noTokenTotalRows,
+    );
+    const noTokenPagedRows = sortedNoTokenRows.slice(
+      noTokenPageStart,
+      noTokenPageEnd,
+    );
+
     return (
       <>
         <section
-          className="attentionNoTokenTopRow"
+          className="dspResendHero dspResendHero--warning"
           aria-label="Resumo lines sem token"
         >
-          <div className="attentionNoTokenKpiStack">
-            <div className="card platformStatCard">
-              <p className="cardTitle">Total de lines</p>
-              <p className="cardValue">
-                {noTokenRows.length.toLocaleString("pt-BR")}
-              </p>
-              <p className="cardSubtitle">Sem token identificado no período</p>
-            </div>
-            <div className="card platformStatCard">
-              <p className="cardTitle">Total de gasto</p>
-              <p className="cardValue">
-                {brl(data.attention.no_token_total_brl)}
-              </p>
-              <p className="cardSubtitle">Sem cruzamento com a planilha</p>
-            </div>
-          </div>
-          <div className="panel panelChart attentionNoTokenPiePanel">
-            <div className="panelHeading">
+          <header className="dspResendHeroHead">
+            <div className="dspResendHeroBrand">
+              <span className="alertMono alertMono--warning" aria-hidden="true">
+                ⚠
+              </span>
               <div>
-                <h2>Gasto por DSP</h2>
-                <p>Distribuição do gasto sem token</p>
+                <p className="dspResendHeroEyebrow">Atenção necessária</p>
+                <h2 className="dspResendHeroTitle">Lines sem token</h2>
               </div>
-              <button
-                type="button"
-                className="button buttonGhost buttonSmall"
-                onClick={() =>
-                  exportChartAsPng(
-                    noTokenDistributionChartRef.current,
-                    "gasto sem token por dsp",
-                  )
-                }
-              >
-                Exportar PNG
-              </button>
             </div>
-            <div
-              className="chartWrap"
-              ref={noTokenDistributionChartRef}
-              role="img"
-              aria-label={`Gráfico de distribuição de gasto sem token no período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
-            >
-              {noTokenPieChartData.length ? (
-                <ResponsiveContainer width="100%" height={260}>
-                  <PieChart>
-                    <Pie
-                      data={noTokenPieChartData}
-                      dataKey="spend_brl"
-                      nameKey="platform"
-                      innerRadius={55}
-                      outerRadius={92}
-                      paddingAngle={2}
-                      stroke="rgba(28, 38, 47, 0.9)"
-                      strokeWidth={2}
-                    >
-                      {noTokenPieChartData.map((entry) => (
-                        <Cell key={entry.platform} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <Legend
-                      content={<PlatformLegend />}
-                      verticalAlign="bottom"
-                      align="center"
-                    />
-                    <Tooltip
-                      content={<NumberTooltip totalValue={noTokenPieTotal} />}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              ) : (
-                <p className="alertInfo attentionNoTokenPieEmpty">
-                  Nenhum gasto por plataforma para exibir.
-                </p>
-              )}
+            <div className="dspResendHeroValue">
+              <span className="dspResendHeroCurrency">R$</span>
+              <span className="num">
+                {data.attention.no_token_total_brl.toLocaleString("pt-BR", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
+              </span>
+            </div>
+          </header>
+          <p className="dspResendHeroBudget">
+            Gasto sem cruzamento com a planilha — não pode ser auditado por
+            campanha
+          </p>
+          <div className="dspResendHeroStats">
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">Total de lines</span>
+              <span className="dspResendHeroStatValue num">
+                {noTokenRows.length.toLocaleString("pt-BR")}
+              </span>
+              <span className="dspResendHeroStatHint">
+                Sem token identificado
+              </span>
+            </div>
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">DSPs afetadas</span>
+              <span className="dspResendHeroStatValue num">
+                {noTokenUniquePlatforms.length.toLocaleString("pt-BR")}
+              </span>
+              <span className="dspResendHeroStatHint">
+                Plataformas com lines órfãs
+              </span>
+            </div>
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">Filtrado</span>
+              <span className="dspResendHeroStatValue num">
+                {brl(filteredNoTokenTotal)}
+              </span>
+              <span className="dspResendHeroStatHint">
+                {sortedNoTokenRows.length.toLocaleString("pt-BR")} linha(s)
+              </span>
             </div>
           </div>
         </section>
 
-        <section className="card stackDetailCard alertSignalCard alertSignalCardWarning">
-          <p className="alertSignalBadge">Atenção necessária</p>
-          <section id="lines-sem-token">
-            <div className="stackDetailHeader">
-              <div>
-                <p className="cardTitle">Lines sem token</p>
-                <p className="stackDetailSubtitle">
-                  Gasto que não pode ser cruzado com a planilha
-                </p>
-              </div>
-              <div className="stackDetailHeaderSearchColumn">
-                <div className="tableTopActions">
-                  <button
-                    type="button"
-                    className="button buttonGhost buttonSmall"
-                    onClick={handleExportNoToken}
+        <section className="dspResendChartCard">
+          <header className="dspResendChartCardHead">
+            <div>
+              <h3>Gasto por DSP</h3>
+              <p>Distribuição do gasto sem token</p>
+            </div>
+            <button
+              type="button"
+              className="journeyResendHeaderIconBtn"
+              title="Exportar PNG"
+              aria-label="Exportar gráfico como PNG"
+              onClick={() =>
+                exportChartAsPng(
+                  noTokenDistributionChartRef.current,
+                  "gasto sem token por dsp",
+                )
+              }
+            >
+              <DownloadIcon />
+            </button>
+          </header>
+          <div
+            className="chartWrap"
+            ref={noTokenDistributionChartRef}
+            role="img"
+            aria-label={`Gráfico de distribuição de gasto sem token no período ${formatDateBr(data.period.start)} a ${formatDateBr(data.period.end)}`}
+          >
+            {noTokenPieChartData.length ? (
+              <ResponsiveContainer width="100%" height={240}>
+                <PieChart>
+                  <Pie
+                    data={noTokenPieChartData}
+                    dataKey="spend_brl"
+                    nameKey="platform"
+                    innerRadius={55}
+                    outerRadius={92}
+                    paddingAngle={2}
+                    stroke="rgba(15, 15, 15, 0.9)"
+                    strokeWidth={2}
                   >
-                    <span className="buttonLabelWithIcon">
-                      <DownloadIcon />
-                      CSV
-                    </span>
-                  </button>
-                </div>
+                    {noTokenPieChartData.map((entry) => (
+                      <Cell key={entry.platform} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Legend
+                    content={<PlatformLegend />}
+                    verticalAlign="bottom"
+                    align="center"
+                  />
+                  <Tooltip
+                    content={<NumberTooltip totalValue={noTokenPieTotal} />}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="alertInfo attentionNoTokenPieEmpty">
+                Nenhum gasto por plataforma para exibir.
+              </p>
+            )}
+          </div>
+        </section>
+
+        <section
+          id="lines-sem-token"
+          className="journeyResendCard dspResendLinesCard"
+        >
+          <header className="journeyResendHeader">
+            <div className="journeyResendHeaderTitle">
+              <h2>Lines</h2>
+              <p className="journeyResendHeaderSubtitle">
+                <span className="num">
+                  {sortedNoTokenRows.length.toLocaleString("pt-BR")}
+                </span>{" "}
+                {sortedNoTokenRows.length === 1 ? "linha" : "linhas"}
+                <span className="journeyResendSep" aria-hidden="true">
+                  ·
+                </span>
+                <span className="num">{brl(filteredNoTokenTotal)}</span> no
+                filtro
+              </p>
+            </div>
+            <div className="journeyResendHeaderActions">
+              <div className="dspResendSearch">
+                <SearchIcon />
                 <input
-                  className="stackSearchInput"
                   type="search"
                   value={attentionNoTokenSearch}
                   onChange={(event) =>
                     setAttentionNoTokenSearch(event.target.value)
                   }
-                  placeholder="Buscar por plataforma, line, id DV360 e gasto"
+                  placeholder="Buscar plataforma, line, ID DV360"
                   aria-label="Buscar lines sem token"
                 />
-                {noTokenRows.length > 0 && noTokenUniquePlatforms.length > 0 ? (
-                  <div
-                    className="stackDetailFilterInline attentionDspFilterRow"
-                    role="group"
-                    aria-label="Filtrar por DSP"
-                  >
-                    <span className="attentionDspFilterLabel">DSPs</span>
-                    <button
-                      type="button"
-                      className={`chip chipDspFilter ${attentionNoTokenDspFilters.length === 0 ? "chipDspFilterOn" : ""}`}
-                      onClick={() => setAttentionNoTokenDspFilters([])}
-                    >
-                      Todas
-                    </button>
-                    {noTokenUniquePlatforms.map((platform) => (
-                      <AttentionDspFilterChipButton
-                        key={platform}
-                        platform={platform}
-                        pressed={attentionNoTokenDspFilters.includes(platform)}
-                        onClick={() => {
-                          setAttentionNoTokenDspFilters((prev) => {
-                            if (prev.length === 0) return [platform];
-                            if (prev.includes(platform))
-                              return prev.filter((p) => p !== platform);
-                            return [...prev, platform];
-                          });
-                        }}
-                      />
-                    ))}
-                  </div>
-                ) : null}
               </div>
+              <button
+                type="button"
+                className="journeyResendHeaderIconBtn"
+                onClick={handleExportNoToken}
+                title="Exportar CSV"
+                aria-label="Exportar CSV"
+              >
+                <DownloadIcon />
+              </button>
             </div>
-            {noTokenRows.length ? (
+          </header>
+          {noTokenRows.length > 0 && noTokenUniquePlatforms.length > 0 ? (
+            <div className="dspResendChipBar" role="group" aria-label="Filtrar por DSP">
+              <span className="dspResendChipBarLabel">DSPs</span>
+              <button
+                type="button"
+                className={`dspResendChip${attentionNoTokenDspFilters.length === 0 ? " is-active" : ""}`}
+                onClick={() => setAttentionNoTokenDspFilters([])}
+              >
+                Todas
+              </button>
+              {noTokenUniquePlatforms.map((platform) => (
+                <AttentionDspFilterChipButton
+                  key={platform}
+                  platform={platform}
+                  pressed={attentionNoTokenDspFilters.includes(platform)}
+                  onClick={() => {
+                    setAttentionNoTokenDspFilters((prev) => {
+                      if (prev.length === 0) return [platform];
+                      if (prev.includes(platform))
+                        return prev.filter((p) => p !== platform);
+                      return [...prev, platform];
+                    });
+                  }}
+                />
+              ))}
+            </div>
+          ) : null}
+          {noTokenRows.length ? (
               <>
                 <p className="stackDetailCounter">
                   {sortedNoTokenRows.length.toLocaleString("pt-BR")} linha(s)
@@ -7806,7 +7758,8 @@ function HomeContent() {
                       </tr>
                     </thead>
                     <tbody>
-                      {sortedNoTokenRows.map((row, index) => {
+                      {noTokenPagedRows.map((row, idx) => {
+                        const index = noTokenPageStart + idx;
                         const obsTrim = (row.observation ?? "").trim();
                         const rowActionKey = `${row.platform}-${row.line}-${row.line_item_id ?? ""}-${index}`;
                         return (
@@ -7965,7 +7918,40 @@ function HomeContent() {
                 Todas as lines têm token identificado.
               </p>
             )}
-          </section>
+          {noTokenTotalRows > 0 ? (
+            <div className="journeyResendTableFoot">
+              <span>
+                {`${(noTokenPageStart + 1).toLocaleString("pt-BR")}–${noTokenPageEnd.toLocaleString("pt-BR")} de ${noTokenTotalRows.toLocaleString("pt-BR")}`}
+              </span>
+              <div className="dspResendPager">
+                <button
+                  type="button"
+                  className="dspResendPagerBtn"
+                  onClick={() =>
+                    setDspLinesPage((prev) => Math.max(1, prev - 1))
+                  }
+                  disabled={noTokenCurrentPage <= 1}
+                >
+                  Anterior
+                </button>
+                <span className="dspResendPagerPage num">
+                  {noTokenCurrentPage}/{noTokenTotalPages}
+                </span>
+                <button
+                  type="button"
+                  className="dspResendPagerBtn dspResendPagerBtnPrimary"
+                  onClick={() =>
+                    setDspLinesPage((prev) =>
+                      Math.min(noTokenTotalPages, prev + 1),
+                    )
+                  }
+                  disabled={noTokenCurrentPage >= noTokenTotalPages}
+                >
+                  Próxima
+                </button>
+              </div>
+            </div>
+          ) : null}
         </section>
       </>
     );
@@ -8000,82 +7986,114 @@ function HomeContent() {
       downloadCsv("gasto-fora-mes-vigente.csv", headers, rowsToExport);
     };
 
+    const OUT_PAGE_SIZE = 20;
+    const outTotalRows = sortedOutRows.length;
+    const outTotalPages = Math.max(1, Math.ceil(outTotalRows / OUT_PAGE_SIZE));
+    const outCurrentPage = Math.min(Math.max(1, dspLinesPage), outTotalPages);
+    const outPageStart = (outCurrentPage - 1) * OUT_PAGE_SIZE;
+    const outPageEnd = Math.min(outPageStart + OUT_PAGE_SIZE, outTotalRows);
+    const outPagedRows = sortedOutRows.slice(outPageStart, outPageEnd);
+    const outUniquePlatformCount = outOfPeriodUniquePlatforms.length;
+
     return (
       <>
         <section
-          className="attentionNoTokenTopRow"
+          className="dspResendHero dspResendHero--danger"
           aria-label="Resumo gasto fora do mês vigente"
         >
-          <div className="attentionNoTokenKpiStack">
-            <div className="card platformStatCard">
-              <p className="cardValue">
-                {outOfPeriodRows.length.toLocaleString("pt-BR")}
-              </p>
-              <p className="cardTitle">Total de campanhas</p>
-              <p className="cardSubtitle">Fora do período vigente</p>
+          <header className="dspResendHeroHead">
+            <div className="dspResendHeroBrand">
+              <span className="alertMono alertMono--danger" aria-hidden="true">
+                ⚠
+              </span>
+              <div>
+                <p className="dspResendHeroEyebrow">Risco de vigência</p>
+                <h2 className="dspResendHeroTitle">
+                  Gasto fora do mês vigente
+                </h2>
+              </div>
             </div>
-            <div className="card platformStatCard">
-              <p className="cardValue">
-                {brl(data.attention.out_of_period_total_brl)}
-              </p>
-              <p className="cardTitle">Total de gasto</p>
-              <p className="cardSubtitle">
-                Sem cobertura de vigência no período atual
-              </p>
+            <div className="dspResendHeroValue">
+              <span className="dspResendHeroCurrency">R$</span>
+              <span className="num">
+                {data.attention.out_of_period_total_brl.toLocaleString(
+                  "pt-BR",
+                  {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  },
+                )}
+              </span>
+            </div>
+          </header>
+          <p className="dspResendHeroBudget">
+            Campanhas cujas datas não cobrem o período atual — investigar antes
+            do fechamento
+          </p>
+          <div className="dspResendHeroStats">
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">Total de campanhas</span>
+              <span className="dspResendHeroStatValue num">
+                {outOfPeriodRows.length.toLocaleString("pt-BR")}
+              </span>
+              <span className="dspResendHeroStatHint">
+                Fora do período vigente
+              </span>
+            </div>
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">DSPs afetadas</span>
+              <span className="dspResendHeroStatValue num">
+                {outUniquePlatformCount.toLocaleString("pt-BR")}
+              </span>
+              <span className="dspResendHeroStatHint">
+                Plataformas com vigência fora
+              </span>
+            </div>
+            <div className="dspResendHeroStat">
+              <span className="dspResendHeroStatLabel">Filtrado</span>
+              <span className="dspResendHeroStatValue num">
+                {brl(filteredOutRowsTotal)}
+              </span>
+              <span className="dspResendHeroStatHint">
+                {sortedOutRows.length.toLocaleString("pt-BR")} campanha(s)
+              </span>
             </div>
           </div>
-          <div className="panel panelChart attentionNoTokenPiePanel">
-            <div className="panelHeading">
-              <div>
-                <h2>Gasto por DSP</h2>
-                <p>Distribuição do gasto fora do mês vigente</p>
-              </div>
-              <div
-                className="chartBlockExport"
-                role="group"
-                aria-label="Exportar gasto fora do mês por DSP"
-              >
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall chartExportButton"
-                  aria-label="Copiar gasto fora do mês por DSP como CSV"
-                  onClick={() =>
-                    copyObjectsAsCsv(
-                      "gasto fora do mês por dsp",
-                      outOfPeriodPieChartData.map((entry) => ({
-                        plataforma: entry.platform,
-                        gasto_brl: entry.spend_brl.toFixed(2),
-                        pct_total:
-                          outOfPeriodPieTotal > 0
-                            ? (
-                                (entry.spend_brl / outOfPeriodPieTotal) *
-                                100
-                              ).toFixed(2)
-                            : "0.00",
-                      })),
-                    )
-                  }
-                >
-                  <span className="buttonLabelWithIcon">
-                    <DownloadIcon />
-                    CSV
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="button buttonGhost buttonSmall chartExportButton"
-                  aria-label="Exportar gráfico de gasto fora do mês por DSP como PNG"
-                  onClick={() =>
-                    exportChartAsPng(
-                      outOfPeriodDistributionChartRef.current,
-                      "gasto fora do mês por dsp",
-                    )
-                  }
-                >
-                  PNG
-                </button>
-              </div>
+        </section>
+
+        <section className="dspResendChartCard">
+          <header className="dspResendChartCardHead">
+            <div>
+              <h3>Gasto por DSP</h3>
+              <p>Distribuição do gasto fora do mês vigente</p>
             </div>
+            <div className="dspResendChartCardActions">
+              <button
+                type="button"
+                className="journeyResendHeaderIconBtn"
+                title="Copiar como CSV"
+                aria-label="Copiar gasto por DSP como CSV"
+                onClick={() =>
+                  copyObjectsAsCsv(
+                    "gasto fora do mês por dsp",
+                    outOfPeriodPieChartData.map((entry) => ({
+                      plataforma: entry.platform,
+                      gasto_brl: entry.spend_brl.toFixed(2),
+                      pct_total:
+                        outOfPeriodPieTotal > 0
+                          ? (
+                              (entry.spend_brl / outOfPeriodPieTotal) *
+                              100
+                            ).toFixed(2)
+                          : "0.00",
+                    })),
+                  )
+                }
+              >
+                <DownloadIcon />
+              </button>
+            </div>
+          </header>
             <div
               className="chartWrap"
               ref={outOfPeriodDistributionChartRef}
@@ -8279,185 +8297,155 @@ function HomeContent() {
                 </p>
               )}
             </div>
-          </div>
         </section>
 
-        <section className="panel panelSub filterPanelCard filterPanelCardDashboard">
-          <button
-            type="button"
-            className="filterPanelHeader filterPanelHeaderToggle"
-            onClick={() => setIsDashboardFiltersExpanded((prev) => !prev)}
-            aria-expanded={isDashboardFiltersExpanded}
-            aria-controls="dashboard-filter-content-out-of-period"
-            aria-label={
-              isDashboardFiltersExpanded
-                ? "Ocultar filtros do dashboard"
-                : "Mostrar filtros do dashboard"
-            }
-          >
-            <span className="filterPanelHeaderTitleBlock">
-              <span className="filterPanelTitleRow" role="heading" aria-level={3}>
-                <FilterLinesIcon />
-                Filtros do dashboard
-              </span>
-            </span>
-            <span className="filterPanelHeaderActions">
-              <span className="filterPanelActiveCount">
-                Filtros ({activeDashboardFilterCount.toLocaleString("pt-BR")})
-              </span>
-              <span className="filterPanelToggleChevron" aria-hidden="true">
-                <FilterPanelDrawerChevron expanded={isDashboardFiltersExpanded} />
-              </span>
-            </span>
-          </button>
-          {isDashboardFiltersExpanded ? (
-            <div id="dashboard-filter-content-out-of-period" className="filterPanelBody">
-              <div className="filterToolbar filterToolbarDashboard">
-                <MultiSelectFilter
-                  id="out-filter-client"
-                  label="Cliente"
-                  options={clients}
-                  value={clientFilter}
-                  onChange={setClientFilter}
-                  placeholder="Todos os clientes"
-                  disabledOptions={disabledClientOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="out-filter-cs"
-                  label="CS"
-                  options={csFilterOptions}
-                  value={csFilter}
-                  onChange={setCsFilter}
-                  placeholder="Todos os CS"
-                  showAvatar
-                  disabledOptions={disabledCsOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="out-filter-campaign-type"
-                  label="Produto"
-                  options={productFilterOptions}
-                  value={campaignTypeFilter}
-                  onChange={setCampaignTypeFilter}
-                  placeholder="Todos os produtos"
-                  disabledOptions={disabledCampaignTypeOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="out-filter-feature"
-                  label="Feature"
-                  options={[...FEATURE_OPTIONS]}
-                  value={featureFilter}
-                  onChange={setFeatureFilter}
-                  placeholder="Todas as features"
-                  disabledOptions={disabledFeatureOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="out-filter-campaign"
-                  label="Campanha"
-                  options={campaignFilterOptions}
-                  value={campaignFilter}
-                  onChange={setCampaignFilter}
-                  placeholder="Todas as campanhas"
-                  disabledOptions={disabledCampaignOptions}
-                  compact
-                />
-                <MultiSelectFilter
-                  id="out-filter-campaign-status"
-                  label="Status"
-                  options={campaignStatusOptions}
-                  value={campaignStatusFilter}
-                  onChange={setCampaignStatusFilter}
-                  placeholder="Todos os status"
-                  disabledOptions={disabledCampaignStatusOptions}
-                  compact
-                />
-              </div>
-              <div className="filterPanelFooterBar">
-                {hasDashboardFilters ? (
-                  <button
-                    type="button"
-                    className="filterPanelClearAllButton"
-                    onClick={clearDashboardFilters}
-                  >
-                    Limpar tudo
-                  </button>
-                ) : null}
-              </div>
-            </div>
+        <div className="filterBar filterToolbar filterToolbarDashboard">
+          <MultiSelectFilter
+            id="out-filter-client"
+            label="Cliente"
+            options={clients}
+            value={clientFilter}
+            onChange={setClientFilter}
+            placeholder="Todos"
+            disabledOptions={disabledClientOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="out-filter-cs"
+            label="CS"
+            options={csFilterOptions}
+            value={csFilter}
+            onChange={setCsFilter}
+            placeholder="Todos"
+            showAvatar
+            disabledOptions={disabledCsOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="out-filter-campaign-type"
+            label="Produto"
+            options={productFilterOptions}
+            value={campaignTypeFilter}
+            onChange={setCampaignTypeFilter}
+            placeholder="Todos"
+            disabledOptions={disabledCampaignTypeOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="out-filter-feature"
+            label="Feature"
+            options={[...FEATURE_OPTIONS]}
+            value={featureFilter}
+            onChange={setFeatureFilter}
+            placeholder="Todas"
+            disabledOptions={disabledFeatureOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="out-filter-campaign"
+            label="Campanha"
+            options={campaignFilterOptions}
+            value={campaignFilter}
+            onChange={setCampaignFilter}
+            placeholder="Todas"
+            disabledOptions={disabledCampaignOptions}
+            compact
+          />
+          <MultiSelectFilter
+            id="out-filter-campaign-status"
+            label="Status"
+            options={campaignStatusOptions}
+            value={campaignStatusFilter}
+            onChange={setCampaignStatusFilter}
+            placeholder="Todos"
+            disabledOptions={disabledCampaignStatusOptions}
+            compact
+          />
+          {hasDashboardFilters ? (
+            <button
+              type="button"
+              className="filterClearInline"
+              onClick={clearDashboardFilters}
+            >
+              Limpar filtros
+            </button>
           ) : null}
-        </section>
+        </div>
 
-        <section className="card stackDetailCard alertSignalCard alertSignalCardDanger">
-          <p className="alertSignalBadge">Risco de vigência</p>
-          <section id="gasto-fora-mes">
-            <div className="stackDetailHeader">
-              <div>
-                <p className="cardTitle">Gasto fora do mês vigente</p>
-                <p className="stackDetailSubtitle">
-                  Campanhas cujas datas não cobrem o período atual
-                </p>
-              </div>
-              <div className="stackDetailHeaderSearchColumn">
-                <div className="tableTopActions">
-                  <button
-                    type="button"
-                    className="button buttonGhost buttonSmall"
-                    onClick={handleExportOutOfPeriod}
-                  >
-                    <span className="buttonLabelWithIcon">
-                      <DownloadIcon />
-                      CSV
-                    </span>
-                  </button>
-                </div>
+        <section
+          id="gasto-fora-mes"
+          className="journeyResendCard dspResendLinesCard"
+        >
+          <header className="journeyResendHeader">
+            <div className="journeyResendHeaderTitle">
+              <h2>Campanhas</h2>
+              <p className="journeyResendHeaderSubtitle">
+                <span className="num">
+                  {sortedOutRows.length.toLocaleString("pt-BR")}
+                </span>{" "}
+                {sortedOutRows.length === 1 ? "campanha" : "campanhas"}
+                <span className="journeyResendSep" aria-hidden="true">
+                  ·
+                </span>
+                <span className="num">{brl(filteredOutRowsTotal)}</span> no
+                filtro
+              </p>
+            </div>
+            <div className="journeyResendHeaderActions">
+              <div className="dspResendSearch">
+                <SearchIcon />
                 <input
-                  className="stackSearchInput"
                   type="search"
                   value={attentionOutOfPeriodSearch}
                   onChange={(event) =>
                     setAttentionOutOfPeriodSearch(event.target.value)
                   }
-                  placeholder="Buscar por token, cliente, campanha, account e vigência"
+                  placeholder="Buscar token, cliente, campanha"
                   aria-label="Buscar gastos fora do mês vigente"
                 />
-                {outRows.length > 0 && outOfPeriodUniquePlatforms.length > 0 ? (
-                  <div
-                    className="stackDetailFilterInline attentionDspFilterRow"
-                    role="group"
-                    aria-label="Filtrar por DSP"
-                  >
-                    <span className="attentionDspFilterLabel">DSPs</span>
-                    <button
-                      type="button"
-                      className={`chip chipDspFilter ${attentionOutOfPeriodDspFilters.length === 0 ? "chipDspFilterOn" : ""}`}
-                      onClick={() => setAttentionOutOfPeriodDspFilters([])}
-                    >
-                      Todas
-                    </button>
-                    {outOfPeriodUniquePlatforms.map((platform) => (
-                      <AttentionDspFilterChipButton
-                        key={platform}
-                        platform={platform}
-                        pressed={attentionOutOfPeriodDspFilters.includes(
-                          platform,
-                        )}
-                        onClick={() => {
-                          setAttentionOutOfPeriodDspFilters((prev) => {
-                            if (prev.length === 0) return [platform];
-                            if (prev.includes(platform))
-                              return prev.filter((p) => p !== platform);
-                            return [...prev, platform];
-                          });
-                        }}
-                      />
-                    ))}
-                  </div>
-                ) : null}
               </div>
+              <button
+                type="button"
+                className="journeyResendHeaderIconBtn"
+                onClick={handleExportOutOfPeriod}
+                title="Exportar CSV"
+                aria-label="Exportar CSV"
+              >
+                <DownloadIcon />
+              </button>
             </div>
+          </header>
+          {outRows.length > 0 && outOfPeriodUniquePlatforms.length > 0 ? (
+            <div
+              className="dspResendChipBar"
+              role="group"
+              aria-label="Filtrar por DSP"
+            >
+              <span className="dspResendChipBarLabel">DSPs</span>
+              <button
+                type="button"
+                className={`dspResendChip${attentionOutOfPeriodDspFilters.length === 0 ? " is-active" : ""}`}
+                onClick={() => setAttentionOutOfPeriodDspFilters([])}
+              >
+                Todas
+              </button>
+              {outOfPeriodUniquePlatforms.map((platform) => (
+                <AttentionDspFilterChipButton
+                  key={platform}
+                  platform={platform}
+                  pressed={attentionOutOfPeriodDspFilters.includes(platform)}
+                  onClick={() => {
+                    setAttentionOutOfPeriodDspFilters((prev) => {
+                      if (prev.length === 0) return [platform];
+                      if (prev.includes(platform))
+                        return prev.filter((p) => p !== platform);
+                      return [...prev, platform];
+                    });
+                  }}
+                />
+              ))}
+            </div>
+          ) : null}
             {outRows.length ? (
               <>
                 <p className="stackDetailCounter">
@@ -8573,7 +8561,9 @@ function HomeContent() {
                       </tr>
                     </thead>
                     <tbody>
-                      {sortedOutRows.map((row, index) => (
+                      {outPagedRows.map((row, idx) => {
+                        const index = outPageStart + idx;
+                        return (
                         <tr
                           key={`${row.platform}-${row.token}-${row.cliente}-${row.campanha}-${row.vigencia_start ?? ""}-${row.vigencia_end ?? ""}-${index}`}
                         >
@@ -8634,7 +8624,8 @@ function HomeContent() {
                           </td>
                           <td>{brl(row.gasto)}</td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -8650,7 +8641,40 @@ function HomeContent() {
                 Nenhum gasto em campanhas fora do mês vigente.
               </p>
             )}
-          </section>
+          {outTotalRows > 0 ? (
+            <div className="journeyResendTableFoot">
+              <span>
+                {`${(outPageStart + 1).toLocaleString("pt-BR")}–${outPageEnd.toLocaleString("pt-BR")} de ${outTotalRows.toLocaleString("pt-BR")}`}
+              </span>
+              <div className="dspResendPager">
+                <button
+                  type="button"
+                  className="dspResendPagerBtn"
+                  onClick={() =>
+                    setDspLinesPage((prev) => Math.max(1, prev - 1))
+                  }
+                  disabled={outCurrentPage <= 1}
+                >
+                  Anterior
+                </button>
+                <span className="dspResendPagerPage num">
+                  {outCurrentPage}/{outTotalPages}
+                </span>
+                <button
+                  type="button"
+                  className="dspResendPagerBtn dspResendPagerBtnPrimary"
+                  onClick={() =>
+                    setDspLinesPage((prev) =>
+                      Math.min(outTotalPages, prev + 1),
+                    )
+                  }
+                  disabled={outCurrentPage >= outTotalPages}
+                >
+                  Próxima
+                </button>
+              </div>
+            </div>
+          ) : null}
         </section>
       </>
     );
@@ -8670,259 +8694,313 @@ function HomeContent() {
           />
         </div>
         <nav className="sidebarNav" aria-label="Navegacao principal">
-          <section className="sidebarGroup" aria-label="Dsps">
-            <button
-              type="button"
-              className="sidebarGroupToggle"
-              aria-expanded={isDspsMenuExpanded}
-              aria-controls="sidebar-dsps-items"
-              onClick={() => setIsDspsMenuExpanded((current) => !current)}
-            >
-              <span className="sidebarGroupTitle">dsps</span>
-              <span
-                className={`sidebarGroupChevron ${isDspsMenuExpanded ? "sidebarGroupChevronOpen" : ""}`}
-              >
-                ▾
-              </span>
-            </button>
-            {isDspsMenuExpanded ? (
-              <div id="sidebar-dsps-items" className="sidebarGroupItems">
-                {navOptions.map((option) => (
-                  <button
-                    key={option}
-                    className={`navButton navButtonNested ${resolvedActivePage === option ? "navButtonActive" : ""}`}
-                    onClick={() =>
-                      router.push(appendQueryToRoute(routeForPage(option)))
-                    }
-                  >
-                    {NAV_LABELS[option]}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </section>
-        </nav>
-      </aside>
-
-      <section className="content">
-        <div className="platformTopBar">
-          <div className="platformTopBarLeft">
-            <div className="platformTopBarSummary">
-              <p className="platformTopBarPeriod">{periodHeroLabel}</p>
-              <p className="platformTopBarPeriodRange">
-                {periodRangeCompactLabel}
-              </p>
-            </div>
-          </div>
-          <div className="platformTopBarRight">
-            <div
-              className="platformTopBarFiltersColumn"
-              ref={snapshotInfoWrapRef}
-            >
-              <div className="platformTopBarFiltersInfoRow">
-                <button
-                  type="button"
-                  className="platformSnapshotInfoButton"
-                  aria-expanded={snapshotInfoOpen}
-                  aria-controls="snapshot-info-popover"
-                  onClick={() => setSnapshotInfoOpen((open) => !open)}
-                  aria-label="Ver informações da última atualização dos dados"
-                >
-                  i
-                </button>
-                {snapshotInfoOpen ? (
-                  <div
-                    id="snapshot-info-popover"
-                    className="platformSnapshotInfoPopover"
-                    role="dialog"
-                    aria-label="Última atualização"
-                  >
-                    <div className="platformTopBarSnapshot platformTopBarSnapshotPopover">
-                      <div className="platformTopBarSnapshotHeader">
-                        <p
-                          className={`platformTopBarSnapshotLabel ${isRefreshRunning ? "platformTopBarSnapshotLabelLoading" : ""}`}
-                        >
-                          {isRefreshRunning
-                            ? "Atualizando dados..."
-                            : "Última atualização"}
-                        </p>
-                        {!isRefreshRunning ? (
-                          <span
-                            className={`platformStatusBadge platformStatusBadge${snapshotStatus.tone}`}
+          <section className="sidebarGroup" aria-label="Campanhas">
+            <p className="sidebarGroupTitle">Campanhas</p>
+            <div id="sidebar-dsps-items" className="sidebarGroupItems">
+              {navOptions
+                .filter(
+                  (option) =>
+                    option !== "⚠️ Lines sem token" &&
+                    option !== "🚨 Gasto fora do mês vigente",
+                )
+                .map((option) => {
+                  const letter = NAV_LETTERS[option];
+                  return (
+                    <button
+                      key={option}
+                      className={`navButton ${resolvedActivePage === option ? "navButtonActive" : ""}`}
+                      onClick={() =>
+                        router.push(appendQueryToRoute(routeForPage(option)))
+                      }
+                    >
+                      <span className="brandIcon" aria-hidden="true">
+                        {option === "Dashboard" ? (
+                          <StackedIcon />
+                        ) : option === "Jornada de campanhas" ? (
+                          <svg
+                            className="brandIconSvg"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.4"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
                           >
-                            <span
-                              className={`platformStatusDot platformStatusDot${snapshotStatus.tone}`}
-                              aria-hidden="true"
-                            />
-                            <span>{snapshotStatus.label}</span>
-                          </span>
+                            <line x1="5" y1="4" x2="13" y2="4" />
+                            <line x1="5" y1="8" x2="13" y2="8" />
+                            <line x1="5" y1="12" x2="13" y2="12" />
+                            <circle cx="3" cy="4" r="0.6" fill="currentColor" />
+                            <circle cx="3" cy="8" r="0.6" fill="currentColor" />
+                            <circle cx="3" cy="12" r="0.6" fill="currentColor" />
+                          </svg>
+                        ) : letter ? (
+                          letter
                         ) : null}
-                      </div>
-                      {isRefreshRunning ? (
-                        <>
-                          <p className="platformTopBarSnapshotRunningMeta">
-                            Iniciado há {formatDuration(refreshElapsedSeconds)}
-                          </p>
-                          <p className="platformTopBarSnapshotSecondary">
-                            Tempo médio:{" "}
-                            {refreshMetrics?.sample_size
-                              ? formatDuration(
-                                  refreshMetrics.avg_duration_seconds,
-                                )
-                              : "sem histórico suficiente"}
-                          </p>
-                        </>
-                      ) : (
-                        <>
-                          <p className="platformTopBarSnapshotPrimary">
-                            {displayedSnapshotAt
-                              ? formatDateTime(displayedSnapshotAt).replace(
-                                  ", ",
-                                  " • ",
-                                )
-                              : "—"}
-                          </p>
-                          <p className="platformTopBarSnapshotSecondary">
-                            {formatAge(displayedSnapshotAt) ||
-                              "Atualização pendente"}
-                            {" • "}
-                            Tempo médio:{" "}
-                            {refreshMetrics?.sample_size
-                              ? formatDuration(
-                                  refreshMetrics.avg_duration_seconds,
-                                )
-                              : "sem histórico suficiente"}
-                          </p>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-              <div className="platformTopBarFilters">
-                <label className="monthFilterControl">
-                  <span className="monthFilterLabel">Período</span>
-                  <select
-                    value={selectedViewMode}
-                    disabled={isRefreshRunning}
-                    onChange={(event) => {
-                      const nextMode = event.target.value as AnalysisViewMode;
-                      setSelectedViewMode(nextMode);
-                      setSelectedMonthKey((prev) => {
-                        if (nextMode === "year") {
-                          if (isValidYearKey(prev)) return prev;
-                          return currentYearKey;
-                        }
-                        if (isValidMonthKey(prev)) return prev;
-                        return currentMonthKey;
-                      });
-                      const el = event.currentTarget;
-                      requestAnimationFrame(() => el.blur());
-                    }}
-                    aria-label="Selecionar período de análise"
-                  >
-                    {ANALYSIS_VIEW_OPTIONS.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="monthFilterControl">
-                  <span className="monthFilterLabel">
-                    {selectedViewMode === "year" ? "Ano" : "Mês"}
-                  </span>
-                  <select
-                    value={selectedMonthKey}
-                    disabled={isRefreshRunning}
-                    onChange={(event) => {
-                      setSelectedMonthKey(event.target.value);
-                      const el = event.currentTarget;
-                      requestAnimationFrame(() => el.blur());
-                    }}
-                    aria-label={
-                      selectedViewMode === "year"
-                        ? "Selecionar ano de análise"
-                        : "Selecionar mês de análise"
-                    }
-                  >
-                    {periodOptions.map((monthKey) => (
-                      <option key={monthKey} value={monthKey}>
-                        {selectedViewMode === "year"
-                          ? monthKey
-                          : capitalizeFirst(formatMonthKeyLabel(monthKey))}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+                      </span>
+                      <span>{NAV_LABELS[option]}</span>
+                    </button>
+                  );
+                })}
             </div>
-            <div className="platformTopBarActions">
+          </section>
+          <section className="sidebarGroup" aria-label="Atenção">
+            <p className="sidebarGroupTitle">Atenção</p>
+            <div className="sidebarGroupItems">
               <button
-                className="button buttonRefreshPrimary"
-                onClick={handleRefresh}
-                disabled={isValidating || isRefreshRunning}
+                type="button"
+                className={`navButton ${resolvedActivePage === "⚠️ Lines sem token" ? "navButtonActive" : ""}`}
+                onClick={() => router.push("/lines-sem-token")}
               >
-                <ReloadIcon spinning={isValidating || isRefreshRunning} />
-                <span>
-                  {isValidating || isRefreshRunning
-                    ? "Atualizando…"
-                    : "Atualizar dados"}
+                <svg
+                  className="ico ico-warn"
+                  viewBox="0 0 14 14"
+                  aria-hidden="true"
+                >
+                  <path className="icoShape" d="M7 1.4 13.4 12.6H.6L7 1.4Z" />
+                  <path className="icoMark" d="M7 5.6v3" />
+                  <circle className="icoMarkDot" cx="7" cy="10.6" r="0.7" />
+                </svg>
+                <span>Lines sem token</span>
+                <span className="navBadge">
+                  {homeNoTokenAlertCount.toLocaleString("pt-BR")}
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`navButton ${resolvedActivePage === "🚨 Gasto fora do mês vigente" ? "navButtonActive" : ""}`}
+                onClick={() => router.push("/gasto-fora-mes-vigente")}
+              >
+                <svg
+                  className="ico ico-danger"
+                  viewBox="0 0 14 14"
+                  aria-hidden="true"
+                >
+                  <circle className="icoShape" cx="7" cy="7" r="5.8" />
+                  <path className="icoMark" d="M7 4v3.2" />
+                  <circle className="icoMarkDot" cx="7" cy="9.6" r="0.7" />
+                </svg>
+                <span>Gasto fora do mês</span>
+                <span className="navBadge">
+                  {homeOutOfPeriodAlertCount.toLocaleString("pt-BR")}
                 </span>
               </button>
             </div>
+          </section>
+          {VISIBLE_TOOL_TABS.length > 0 ? (
+            <section className="sidebarGroup" aria-label="Ferramentas">
+              <p className="sidebarGroupTitle">Ferramentas</p>
+              <div className="sidebarGroupItems">
+                {VISIBLE_TOOL_TABS.map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    className={`navButton ${resolvedActivePage === tab.key ? "navButtonActive" : ""}`}
+                    onClick={() => router.push(`/${tab.slug}`)}
+                  >
+                    <tab.Icon />
+                    <span>{tab.label}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
+        </nav>
+        <div className="sidebarSyncFooter" data-tooltip="Sincronizado de hora em hora">
+          <span className="sidebarSyncDot sidebarSyncDotok" aria-hidden="true" />
+          <span className="sidebarSyncText">Sincronizado de hora em hora</span>
+        </div>
+      </aside>
+
+      <section className={`content ${isPeriodStale ? "contentLoading" : ""}`}>
+        <div className="topbar">
+          <div className="topbarLeft">
+            <h1 className="topbarTitle">{periodHeroLabel}</h1>
+            <div className="topbarSubtitle">
+              <span className="num">{formatDateBrShort(periodStart)}</span>
+              <span aria-hidden="true">→</span>
+              <span className="num">{formatDateBrShort(periodEnd)}</span>
+              {data?.exchange_rate_usd_brl ? (
+                <>
+                  <span className="topbarSep" aria-hidden="true">
+                    ·
+                  </span>
+                  <span className="statusPill statusInfo">
+                    <span className="statusDot" aria-hidden="true" />
+                    <span>
+                      Câmbio 1 USD = R${" "}
+                      <span className="num">
+                        {data.exchange_rate_usd_brl.toLocaleString("pt-BR", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </span>
+                    </span>
+                  </span>
+                </>
+              ) : null}
+            </div>
+          </div>
+          <div className="topbarControls">
+            <div className="seg" role="tablist" aria-label="Visualização">
+              {ANALYSIS_VIEW_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="tab"
+                  aria-selected={selectedViewMode === option.value}
+                  className={`segBtn ${selectedViewMode === option.value ? "segBtnActive" : ""}`}
+                  disabled={isRefreshRunning || option.disabled}
+                  onClick={() => {
+                    setSelectedViewMode(option.value);
+                    setSelectedMonthKey((prev) => {
+                      if (option.value === "day") {
+                        return isValidDayKey(prev) ? prev : getCurrentDayKey();
+                      }
+                      if (option.value === "week") {
+                        return isValidWeekKey(prev)
+                          ? prev
+                          : getCurrentWeekKey();
+                      }
+                      if (option.value === "year") {
+                        return isValidYearKey(prev) ? prev : currentYearKey;
+                      }
+                      return isValidMonthKey(prev) ? prev : currentMonthKey;
+                    });
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <label className="topbarPeriodBtn">
+              <svg
+                className="ico"
+                viewBox="0 0 13 13"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="1.5" y="2.5" width="10" height="9" rx="1.5" />
+                <path d="M1.5 5.5h10" />
+                <path d="M4 1v2.5" />
+                <path d="M9 1v2.5" />
+              </svg>
+              <span className="topbarPeriodLabel">
+                {formatPeriodKeyLabel(selectedViewMode, selectedMonthKey)}
+              </span>
+              <svg
+                className="ico icoChevron"
+                viewBox="0 0 13 13"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="m3.5 5 3 3 3-3" />
+              </svg>
+              <select
+                className="topbarPeriodSelect"
+                value={selectedMonthKey}
+                disabled={isRefreshRunning}
+                onChange={(event) => {
+                  setSelectedMonthKey(event.target.value);
+                  const el = event.currentTarget;
+                  requestAnimationFrame(() => el.blur());
+                }}
+                aria-label={
+                  selectedViewMode === "year"
+                    ? "Selecionar ano de análise"
+                    : "Selecionar mês de análise"
+                }
+              >
+                {periodOptions.map((periodKey) => (
+                  <option key={periodKey} value={periodKey}>
+                    {formatPeriodKeyLabel(selectedViewMode, periodKey)}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         </div>
-        <hr className="contentSectionDivider" aria-hidden="true" />
-
         {dashboardLoadFailed ? (
           <div className="contentErrorWrap">
             <section className="errorStateCard">
-              <p className="errorStateEyebrow">Ops! Algo saiu do esperado</p>
+              <span className="errorStateIcon" aria-hidden="true">
+                <svg
+                  viewBox="0 0 14 14"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M7 4v3.5" />
+                  <circle cx="7" cy="10" r="0.6" fill="currentColor" />
+                </svg>
+              </span>
               <h1 className="errorStateTitle">
-                Nao conseguimos carregar o dashboard agora.
+                Não conseguimos carregar o dashboard
               </h1>
               <p className="errorStateMessage">{dashboardErrorMessage}</p>
               <p className="errorStateHint">
                 {dashboardErrorIsTimeout
-                  ? "A atualizacao completa pode levar ate 2 minutos quando busca dados novos nas plataformas."
-                  : "Pode ser uma instabilidade temporaria. Tente novamente para restabelecer a conexao."}
+                  ? "A atualização pode levar até 2 minutos ao buscar dados novos."
+                  : "Instabilidade temporária. Tente novamente em instantes."}
               </p>
               <div className="errorStateActions">
                 <button
-                  className="button"
+                  type="button"
+                  className="btn"
                   onClick={() => mutate()}
                   disabled={isValidating}
                 >
                   <ReloadIcon spinning={isValidating} />
                   <span>
-                    {isValidating
-                      ? "Tentando novamente..."
-                      : "Tentar novamente"}
+                    {isValidating ? "Tentando…" : "Tentar novamente"}
                   </span>
                 </button>
                 <button
-                  className="button buttonGhost"
+                  type="button"
+                  className="btn ghost"
                   onClick={handleRefresh}
                   disabled={isValidating || isRefreshRunning}
                 >
-                  Recarregar dados completos
+                  Recarregar tudo
                 </button>
               </div>
             </section>
           </div>
         ) : (
           <>
-            {resolvedActivePage === "Dashboard" ? renderDashboardPage() : null}
+            {resolvedActivePage === "Dashboard"
+              ? renderDashboardPage("home")
+              : null}
+            {resolvedActivePage === "Jornada de campanhas"
+              ? renderDashboardPage("journey")
+              : null}
             {resolvedActivePage === "\u26A0\uFE0F Lines sem token"
               ? renderNoTokenAttentionPage()
               : null}
             {resolvedActivePage === "\u{1F6A8} Gasto fora do m\u{EA}s vigente"
               ? renderOutOfPeriodAttentionPage()
               : null}
+            {EXTERNAL_PAGES.has(resolvedActivePage)
+              ? (() => {
+                  const tab = TOOL_TAB_BY_KEY[resolvedActivePage as ToolTabKey];
+                  return tab?.enabled ? <tab.Component /> : null;
+                })()
+              : null}
             {resolvedActivePage !== "Dashboard" &&
+            resolvedActivePage !== "Jornada de campanhas" &&
             resolvedActivePage !== "\u26A0\uFE0F Lines sem token" &&
-            resolvedActivePage !== "\u{1F6A8} Gasto fora do m\u{EA}s vigente"
+            resolvedActivePage !== "\u{1F6A8} Gasto fora do m\u{EA}s vigente" &&
+            !EXTERNAL_PAGES.has(resolvedActivePage)
               ? renderPlatformPage(resolvedActivePage)
               : null}
           </>
