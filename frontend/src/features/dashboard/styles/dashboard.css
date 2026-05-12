@@ -2283,9 +2283,15 @@
 .skeleton {
   position: relative;
   overflow: hidden;
-  background: linear-gradient(90deg, #26303a 0%, rgba(83, 104, 114, 0.45) 50%, #26303a 100%);
-  background-size: 220% 100%;
-  animation: skeletonPulse 1.2s ease-in-out infinite;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.025) 0%,
+    rgba(255, 255, 255, 0.055) 50%,
+    rgba(255, 255, 255, 0.025) 100%
+  );
+  background-color: rgba(255, 255, 255, 0.018);
+  background-size: 260% 100%;
+  animation: skeletonPulse 1.8s ease-in-out infinite;
   border-radius: 8px;
 }
 
@@ -2367,24 +2373,6 @@
 .skeletonTable {
   margin-top: 16px;
   height: 280px;
-}
-
-.sessionLoadingPanel {
-  max-width: 520px;
-  margin: 0 auto;
-}
-
-.sessionLoadingHeader {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-weight: 600;
-}
-
-.sessionLoadingBody {
-  margin-top: 18px;
-  display: grid;
-  gap: 10px;
 }
 
 @keyframes skeletonPulse {
@@ -3312,6 +3300,58 @@ button.card.platformStatCardNoTokenButton .cardSubtitle {
   margin-top: 1.2rem;
 }
 
+.dspEmptyStateCard {
+  max-width: 32rem;
+  padding: 3rem 1.75rem 3.25rem;
+  margin: 1.25rem auto 1.5rem;
+  border-radius: 14px;
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.02) 0%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.dspEmptyStateIllustration {
+  width: 96px;
+  height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.75rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.dspEmptyStateCardShape {
+  stroke: rgba(255, 255, 255, 0.28);
+}
+
+.dspEmptyStateLine {
+  stroke: rgba(255, 255, 255, 0.16);
+}
+
+.dspEmptyStateDot {
+  color: rgba(255, 255, 255, 0.32);
+}
+
+.dspEmptyStateCard .tableEmptyStateTitle {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #e8edf3;
+  margin: 0;
+}
+
+.dspEmptyStateCard .tableEmptyStateSubtitle {
+  margin-top: 0.5rem;
+  max-width: 26rem;
+  color: rgba(255, 255, 255, 0.55);
+}
+
 .tableWrapDspEmpty {
   border-radius: 10px;
   border: 1px dashed rgba(83, 104, 114, 0.4);
@@ -3936,9 +3976,16 @@ th.stackThFinancial {
 /* .panel / .card backgrounds win over .skeleton alone; keep shimmer on placeholders */
 .panel.skeleton,
 .card.skeleton {
-  background: linear-gradient(90deg, #26303a 0%, rgba(83, 104, 114, 0.45) 50%, #26303a 100%);
-  background-size: 220% 100%;
-  animation: skeletonPulse 1.2s ease-in-out infinite;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.025) 0%,
+    rgba(255, 255, 255, 0.055) 50%,
+    rgba(255, 255, 255, 0.025) 100%
+  );
+  background-color: rgba(255, 255, 255, 0.018);
+  background-size: 260% 100%;
+  animation: skeletonPulse 1.8s ease-in-out infinite;
+  border: 1px solid rgba(255, 255, 255, 0.03);
 }
 
 .card.skeleton {

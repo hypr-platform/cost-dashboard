@@ -148,3 +148,127 @@
   font-weight: 600;
 }
 
+
+/* ===== Session loading: key-into-lock animation ===== */
+
+.sessionLoadingPanel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 32px 28px;
+}
+
+.sessionLoadingStage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 0 4px;
+}
+
+.sessionLoadingMessage {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: #cbd5dc;
+  letter-spacing: 0.01em;
+  text-align: center;
+}
+
+.keyLockAnim {
+  overflow: visible;
+  color: #ffffff;
+}
+
+.keyLockBox {
+  fill: rgba(255, 255, 255, 0.06);
+  stroke: currentColor;
+  stroke-width: 2.2;
+}
+
+.keyLockShackle {
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  transform-origin: 88px 22px;
+  animation: keyLockShackleLift 2.8s cubic-bezier(0.6, 0, 0.3, 1) infinite;
+}
+
+.keyLockHole {
+  fill: #1c262f;
+  stroke: currentColor;
+  stroke-width: 1.4;
+}
+
+.keyLockKey {
+  color: #ffffff;
+  transform-origin: 14px 40px;
+  animation: keyLockKeyMove 2.8s cubic-bezier(0.7, 0, 0.3, 1) infinite;
+}
+
+.keyRing {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+}
+
+.keyRingInner {
+  fill: #1c262f;
+  stroke: currentColor;
+  stroke-width: 1.2;
+}
+
+.keyShaft,
+.keyTooth {
+  fill: currentColor;
+}
+
+@keyframes keyLockKeyMove {
+  0% {
+    transform: translateX(-14px) rotate(0deg);
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  42% {
+    transform: translateX(22px) rotate(0deg);
+  }
+  58% {
+    transform: translateX(22px) rotate(90deg);
+  }
+  78% {
+    transform: translateX(22px) rotate(90deg);
+    opacity: 1;
+  }
+  92% {
+    transform: translateX(22px) rotate(90deg);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(-14px) rotate(0deg);
+    opacity: 0;
+  }
+}
+
+@keyframes keyLockShackleLift {
+  0%, 55% {
+    transform: translateY(0);
+  }
+  70%, 88% {
+    transform: translateY(-6px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .keyLockKey,
+  .keyLockShackle {
+    animation: none;
+  }
+  .keyLockKey {
+    transform: translateX(22px) rotate(90deg);
+  }
+}

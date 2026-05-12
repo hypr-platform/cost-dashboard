@@ -50,6 +50,8 @@ import {
   VISIBLE_TOOL_TABS,
   type ToolTabKey,
 } from "@/features/dashboard/config/tool-tabs";
+import { PageSkeleton } from "@/features/dashboard/skeletons";
+import { SessionLoading } from "@/features/auth/components/SessionLoading";
 import { HeroSummary } from "@/features/dashboard/components/HeroSummary";
 import { PlatformResendCard } from "@/features/dashboard/components/PlatformResendCard";
 import {
@@ -1896,8 +1898,84 @@ function SearchEmptyStateIllustration() {
 
 function DspLinesNoDataEmptyState() {
   return (
-    <div className="tableEmptyState tableEmptyStateStandalone" role="status">
-      <p className="tableEmptyStateTitle">Nenhuma line cadastrada ainda</p>
+    <div
+      className="tableEmptyState tableEmptyStateStandalone dspEmptyStateCard"
+      role="status"
+    >
+      <div className="dspEmptyStateIllustration" aria-hidden="true">
+        <svg
+          viewBox="0 0 96 96"
+          width="96"
+          height="96"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <rect
+            x="14"
+            y="22"
+            width="68"
+            height="52"
+            rx="8"
+            className="dspEmptyStateCardShape"
+            strokeWidth="1.8"
+          />
+          <line
+            x1="14"
+            y1="34"
+            x2="82"
+            y2="34"
+            className="dspEmptyStateCardShape"
+            strokeWidth="1.8"
+          />
+          <circle
+            cx="22"
+            cy="28"
+            r="1.6"
+            className="dspEmptyStateDot"
+            fill="currentColor"
+            stroke="none"
+          />
+          <circle
+            cx="28"
+            cy="28"
+            r="1.6"
+            className="dspEmptyStateDot"
+            fill="currentColor"
+            stroke="none"
+          />
+          <line
+            x1="24"
+            y1="46"
+            x2="60"
+            y2="46"
+            className="dspEmptyStateLine"
+            strokeWidth="1.6"
+          />
+          <line
+            x1="24"
+            y1="54"
+            x2="52"
+            y2="54"
+            className="dspEmptyStateLine"
+            strokeWidth="1.6"
+          />
+          <line
+            x1="24"
+            y1="62"
+            x2="44"
+            y2="62"
+            className="dspEmptyStateLine"
+            strokeWidth="1.6"
+          />
+        </svg>
+      </div>
+      <p className="tableEmptyStateTitle">Sem lines no período selecionado</p>
+      <p className="tableEmptyStateSubtitle">
+        Quando houver gasto cadastrado nesta DSP, as lines aparecerão aqui.
+        Tente ajustar o intervalo no topo da página.
+      </p>
     </div>
   );
 }
@@ -1941,125 +2019,6 @@ function WhatsAppIcon() {
         fill="currentColor"
       />
     </svg>
-  );
-}
-
-function DashboardSkeleton() {
-  return (
-    <main className="appLayout">
-      <aside className="sidebar">
-        <div className="sidebarBrand">
-          <Image
-            src="/hypr-logo-white.png"
-            alt="HYPR"
-            width={188}
-            height={48}
-            className="sidebarBrandLogo"
-            priority
-          />
-        </div>
-
-        <nav className="sidebarNav" aria-label="Carregando navegação">
-          <section className="sidebarGroup" aria-hidden="true">
-            <p className="sidebarGroupTitle">Campanhas</p>
-            <div className="sidebarGroupItems">
-              {Array.from({ length: 5 }).map((_, idx) => (
-                <div
-                  key={`nav-camp-skeleton-${idx}`}
-                  className="skeleton skeletonNavItem"
-                />
-              ))}
-            </div>
-          </section>
-          <section className="sidebarGroup" aria-hidden="true">
-            <p className="sidebarGroupTitle">Atenção</p>
-            <div className="sidebarGroupItems">
-              {Array.from({ length: 2 }).map((_, idx) => (
-                <div
-                  key={`nav-att-skeleton-${idx}`}
-                  className="skeleton skeletonNavItem"
-                />
-              ))}
-            </div>
-          </section>
-        </nav>
-      </aside>
-
-      <section className="content">
-        <div className="topbar" aria-hidden="true">
-          <div className="topbarLeft">
-            <div className="skeleton skeletonText skeletonHeading" />
-            <div className="skeleton skeletonText skeletonSubtitleLarge" />
-          </div>
-          <div className="topbarControls">
-            <div className="skeleton skeletonButtonWide" />
-            <div className="skeleton skeletonButtonWide" />
-            <div className="skeleton skeletonButton" />
-          </div>
-        </div>
-
-        <section className="hero" aria-hidden="true">
-          {Array.from({ length: 3 }).map((_, idx) => (
-            <div className="heroCell" key={`hero-cell-skeleton-${idx}`}>
-              <div className="heroCellLabel">
-                <div className="skeleton skeletonText skeletonEyebrow" />
-              </div>
-              <div className="heroCellValue">
-                <div className="skeleton skeletonText skeletonHeading" />
-              </div>
-              <div className="heroCellMeta">
-                <div className="skeleton skeletonText skeletonSubtitleLarge" />
-              </div>
-            </div>
-          ))}
-          <div className="heroChartWrap">
-            <div className="heroChartHead">
-              <div className="skeleton skeletonText skeletonEyebrow" />
-            </div>
-            <div className="skeleton skeletonBlock heroChart" />
-          </div>
-        </section>
-
-        <section className="platformsSection" aria-hidden="true">
-          <header className="platformsSectionHeader">
-            <div className="skeleton skeletonText skeletonHeading" />
-          </header>
-          <div className="gridCards platformsGrid">
-            {Array.from({ length: 6 }).map((_, idx) => (
-              <div
-                key={`platform-skeleton-${idx}`}
-                className="card skeleton skeletonBlock skeletonCard"
-              />
-            ))}
-          </div>
-        </section>
-
-        <section className="gridTwo gridTwoCharts gridTwoChartsHome">
-          <div className="panel skeleton skeletonBlock skeletonChart" />
-          <div className="panel skeleton skeletonBlock skeletonChart" />
-        </section>
-
-        <section className="panel skeleton skeletonBlock skeletonChartTall" />
-      </section>
-    </main>
-  );
-}
-
-function SessionLoading({ message }: { message: string }) {
-  return (
-    <main className="authContainer">
-      <section className="authPanel panel sessionLoadingPanel">
-        <div className="sessionLoadingHeader">
-          <ReloadIcon spinning />
-          <p>{message}</p>
-        </div>
-        <div className="sessionLoadingBody">
-          <div className="skeleton skeletonText skeletonHeading" />
-          <div className="skeleton skeletonText skeletonSubtitleLarge" />
-          <div className="skeleton skeletonButtonWide" />
-        </div>
-      </section>
-    </main>
   );
 }
 
@@ -3081,35 +3040,22 @@ function HomeContent() {
   const requestedPage = routeMatch.page;
 
   const navOptions = useMemo<NavKey[]>(() => {
-    if (!data) {
-      const fallback: NavKey[] = [
-        "Dashboard",
-        "⚠️ Lines sem token",
-        "🚨 Gasto fora do mês vigente",
-      ];
-      if (!EXTERNAL_PAGES.has(requestedPage) && !fallback.includes(requestedPage)) {
-        fallback.splice(1, 0, requestedPage);
-      }
-      return fallback;
-    }
-    const pages: NavKey[] = ["Dashboard", "Jornada de campanhas"];
-    const orderedPlatforms: NavKey[] = [
+    // DSPs are always visible regardless of spend or data availability —
+    // browsing to an empty platform page is preferable to hiding the nav and
+    // surprising the user when spend appears.
+    // Amazon DSP is intentionally omitted — we don't ingest data for it yet,
+    // so the page would render empty. Re-add when the integration ships.
+    const pages: NavKey[] = [
+      "Dashboard",
+      "Jornada de campanhas",
       "StackAdapt",
       "DV360",
       "Xandr",
       "Hivestack",
-      "Amazon DSP",
+      "Nexd",
+      "⚠️ Lines sem token",
+      "🚨 Gasto fora do mês vigente",
     ];
-    for (const name of orderedPlatforms) {
-      if (name === "DV360") {
-        pages.push(name);
-        continue;
-      }
-      const platform = data.platform_pages[name];
-      if (platform && platform.spend_brl > 0) pages.push(name);
-    }
-    if (data.platform_pages.Nexd) pages.push("Nexd");
-    pages.push("⚠️ Lines sem token", "🚨 Gasto fora do mês vigente");
     if (!EXTERNAL_PAGES.has(requestedPage) && !pages.includes(requestedPage)) {
       const attentionIndex = pages.indexOf("⚠️ Lines sem token");
       pages.splice(
@@ -3119,7 +3065,7 @@ function HomeContent() {
       );
     }
     return pages;
-  }, [data, requestedPage]);
+  }, [requestedPage]);
 
   const resolvedActivePage: NavKey = requestedPage;
 
@@ -4271,7 +4217,8 @@ function HomeContent() {
     return <SessionLoading message="Validando domínio..." />;
   const showInitialDashboardSkeleton =
     shouldFetchData && !data && !error && isLoading;
-  if (showInitialDashboardSkeleton) return <DashboardSkeleton />;
+  if (showInitialDashboardSkeleton)
+    return <PageSkeleton page={resolvedActivePage} />;
 
   const dashboardLoadFailed = Boolean(error || !data);
   const dashboardErrorMessage =
@@ -4287,6 +4234,14 @@ function HomeContent() {
     !!data &&
     (data.period.start !== selectedDateRange.start ||
       data.period.end !== selectedDateRange.end);
+  // While the user has changed the period filter and SWR is refetching, the
+  // previous data is now mismatched with the selected range. Showing the page
+  // skeleton (instead of the stale numbers) makes filter changes feel
+  // responsive on DSP / Campaign Journey / Attention pages.
+  const showFilterChangeSkeleton =
+    shouldFetchData && isPeriodStale && (isValidating || isLoading);
+  if (showFilterChangeSkeleton)
+    return <PageSkeleton page={resolvedActivePage} />;
   const periodRangeCompactLabel =
     selectedViewMode === "year"
       ? `Ano completo • ${formatDateBrShort(periodStart)} → ${formatDateBrShort(periodEnd)}`
