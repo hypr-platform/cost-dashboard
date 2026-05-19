@@ -4,14 +4,22 @@ Endpoint: https://api.stackadapt.com/graphql
 Autenticação: Bearer token via STACKADAPT_API_KEY no .env
 """
 
+import logging
 import os
+import time
 from collections import defaultdict
 from datetime import date, timedelta
 from typing import Any, Optional
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 GQL_URL = "https://api.stackadapt.com/graphql"
+
+# Retry para falhas transitórias (SSL EOF, ConnectionError, 5xx, 429) no endpoint GraphQL.
+_GQL_MAX_ATTEMPTS = 4
+_GQL_BACKOFF_BASE_SECONDS = 1.5
 
 # `records` é paginado; sem first/after a API devolve só a primeira página e totalStats fica maior que a soma das linhas.
 RECORDS_PAGE_SIZE = 100
@@ -96,17 +104,34 @@ def _gql(query: str, token: str, *, variables: Optional[dict[str, Any]] = None) 
     payload: dict[str, Any] = {"query": query}
     if variables is not None:
         payload["variables"] = variables
-    r = requests.post(
-        GQL_URL,
-        json=payload,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        timeout=120,
-    )
-    r.raise_for_status()
-    data = r.json()
-    if "errors" in data:
-        raise ValueError(data["errors"][0]["message"])
-    return data["data"]
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _GQL_MAX_ATTEMPTS + 1):
+        try:
+            r = requests.post(GQL_URL, json=payload, headers=headers, timeout=120)
+            # 429 e 5xx: trata como transitório e tenta de novo.
+            if r.status_code == 429 or 500 <= r.status_code < 600:
+                raise requests.HTTPError(f"transient HTTP {r.status_code}", response=r)
+            r.raise_for_status()
+            data = r.json()
+            if "errors" in data:
+                # Erro de GraphQL é determinístico — não adianta retry.
+                raise ValueError(data["errors"][0]["message"])
+            return data["data"]
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError) as exc:
+            last_exc = exc
+            if attempt >= _GQL_MAX_ATTEMPTS:
+                break
+            sleep_s = _GQL_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                "[STACKADAPT] gql transient failure attempt=%d/%d err=%s; retrying in %.1fs",
+                attempt, _GQL_MAX_ATTEMPTS, exc, sleep_s,
+            )
+            time.sleep(sleep_s)
+
+    assert last_exc is not None
+    raise last_exc
 
 
 def fetch_mtd_cost(start: date, end: date) -> dict:
