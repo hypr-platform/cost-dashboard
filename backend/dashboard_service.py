@@ -218,18 +218,25 @@ def _line_costs_rows_from_payload(
             continue
         last_day_in_month = _last_day_of_month(period_end)
         if is_monthly_imputed:
-            target_cd = max(all_entry_dates)
+            # Mensais imputados (Hivestack/Nexd) só têm um target: a maior data
+            # do line_daily (geralmente last_day_of_month).
+            target_cds: list[date] = [max(all_entry_dates)]
         else:
-            # Today = o `accept_date` mais "atual" que não seja o last_day_of_month
-            # (caso especial: se hoje É o last_day, usa ele mesmo).
-            non_last_days = sorted(d for d in accept_dates if d != last_day_in_month)
-            target_cd = non_last_days[-1] if non_last_days else last_day_in_month
+            # Daily: reescreve todos os dias dentro do accept_dates (exceto o
+            # last_day_of_month, que é exclusivo do monthly_imputed). Isso
+            # permite que dias passados sejam revisados conforme as DSPs
+            # finalizam relatórios atrasados (ex: DV360 tem 24-48h de lag).
+            target_cds = sorted(d for d in accept_dates if d != last_day_in_month)
+            if not target_cds:
+                target_cds = [last_day_in_month]
 
-        if target_cd not in accept_dates:
+        target_cds = [cd for cd in target_cds if cd in accept_dates]
+        if not target_cds:
             continue
 
-        # Agrupa line_daily por line_key — pra cada line, soma MTD e isola delta@target.
-        per_line: dict[str, dict[str, Any]] = {}
+        # Pré-agrega spend por (line, dia) e guarda metadata por line.
+        per_line_daily: dict[str, dict[date, float]] = {}
+        per_line_meta: dict[str, dict[str, Any]] = {}
         for entry in line_daily:
             if not isinstance(entry, dict):
                 continue
@@ -244,65 +251,67 @@ def _line_costs_rows_from_payload(
             if spend <= 0:
                 continue
             key = _line_costs_line_key(entry)
-            slot = per_line.setdefault(key, {
-                "sample": entry,
-                "mtd_native": 0.0,
-                "delta_native": 0.0,
-                "currency": str(entry.get("currency") or platform_currency),
-                "granularity": str(entry.get("granularity") or "daily"),
-                "is_estimated": bool(entry.get("is_estimated", False)),
-            })
-            slot["mtd_native"] += spend
-            if cd == target_cd:
-                slot["delta_native"] += spend
+            daily_map = per_line_daily.setdefault(key, {})
+            daily_map[cd] = daily_map.get(cd, 0.0) + spend
+            if key not in per_line_meta:
+                per_line_meta[key] = {
+                    "sample": entry,
+                    "currency": str(entry.get("currency") or platform_currency),
+                    "granularity": str(entry.get("granularity") or "daily"),
+                    "is_estimated": bool(entry.get("is_estimated", False)),
+                }
 
-        # Emite 1 row por line ativa no mês.
-        for key, slot in per_line.items():
-            mtd_n = slot["mtd_native"]
-            if mtd_n <= 0:
-                continue
-            delta_n = slot["delta_native"]
-            entry_currency = slot["currency"]
-            if entry_currency == "BRL":
-                mtd_b = mtd_n
-                delta_b = delta_n
-                fx_rate: float | None = None
-            else:
-                mtd_b = mtd_n * rate
-                delta_b = delta_n * rate
-                fx_rate = rate
+        # Para cada target_cd, emite 1 row por line com:
+        #   - mtd_native = soma cumulativa até target_cd (inclusivo)
+        #   - delta_native = spend do dia target_cd
+        for target_cd in target_cds:
+            for key, daily_map in per_line_daily.items():
+                mtd_n = sum(s for d, s in daily_map.items() if d <= target_cd)
+                if mtd_n <= 0:
+                    continue
+                delta_n = daily_map.get(target_cd, 0.0)
+                meta = per_line_meta[key]
+                entry_currency = meta["currency"]
+                if entry_currency == "BRL":
+                    mtd_b = mtd_n
+                    delta_b = delta_n
+                    fx_rate: float | None = None
+                else:
+                    mtd_b = mtd_n * rate
+                    delta_b = delta_n * rate
+                    fx_rate = rate
 
-            sample = slot["sample"]
-            lid = _line_costs_normalize_str(sample.get("line_item_id"))
-            name = _line_costs_normalize_str(sample.get("name"))
-            token_info = (
-                (lookup_by_id.get(lid) if lid else None)
-                or (lookup_by_name.get(name) if name else None)
-                or {}
-            )
+                sample = meta["sample"]
+                lid = _line_costs_normalize_str(sample.get("line_item_id"))
+                name = _line_costs_normalize_str(sample.get("name"))
+                token_info = (
+                    (lookup_by_id.get(lid) if lid else None)
+                    or (lookup_by_name.get(name) if name else None)
+                    or {}
+                )
 
-            row: dict[str, Any] = {
-                "cost_date": target_cd.isoformat(),
-                "platform": platform_name,
-                "line_item_id": lid,
-                "line_name": token_info.get("resolved_line_name") or name,
-                "resolved_token": token_info.get("resolved_token"),
-                "token_resolution_source": token_info.get("token_resolution_source"),
-                "spend_native_delta": delta_n,
-                "currency_native": entry_currency,
-                "spend_brl_delta": delta_b,
-                "spend_native_mtd": mtd_n,
-                "spend_brl_mtd": mtd_b,
-                "exchange_rate_usd_brl": fx_rate,
-                "had_negative_delta": False,
-                "observation": None,  # Fase 1 não consulta PG; preencher em fase futura.
-                "source_snapshot_at": snapshot_at,
-                "baseline_snapshot_at": None,
-                "ingested_at": ingested_at,
-                "is_estimated": slot["is_estimated"],
-                "granularity": slot["granularity"],
-            }
-            grouped.setdefault((platform_name, target_cd), []).append(row)
+                row: dict[str, Any] = {
+                    "cost_date": target_cd.isoformat(),
+                    "platform": platform_name,
+                    "line_item_id": lid,
+                    "line_name": token_info.get("resolved_line_name") or name,
+                    "resolved_token": token_info.get("resolved_token"),
+                    "token_resolution_source": token_info.get("token_resolution_source"),
+                    "spend_native_delta": delta_n,
+                    "currency_native": entry_currency,
+                    "spend_brl_delta": delta_b,
+                    "spend_native_mtd": mtd_n,
+                    "spend_brl_mtd": mtd_b,
+                    "exchange_rate_usd_brl": fx_rate,
+                    "had_negative_delta": False,
+                    "observation": None,  # Fase 1 não consulta PG; preencher em fase futura.
+                    "source_snapshot_at": snapshot_at,
+                    "baseline_snapshot_at": None,
+                    "ingested_at": ingested_at,
+                    "is_estimated": meta["is_estimated"],
+                    "granularity": meta["granularity"],
+                }
+                grouped.setdefault((platform_name, target_cd), []).append(row)
 
     return grouped
 
@@ -1974,12 +1983,26 @@ def _refresh_dashboard(start: date, end: date, trigger: str) -> dict[str, Any]:
                         logger.exception("Falha ao gravar dim_dv360_line_meta.")
 
                     # Fase 1: popula `line_costs` a partir do `line_daily` que cada
-                    # integração agora emite (Fase 0). Escreve só cost_date = today
-                    # + last_day_of_month(today) — esse último cobre os imputed
+                    # integração agora emite (Fase 0). Escreve cost_dates dos
+                    # últimos `LINE_COSTS_BACKFILL_DAYS` dias (default 3) +
+                    # last_day_of_month(today) — esse último cobre os imputed
                     # mensais (Hivestack / Nexd) durante o mês.
+                    #
+                    # O backfill cobre o lag de relatório das DSPs: DV360 tem até
+                    # 48h de delay pra finalizar números, então sem revisar dias
+                    # passados o valor fica congelado subestimado.
                     try:
                         today = datetime.now(timezone.utc).date()
-                        accept_dates = {today, _last_day_of_month(today)}
+                        try:
+                            backfill_days = max(
+                                0, int(os.getenv("LINE_COSTS_BACKFILL_DAYS", "3"))
+                            )
+                        except ValueError:
+                            backfill_days = 3
+                        accept_dates = {
+                            today - timedelta(days=i) for i in range(backfill_days + 1)
+                        }
+                        accept_dates.add(_last_day_of_month(today))
                         groups = _line_costs_rows_from_payload(
                             platform_results=payload.get("platform_results") or {},
                             nexd_data=payload.get("nexd") or {},
