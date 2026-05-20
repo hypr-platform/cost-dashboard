@@ -42,6 +42,11 @@ REPORT_BACKOFF_MAX_SECONDS = 80
 DEFAULT_REPORT_POLL_TIMEOUT_SECONDS = 240
 QUERY_TITLE_PREFIX = "Cost Dashboard"
 LINE_NAME_CACHE_TTL_SECONDS = 1800
+
+# Retry para `creds.refresh(Request())` — o endpoint `oauth2.googleapis.com/token`
+# vinha derrubando conexões com SSL EOF, matando o fetch inteiro do DV360.
+_TOKEN_REFRESH_MAX_ATTEMPTS = 4
+_TOKEN_REFRESH_BACKOFF_BASE_SECONDS = 1.5
 REVENUE_METRIC = "METRIC_REVENUE_ADVERTISER"
 CURRENCY_GROUP_BY = "FILTER_ADVERTISER_CURRENCY"
 
@@ -402,6 +407,34 @@ def _get_service_account_info():
     return None
 
 
+def _refresh_creds_with_retry(creds, request) -> None:
+    """Roda `creds.refresh(request)` com retry pra SSL EOF / ConnectionError transitórios.
+
+    A `google.auth` não retenta por conta própria, então qualquer hiccup TLS no
+    `oauth2.googleapis.com/token` propagava como `TransportError` e matava o fetch.
+    """
+    from google.auth.exceptions import TransportError
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _TOKEN_REFRESH_MAX_ATTEMPTS + 1):
+        try:
+            creds.refresh(request)
+            return
+        except TransportError as exc:
+            last_exc = exc
+            if attempt >= _TOKEN_REFRESH_MAX_ATTEMPTS:
+                break
+            sleep_s = _TOKEN_REFRESH_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+            logger.warning(
+                "[DV360] token refresh transient failure attempt=%d/%d err=%s; retrying in %.1fs",
+                attempt, _TOKEN_REFRESH_MAX_ATTEMPTS, exc, sleep_s,
+            )
+            time.sleep(sleep_s)
+
+    assert last_exc is not None
+    raise last_exc
+
+
 def _get_access_token():
     now = time.time()
     if _token_cache["token"] and now < _token_cache["expires_at"]:
@@ -426,7 +459,7 @@ def _get_access_token():
             scopes=token_data.get("scopes"),
         )
         # Sempre renova — o JSON não guarda expiry, então creds.valid não é confiável
-        creds.refresh(Request())
+        _refresh_creds_with_retry(creds, Request())
         token_data["token"] = creds.token
         with open(token_path, "w") as f:
             json.dump(token_data, f, indent=2)
@@ -444,7 +477,7 @@ def _get_access_token():
         scopes = ["https://www.googleapis.com/auth/display-video",
                   "https://www.googleapis.com/auth/doubleclickbidmanager"]
         creds = service_account.Credentials.from_service_account_info(sa_info, scopes=scopes)
-        creds.refresh(Request())
+        _refresh_creds_with_retry(creds, Request())
         _token_cache["token"] = creds.token
         _token_cache["expires_at"] = now + 3500
         return creds.token
@@ -869,23 +902,21 @@ def fetch_mtd_cost(start, end):
             agg = df_lines.groupby(id_col)[rev_col].sum().reset_index()
             agg = agg.sort_values(rev_col, ascending=False)
 
+            # Vetorizado: pd.iterrows em ~9750 rows tomava ~10min. Versão atual <1s.
             name_by_line_id: dict[str, str] = {}
             if name_col and name_col in df_lines.columns:
-                for _, row in df_lines[[id_col, name_col]].dropna(subset=[id_col]).iterrows():
-                    raw_id = row[id_col]
-                    raw_name = row[name_col]
-                    if raw_id != raw_id:
-                        continue
-                    try:
-                        line_id = str(int(raw_id)).strip()
-                    except Exception:
-                        line_id = str(raw_id).strip()
-                    candidate = str(raw_name).strip() if raw_name == raw_name else ""
-                    if not candidate:
-                        continue
-                    if _is_probably_line_id(candidate):
-                        continue
-                    name_by_line_id[line_id] = candidate
+                subset = df_lines[[id_col, name_col]].dropna(subset=[id_col])
+                if not subset.empty:
+                    id_numeric = pd.to_numeric(subset[id_col], errors="coerce")
+                    line_ids_arr = id_numeric.astype("Int64").astype(str)
+                    name_arr = subset[name_col].astype(str).str.strip()
+                    valid = (
+                        (line_ids_arr != "<NA>")
+                        & (name_arr != "")
+                        & (name_arr.str.lower() != "nan")
+                        & ~name_arr.str.fullmatch(r"\d{6,}", na=False)
+                    )
+                    name_by_line_id = dict(zip(line_ids_arr[valid], name_arr[valid]))
 
             aggregated_line_ids: list[str] = []
             for _, row in agg.iterrows():
@@ -976,43 +1007,55 @@ def fetch_mtd_cost(start, end):
 
         # line_daily: granularidade (date × line_item) quando DV360_USE_DATE_GROUPBY=1.
         # Requer date_col_lines + id_col + rev_col no df_lines.
+        # Vetorizado: iterrows + pd.to_datetime por row em ~9750 linhas tomava
+        # ~70min. Versão atual converte colunas inteiras de uma vez → <5s.
         line_daily_out: list[dict] = []
         if use_date and date_col_lines and rev_col and id_col and not df_lines.empty:
             try:
                 df_ld = df_lines[[date_col_lines, id_col, rev_col] + ([name_col] if name_col else [])].copy()
-                df_ld.loc[:, rev_col] = pd.to_numeric(df_ld[rev_col], errors="coerce").fillna(0)
-                # Map line_id → display name (mesma lógica de cima)
-                name_lookup = locals().get("name_by_line_id") or {}
-                meta_lookup = locals().get("line_id_to_meta") or {}
-                for _, row in df_ld.iterrows():
-                    raw_id = row[id_col]
-                    if raw_id != raw_id:
-                        continue
-                    try:
-                        line_id = str(int(raw_id)).strip()
-                    except Exception:
-                        line_id = str(raw_id).strip()
-                    if not line_id:
-                        continue
-                    raw_date = row[date_col_lines]
-                    try:
-                        d_str = pd.to_datetime(raw_date).strftime("%Y-%m-%d")
-                    except Exception:
-                        continue
-                    spend_val = float(row[rev_col])
-                    if spend_val <= 0:
-                        continue
-                    display_name = _line_display_name(line_id, name_lookup, meta_lookup) if name_lookup or meta_lookup else (
-                        str(row[name_col]).strip() if name_col and row[name_col] == row[name_col] else line_id
-                    )
-                    line_daily_out.append(
-                        {
-                            "date": d_str,
-                            "line_item_id": line_id,
-                            "name": display_name,
-                            "spend": spend_val,
-                        }
-                    )
+                spends = pd.to_numeric(df_ld[rev_col], errors="coerce").fillna(0.0)
+                dates = pd.to_datetime(df_ld[date_col_lines], errors="coerce")
+                id_numeric = pd.to_numeric(df_ld[id_col], errors="coerce")
+                line_ids_arr = id_numeric.astype("Int64").astype(str)
+                valid = dates.notna() & (line_ids_arr != "<NA>") & (spends > 0)
+                if valid.any():
+                    date_strs = dates.dt.strftime("%Y-%m-%d")
+                    name_lookup = locals().get("name_by_line_id") or {}
+                    meta_lookup = locals().get("line_id_to_meta") or {}
+                    has_lookup = bool(name_lookup or meta_lookup)
+                    if has_lookup:
+                        line_daily_out = [
+                            {
+                                "date": d_str,
+                                "line_item_id": lid,
+                                "name": _line_display_name(lid, name_lookup, meta_lookup),
+                                "spend": float(s),
+                            }
+                            for d_str, lid, s in zip(
+                                date_strs[valid].tolist(),
+                                line_ids_arr[valid].tolist(),
+                                spends[valid].tolist(),
+                            )
+                        ]
+                    else:
+                        if name_col and name_col in df_ld.columns:
+                            raw_names = df_ld[name_col].astype(str).str.strip()
+                        else:
+                            raw_names = pd.Series([""] * len(df_ld), index=df_ld.index)
+                        line_daily_out = [
+                            {
+                                "date": d_str,
+                                "line_item_id": lid,
+                                "name": (n if n and n.lower() != "nan" else lid),
+                                "spend": float(s),
+                            }
+                            for d_str, lid, n, s in zip(
+                                date_strs[valid].tolist(),
+                                line_ids_arr[valid].tolist(),
+                                raw_names[valid].tolist(),
+                                spends[valid].tolist(),
+                            )
+                        ]
             except Exception:
                 logger.exception("[DV360] falha ao montar line_daily")
 
