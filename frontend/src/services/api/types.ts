@@ -92,6 +92,7 @@ export type DashboardResponse = {
     daily_filtered?: Array<{ date: string; total: number; [platform: string]: string | number }>;
     campaign_journey_rows: JourneyRow[];
     active_platforms: string[];
+    total_invested_brl?: number;
   };
   platform_pages: Record<
     string,

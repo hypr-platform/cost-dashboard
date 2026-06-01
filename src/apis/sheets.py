@@ -336,23 +336,10 @@ def fetch_campaign_journey(period_start: date | None = None, period_end: date | 
                 "account_management": account_management,
             })
 
-        active_tokens_for_period: set[str] | None = None
-        if period_start and period_end:
-            active_tokens_for_period = {
-                str(c.get("token", "")).strip().upper()
-                for c in campaigns
-                if _campaign_overlaps_period(c.get("start"), c.get("end"), period_start, period_end)
-            }
-
-        try:
-            invested_totals_by_token = _fetch_investido_totals_by_token(headers, active_tokens_for_period)
-        except Exception:
-            invested_totals_by_token = {}
-
-        for campaign in campaigns:
-            token = str(campaign.get("token", "")).strip().upper()
-            if token in invested_totals_by_token:
-                campaign["investido"] = invested_totals_by_token[token]
+        # `investido` por campanha NÃO vem mais daqui. O backend sobrescreve
+        # com SUM(total_value) de `checklist_info` filtrando por start_date no
+        # período (atribuição integral por faturamento, sem rateio). Vide
+        # bigquery_reads.invested_by_token_in_period.
 
         return {"data": campaigns, "status": "ok", "message": ""}
 

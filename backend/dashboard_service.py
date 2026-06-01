@@ -722,6 +722,38 @@ def _hourly_worker_interval_seconds() -> float:
     return default
 
 
+def _worker_lookback_days() -> int:
+    """Quantos dias de overlap o worker pede pras DSPs ao fechar a janela.
+
+    Default casa com `LINE_COSTS_BACKFILL_DAYS` (3) — assim a janela de FETCH
+    bate com a de ESCRITA em `line_costs`. Override via `WORKER_LOOKBACK_DAYS`.
+
+    Importa principalmente na virada do mês: sem overlap, no dia 1º o worker
+    pede só `[today, today]` às DSPs e como elas reportam com 1-2 dias de
+    delay, o mês corrente fica em R$ 0 até a 2ª/3ª execução do worker.
+    """
+    raw_value = os.getenv(
+        "WORKER_LOOKBACK_DAYS",
+        os.getenv("LINE_COSTS_BACKFILL_DAYS", "3"),
+    ).strip()
+    try:
+        parsed = int(raw_value)
+        return max(0, parsed)
+    except ValueError:
+        return 3
+
+
+def _worker_refresh_window() -> tuple[date, date]:
+    """Janela `(start, end)` do worker: `(today - lookback, today)`.
+
+    Difere de `get_mtd_dates()` (que volta `(first_of_month, today)`) porque
+    queremos cobrir o lag de relatório das DSPs e suavizar a virada do mês.
+    """
+    today = date.today()
+    lookback = _worker_lookback_days()
+    return today - timedelta(days=lookback), today
+
+
 def _dv360_timeout_seconds() -> float:
     raw_value = os.getenv("DASHBOARD_DV360_TIMEOUT_SECONDS", "").strip()
     if not raw_value:
@@ -1127,6 +1159,22 @@ def _build_payload(
                 "layouts": [],
             }
 
+    # Overlay do `investido` por token via checklist_info (BQ). Aplica a regra
+    # de atribuição por start_date (sem rateio). Token sem registro pro
+    # período fica com 0.
+    invested_by_token: dict[str, float] = {}
+    invested_total_brl: float = 0.0
+    if bigquery_store.is_enabled():
+        try:
+            from backend import bigquery_reads as _br_invested
+            invested_by_token = _br_invested.invested_by_token_in_period(start, end)
+            invested_total_brl = float(_br_invested.invested_total_in_period(start, end) or 0.0)
+        except Exception:
+            logger.exception("checklist_info: falha ao buscar invested overlay.")
+    for c in journey.get("data", []):
+        token_key = str(c.get("token", "") or "").strip().upper()
+        c["investido"] = float(invested_by_token.get(token_key, 0.0))
+
     all_campaigns = {c["token"]: c for c in journey.get("data", [])}
     _apply_line_token_resolutions(results)
     platform_spend_by_token: dict[str, dict[str, float]] = {}
@@ -1199,13 +1247,9 @@ def _build_payload(
         campaign = all_campaigns.get(token)
         if not campaign:
             continue
-        campaign_invested_period = _invested_for_selected_period(
-            campaign.get("investido", 0.0),
-            campaign.get("start"),
-            campaign.get("end"),
-            start,
-            end,
-        )
+        # `campaign["investido"]` já vem period-scoped do overlay checklist_info.
+        # Atribuição integral por start_date — sem rateio linear.
+        campaign_invested_period = float(campaign.get("investido", 0.0) or 0.0)
         row = {
             "token": token,
             "cliente": campaign.get("cliente", ""),
@@ -1241,16 +1285,9 @@ def _build_payload(
             token = _resolved_token_for_line(line)
             campaign = all_campaigns.get(token) if token else None
             spend_brl = _to_brl_smart(line.get("spend", 0.0), platform_data.get("currency", "USD"), rate)
+            # Já period-scoped via overlay checklist_info — sem rateio.
             investido = (
-                _invested_for_selected_period(
-                    campaign.get("investido"),
-                    campaign.get("start"),
-                    campaign.get("end"),
-                    start,
-                    end,
-                )
-                if campaign
-                else None
+                float(campaign.get("investido", 0.0) or 0.0) if campaign else None
             )
             pct_invest = (spend_brl / investido * 100) if investido and investido > 0 else None
             row = {
@@ -1454,6 +1491,7 @@ def _build_payload(
             "daily": daily_rows,
             "campaign_journey_rows": campaign_rows,
             "active_platforms": active_platforms,
+            "total_invested_brl": invested_total_brl,
         },
         "platform_pages": platform_pages,
         "attention": {
@@ -1637,6 +1675,9 @@ def _build_payload_from_bq(start: date, end: date) -> dict[str, Any] | None:
             f_daily = ex.submit(bigquery_reads.daily_by_platform, start, end)
             f_no_token = ex.submit(bigquery_reads.no_token_rows, start, end)
             f_oop = ex.submit(bigquery_reads.out_of_period_rows, start, end)
+            f_invested_total = ex.submit(
+                bigquery_reads.invested_total_in_period, start, end
+            )
             platform_futures = {
                 name: ex.submit(
                     bigquery_reads.platform_data_from_line_costs, name, start, end
@@ -1671,6 +1712,11 @@ def _build_payload_from_bq(start: date, end: date) -> dict[str, Any] | None:
             no_token = f_no_token.result()
             out_of_period = f_oop.result()
             journey_rows = f_journey.result()
+            try:
+                invested_total_brl = float(f_invested_total.result() or 0.0)
+            except Exception:
+                logger.exception("cold-start: invested_total_in_period falhou.")
+                invested_total_brl = 0.0
 
             platform_results: dict[str, Any] = {}
             for name, fut in platform_futures.items():
@@ -1804,6 +1850,7 @@ def _build_payload_from_bq(start: date, end: date) -> dict[str, Any] | None:
             "daily": daily,
             "campaign_journey_rows": journey_rows,
             "active_platforms": active_platforms,
+            "total_invested_brl": invested_total_brl,
         },
         "platform_pages": platform_pages,
         "attention": {
@@ -2177,7 +2224,7 @@ def _worker_loop(trigger_name: str, interval_seconds: float) -> None:
         if isinstance(last_run, (int, float)) and now - float(last_run) < interval_seconds:
             continue
         try:
-            start, end = get_mtd_dates()
+            start, end = _worker_refresh_window()
             _refresh_dashboard(start, end, trigger=trigger_name)
         except Exception:
             logger.exception("Falha no worker `%s`.", trigger_name)

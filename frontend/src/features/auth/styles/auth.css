@@ -149,7 +149,7 @@
 }
 
 
-/* ===== Session loading: key-into-lock animation ===== */
+/* ===== Session loading: HYPR brand mark ===== */
 
 .sessionLoadingPanel {
   display: flex;
@@ -175,100 +175,89 @@
   text-align: center;
 }
 
-.keyLockAnim {
+.map-loading-mark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 180px;
+  height: 180px;
+}
+.map-loading-mark > * { grid-area: 1 / 1; }
+
+.map-loading-mark__logo {
+  position: relative;
+  z-index: 1;
+  height: 36px;
+  width: auto;
+  color: var(--text);
   overflow: visible;
-  color: #ffffff;
 }
-
-.keyLockBox {
-  fill: rgba(255, 255, 255, 0.06);
+.map-loading-mark__logo path {
+  fill: transparent;
   stroke: currentColor;
-  stroke-width: 2.2;
-}
-
-.keyLockShackle {
-  stroke: currentColor;
-  stroke-width: 2.4;
+  stroke-width: 60;
+  stroke-linejoin: round;
   stroke-linecap: round;
-  transform-origin: 88px 22px;
-  animation: keyLockShackleLift 2.8s cubic-bezier(0.6, 0, 0.3, 1) infinite;
+  stroke-dasharray: 12000;
+  stroke-dashoffset: 12000;
+  animation:
+    mlm-draw 720ms cubic-bezier(0.65, 0, 0.35, 1) forwards,
+    mlm-fill 280ms ease 700ms forwards;
+}
+/* Stagger per letter so the logo reads left → right (H, Y, P, R, dot). */
+.map-loading-mark__logo path:nth-child(2) { animation-delay: 0ms, 720ms; }
+.map-loading-mark__logo path:nth-child(5) { animation-delay: 90ms, 810ms; }
+.map-loading-mark__logo path:nth-child(3) { animation-delay: 180ms, 900ms; }
+.map-loading-mark__logo path:nth-child(4) { animation-delay: 270ms, 990ms; }
+.map-loading-mark__logo path:nth-child(1) { animation-delay: 360ms, 1080ms; }
+@keyframes mlm-draw {
+  to { stroke-dashoffset: 0; }
+}
+@keyframes mlm-fill {
+  to { fill: currentColor; }
 }
 
-.keyLockHole {
-  fill: #1c262f;
-  stroke: currentColor;
-  stroke-width: 1.4;
+.map-loading-mark__pulse {
+  position: relative;
+  width: 180px;
+  height: 180px;
+  display: block;
+  opacity: 0;
+  animation: mlm-pulse-fadein 400ms ease 1300ms forwards;
 }
-
-.keyLockKey {
-  color: #ffffff;
-  transform-origin: 14px 40px;
-  animation: keyLockKeyMove 2.8s cubic-bezier(0.7, 0, 0.3, 1) infinite;
+@keyframes mlm-pulse-fadein {
+  to { opacity: 1; }
 }
-
-.keyRing {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2.4;
+.map-loading-mark__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  transform: scale(0.25);
+  opacity: 0;
+  animation: mlm-ring 2400ms ease-out infinite;
 }
-
-.keyRingInner {
-  fill: #1c262f;
-  stroke: currentColor;
-  stroke-width: 1.2;
-}
-
-.keyShaft,
-.keyTooth {
-  fill: currentColor;
-}
-
-@keyframes keyLockKeyMove {
-  0% {
-    transform: translateX(-14px) rotate(0deg);
-    opacity: 0;
-  }
-  18% {
-    opacity: 1;
-  }
-  42% {
-    transform: translateX(22px) rotate(0deg);
-  }
-  58% {
-    transform: translateX(22px) rotate(90deg);
-  }
-  78% {
-    transform: translateX(22px) rotate(90deg);
-    opacity: 1;
-  }
-  92% {
-    transform: translateX(22px) rotate(90deg);
-    opacity: 0;
-  }
-  100% {
-    transform: translateX(-14px) rotate(0deg);
-    opacity: 0;
-  }
-}
-
-@keyframes keyLockShackleLift {
-  0%, 55% {
-    transform: translateY(0);
-  }
-  70%, 88% {
-    transform: translateY(-6px);
-  }
-  100% {
-    transform: translateY(0);
-  }
+.map-loading-mark__ring:nth-child(2) { animation-delay: 800ms; }
+.map-loading-mark__ring:nth-child(3) { animation-delay: 1600ms; }
+@keyframes mlm-ring {
+  0%   { transform: scale(0.25); opacity: 0; }
+  20%  { opacity: 0.55; }
+  100% { transform: scale(1); opacity: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .keyLockKey,
-  .keyLockShackle {
+  .map-loading-mark__logo path {
     animation: none;
+    fill: currentColor;
+    stroke-dashoffset: 0;
   }
-  .keyLockKey {
-    transform: translateX(22px) rotate(90deg);
+  .map-loading-mark__pulse {
+    animation: none;
+    opacity: 1;
+  }
+  .map-loading-mark__ring {
+    animation: none;
+    opacity: 0.25;
+    transform: scale(1);
   }
 }

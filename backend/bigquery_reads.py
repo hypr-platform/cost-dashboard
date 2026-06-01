@@ -8,6 +8,7 @@ Cache de 30s em memória (não dura mais que 1 ciclo de refresh do cron).
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import date
@@ -21,9 +22,20 @@ _CACHE_TTL_SECONDS = 30.0
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, Any]] = {}
 
+# Fonte do valor investido. Tabela externa (project=site-hypr) com 1 row por
+# contrato/faturamento, agregada por `short_token`. A regra de atribuição é
+# por `start_date` — o `total_value` cheio cai no mês do start_date (é onde foi
+# faturado), sem rateio linear por vigência. Override via env.
+_DEFAULT_CHECKLIST_INFO_FQN = "site-hypr.prod_assets.checklist_info"
+
 
 def _fqn(table: str) -> str:
     return f"`{bigquery_store._project_id()}.{bigquery_store._dataset_id()}.{table}`"
+
+
+def _checklist_info_fqn() -> str:
+    raw = os.getenv("CHECKLIST_INFO_TABLE_FQN", "").strip() or _DEFAULT_CHECKLIST_INFO_FQN
+    return f"`{raw}`"
 
 
 def _cached(key: str, fetcher) -> Any:
@@ -155,22 +167,79 @@ def exchange_rate_for_date(target: date) -> float | None:
     return _cached(f"fx:{target}", _q)
 
 
+def invested_by_token_in_period(
+    period_start: date, period_end: date
+) -> dict[str, float]:
+    """Soma `total_value` por `short_token` em `checklist_info`, filtrando por
+    `start_date` no período.
+
+    Regra de atribuição: o valor cheio cai no mês do start_date — é onde foi
+    faturado. Sem rateio linear por vigência. Tokens sem registro no período
+    ficam fora do dict (caller trata como 0).
+    """
+    def _q():
+        client = bigquery_store._get_client()
+        sql = f"""
+            SELECT
+              UPPER(TRIM(short_token)) AS token,
+              SUM(IFNULL(total_value, 0.0)) AS invested
+            FROM {_checklist_info_fqn()}
+            WHERE short_token IS NOT NULL
+              AND TRIM(short_token) != ''
+              AND start_date BETWEEN @period_start AND @period_end
+            GROUP BY token
+            HAVING invested > 0
+        """
+        cfg = bigquery.QueryJobConfig(
+            query_parameters=_params(period_start=period_start, period_end=period_end)
+        )
+        return {r.token: float(r.invested or 0.0) for r in client.query(sql, job_config=cfg).result()}
+    return _cached(f"invested_by_token:{period_start}:{period_end}", _q)
+
+
+def invested_total_in_period(period_start: date, period_end: date) -> float:
+    """Soma global de `total_value` em `checklist_info` no período.
+
+    Independente de ter `short_token` ou spend em `line_costs`. Alimenta o
+    card "Investido" do home (faturado bruto no período).
+    """
+    def _q():
+        client = bigquery_store._get_client()
+        sql = f"""
+            SELECT SUM(IFNULL(total_value, 0.0)) AS invested
+            FROM {_checklist_info_fqn()}
+            WHERE start_date BETWEEN @period_start AND @period_end
+        """
+        cfg = bigquery.QueryJobConfig(
+            query_parameters=_params(period_start=period_start, period_end=period_end)
+        )
+        row = next(client.query(sql, job_config=cfg).result(), None)
+        return float(row.invested or 0.0) if row else 0.0
+    return _cached(f"invested_total:{period_start}:{period_end}", _q)
+
+
 def campaign_journey_rows(
     period_start: date, period_end: date, active_platforms: list[str]
 ) -> list[dict[str, Any]]:
     """Lista de campanhas com gasto no período, enriquecida via dim_campaign.
 
-    Replica o shape do `dashboard.campaign_journey_rows` produzido pelo
-    `_build_payload`:
+    Shape:
       - 1 row por token com gasto > 0
-      - `investido` é o INVESTIDO TOTAL rateado pelo período (linear por dias
-        de vigência), conforme `_invested_for_selected_period`
+      - `investido` vem de `checklist_info` (SUM `total_value` onde
+        `start_date` cai no período). Token sem registro pro período = 0.
+        Sem rateio linear — atribuição é integral ao mês do `start_date`.
       - `total_plataformas` é SUM por plataforma
       - cada platform vira coluna com gasto
     """
+    try:
+        invested_by_token = invested_by_token_in_period(period_start, period_end)
+    except Exception:
+        # Falha no acesso à `checklist_info` (ex.: ACL cross-project) não pode
+        # derrubar o dashboard — degrada pra investido=0 em todas as rows.
+        invested_by_token = {}
+
     def _q():
         client = bigquery_store._get_client()
-        plats_list = ", ".join(f"@p_{i}" for i in range(len(active_platforms)))
         plat_params = [
             bigquery.ScalarQueryParameter(f"p_{i}", "STRING", p)
             for i, p in enumerate(active_platforms)
@@ -206,7 +275,6 @@ def campaign_journey_rows(
               d.campaign_start,
               d.campaign_end,
               d.status,
-              d.investido_brl,
               t.total_plataformas,
               p.* EXCEPT (token)
             FROM tokens_with_spend t
@@ -220,21 +288,10 @@ def campaign_journey_rows(
         ])
         rows = []
         for r in client.query(sql, job_config=cfg).result():
-            # Rateio linear do investido pelo período
             c_start = r.campaign_start
             c_end = r.campaign_end
-            inv_total = float(r.investido_brl or 0.0)
-            if inv_total <= 0:
-                inv_period = 0.0
-            elif c_start is None or c_end is None or c_start > c_end:
-                inv_period = inv_total
-            else:
-                cdays = (c_end - c_start).days + 1
-                o_start = max(c_start, period_start)
-                o_end = min(c_end, period_end)
-                odays = max(0, (o_end - o_start).days + 1)
-                inv_period = inv_total * odays / cdays if cdays > 0 else 0.0
-
+            token_key = str(r.token or "").strip().upper()
+            inv_period = float(invested_by_token.get(token_key, 0.0))
             total_p = float(r.total_plataformas or 0.0)
             pct = (total_p / inv_period * 100.0) if inv_period > 0 else 0.0
             row: dict[str, Any] = {

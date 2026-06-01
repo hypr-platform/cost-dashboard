@@ -2275,6 +2275,13 @@ function HomeContent() {
     refreshPhase === "starting" ||
     refreshPhase === "running" ||
     Boolean(refreshStatus?.running);
+  /* Only blocks UI when the *user* clicked Atualizar. Background workers
+     (scheduled_hourly) write to line_costs but the dashboard query reads
+     from BQ live — there is no consistency issue with changing the period
+     mid-worker-run, and the worker takes ~2.5min, which is too long to
+     lock the filter for everyone. */
+  const isUserRefreshRunning =
+    refreshPhase === "starting" || refreshPhase === "running";
 
   const cancelHideNoTokenRowTooltip = useCallback(() => {
     if (noTokenTooltipHideTimerRef.current !== null) {
@@ -4576,10 +4583,16 @@ function HomeContent() {
     const investedBaseRows = hasDashboardScopeFilters
       ? dashboardFilteredRows
       : journeyRows;
-    const investedTotal = investedBaseRows.reduce(
+    /* Sem filtros, usa o total global vindo de checklist_info (faturado
+       bruto no período, inclui tokens sem gasto). Com filtros ativos cai pro
+       row-sum, que respeita os filtros mas perde a parcela sem gasto. */
+    const investedRowSum = investedBaseRows.reduce(
       (sum, row) => sum + Number(row.investido ?? 0),
       0,
     );
+    const investedTotal = hasDashboardScopeFilters
+      ? investedRowSum
+      : (data.dashboard.total_invested_brl ?? investedRowSum);
 
     const dspFilteredConsolidated = hasDashboardScopeFilters
       ? data.dashboard.active_platforms.reduce(
@@ -4799,7 +4812,7 @@ function HomeContent() {
           investedSubtitle={
             hasDashboardScopeFilters
               ? "Total investido das campanhas nos filtros selecionados"
-              : "Total investido das campanhas ativas no período"
+              : "Total faturado no período (start_date do contrato)"
           }
           techCostPct={techCostPct}
           techCostTargetPct={IDEAL_TECH_COST_PCT}
@@ -8805,7 +8818,7 @@ function HomeContent() {
                   role="tab"
                   aria-selected={selectedViewMode === option.value}
                   className={`segBtn ${selectedViewMode === option.value ? "segBtnActive" : ""}`}
-                  disabled={isRefreshRunning || option.disabled}
+                  disabled={isUserRefreshRunning || option.disabled}
                   onClick={() => {
                     setSelectedViewMode(option.value);
                     setSelectedMonthKey((prev) => {
@@ -8862,7 +8875,7 @@ function HomeContent() {
               <select
                 className="topbarPeriodSelect"
                 value={selectedMonthKey}
-                disabled={isRefreshRunning}
+                disabled={isUserRefreshRunning}
                 onChange={(event) => {
                   setSelectedMonthKey(event.target.value);
                   const el = event.currentTarget;
