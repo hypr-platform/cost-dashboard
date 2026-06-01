@@ -4812,7 +4812,7 @@ function HomeContent() {
           investedSubtitle={
             hasDashboardScopeFilters
               ? "Total investido das campanhas nos filtros selecionados"
-              : "Total faturado no período (start_date do contrato)"
+              : "Total faturado no período"
           }
           techCostPct={techCostPct}
           techCostTargetPct={IDEAL_TECH_COST_PCT}
