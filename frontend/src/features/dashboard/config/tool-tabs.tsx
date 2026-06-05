@@ -14,8 +14,9 @@
 import type { ComponentType } from "react";
 import BigQueryTab from "../components/BigQueryTab";
 import GoogleCloudTab from "../components/GoogleCloudTab";
+import InvoiceCostTab from "../components/InvoiceCostTab";
 
-export type ToolTabKey = "BigQuery" | "GoogleCloud";
+export type ToolTabKey = "BigQuery" | "GoogleCloud" | "InvoiceCost";
 
 export type ToolTab = {
   key: ToolTabKey;
@@ -67,6 +68,26 @@ function GoogleCloudIcon() {
   );
 }
 
+function InvoiceIcon() {
+  return (
+    <span className="brandIcon" aria-hidden="true">
+      <svg
+        className="brandIconSvg"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M4 2h6l2.5 2.5V14H4z" />
+        <path d="M6 6.5h4M6 9h4M6 11.5h2.5" />
+      </svg>
+    </span>
+  );
+}
+
 /** Fonte da verdade. Mude `enabled` para ocultar/exibir. */
 export const TOOL_TABS: readonly ToolTab[] = [
   {
@@ -84,6 +105,14 @@ export const TOOL_TABS: readonly ToolTab[] = [
     enabled: true,
     Component: GoogleCloudTab,
     Icon: GoogleCloudIcon,
+  },
+  {
+    key: "InvoiceCost",
+    label: "Notas Fiscais",
+    slug: "notas-fiscais",
+    enabled: true,
+    Component: InvoiceCostTab,
+    Icon: InvoiceIcon,
   },
 ];
 

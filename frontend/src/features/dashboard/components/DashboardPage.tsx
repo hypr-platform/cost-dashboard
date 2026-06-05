@@ -238,7 +238,8 @@ type NavKey =
   | "Hivestack"
   | "Amazon DSP"
   | "BigQuery"
-  | "GoogleCloud";
+  | "GoogleCloud"
+  | "InvoiceCost";
 
 const NAV_LABELS: Record<NavKey, string> = {
   Dashboard: "DeepDive",
@@ -253,6 +254,7 @@ const NAV_LABELS: Record<NavKey, string> = {
   "Amazon DSP": "Amazon DSP",
   BigQuery: "BigQuery",
   GoogleCloud: "Google Cloud",
+  InvoiceCost: "Notas Fiscais",
 };
 
 const PAGE_TO_SLUG: Record<Exclude<NavKey, "Dashboard">, string> = {
@@ -267,6 +269,7 @@ const PAGE_TO_SLUG: Record<Exclude<NavKey, "Dashboard">, string> = {
   "Amazon DSP": "amazon-dsp",
   BigQuery: "bigquery",
   GoogleCloud: "google-cloud",
+  InvoiceCost: "notas-fiscais",
 };
 /**
  * Mapeamento slug → página. Para tabs-ferramenta, deriva do registry e

@@ -6,6 +6,7 @@ import { NoTokenLinesSkeleton, OutOfPeriodSkeleton } from "./AttentionSkeleton";
 import { PlatformPageSkeleton } from "./PlatformPageSkeleton";
 import { BigQuerySkeleton } from "./BigQuerySkeleton";
 import { GoogleCloudSkeleton } from "./GoogleCloudSkeleton";
+import { InvoiceCostSkeleton } from "./InvoiceCostSkeleton";
 
 /**
  * Mirror of the DashboardPage NavKey union. Kept local to avoid a circular
@@ -24,7 +25,8 @@ export type SkeletonPageKey =
   | "Hivestack"
   | "Amazon DSP"
   | "BigQuery"
-  | "GoogleCloud";
+  | "GoogleCloud"
+  | "InvoiceCost";
 
 /**
  * Registry of body skeletons per page. Adding a new page = add an entry here
@@ -44,6 +46,7 @@ const BODY_BY_PAGE: Record<SkeletonPageKey, ComponentType> = {
   "Amazon DSP": PlatformPageSkeleton,
   BigQuery: BigQuerySkeleton,
   GoogleCloud: GoogleCloudSkeleton,
+  InvoiceCost: InvoiceCostSkeleton,
 };
 
 /**
