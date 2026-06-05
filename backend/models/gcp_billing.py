@@ -43,14 +43,6 @@ class GcpBillingDailyPoint(BaseModel):
     cost_brl: Decimal
 
 
-class GcpCloudRunServiceRow(BaseModel):
-    service_name: str
-    location: str
-    project_id: str
-    cost_usd: Decimal
-    cost_brl: Decimal
-
-
 class GcpCloudRunByLabelRow(BaseModel):
     service_name: str
     cost_usd: Decimal
@@ -70,7 +62,6 @@ class GcpBillingDashboardResponse(BaseModel):
     by_service: list[GcpBillingServiceRow]
     by_sku: list[GcpBillingSkuRow]
     daily: list[GcpBillingDailyPoint]
-    cloud_run_services: list[GcpCloudRunServiceRow]
     cloud_run_by_label: list[GcpCloudRunByLabelRow]
     cached: bool = False
     fetched_at: str

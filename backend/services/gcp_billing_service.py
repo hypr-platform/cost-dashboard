@@ -31,7 +31,6 @@ from backend.models.gcp_billing import (
     GcpBillingServiceRow,
     GcpBillingSkuRow,
     GcpCloudRunByLabelRow,
-    GcpCloudRunServiceRow,
 )
 from backend.services.exchange_rate import get_exchange_rate
 
@@ -220,31 +219,6 @@ ORDER BY day
 """.strip()
 
 
-def _query_cloud_run_services(table: str) -> str:
-    """Agrega custo do Cloud Run por service name, extraindo de resource.global_name.
-
-    resource.global_name para Cloud Run tem o formato:
-      //run.googleapis.com/projects/{project}/locations/{location}/services/{service_name}
-    Parseia com REGEXP_EXTRACT para obter service_name e location.
-    Filtra service.description = 'Cloud Run' e exclui linhas sem resource name.
-    """
-    return f"""
-SELECT
-  REGEXP_EXTRACT(resource.global_name, r'/services/([^/]+)$') AS service_name,
-  REGEXP_EXTRACT(resource.global_name, r'/locations/([^/]+)/services/') AS location,
-  project.id AS project_id,
-  SUM({_NET_COST_EXPR}) AS net_cost
-FROM `{table}`
-WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
-  AND service.description = 'Cloud Run'
-  AND resource.global_name IS NOT NULL
-  AND resource.global_name != ''
-GROUP BY service_name, location, project_id
-HAVING service_name IS NOT NULL
-ORDER BY net_cost DESC
-""".strip()
-
-
 def _query_cloud_run_by_label(table: str) -> str:
     """Agrega custo do Cloud Run pelo label 'service' adicionado nos services/functions.
 
@@ -314,40 +288,29 @@ async def build_dashboard(
     sql_sku = _query_by_sku(table, DEFAULT_TOP_SKUS)
     sql_daily = _query_daily(table)
     sql_currency = _query_currency(table)
-    sql_cloud_run = _query_cloud_run_services(table)
     sql_cloud_run_label = _query_cloud_run_by_label(table)
 
+    # Todas as queries em paralelo (inclui cloud_run_by_label, antes sequencial).
     loop = asyncio.get_running_loop()
     try:
-        project_rows, service_rows, sku_rows, daily_rows, currency_rows = await asyncio.gather(
+        (
+            project_rows,
+            service_rows,
+            sku_rows,
+            daily_rows,
+            currency_rows,
+            cloud_run_label_rows,
+        ) = await asyncio.gather(
             loop.run_in_executor(None, _run_query, client, sql_project, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_service, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_sku, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_daily, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_currency, from_ts, to_ts),
+            loop.run_in_executor(None, _run_query, client, sql_cloud_run_label, from_ts, to_ts),
         )
     except Exception as exc:
         logger.exception("Falha ao consultar GCP billing export.")
         raise RuntimeError(f"BigQuery falhou: {exc}") from exc
-
-    # Cloud Run por service: usa resource.global_name, disponível apenas no Detailed export.
-    # Se a tabela for o Standard export (gcp_billing_export_v1_*), a coluna não existe
-    # e o BigQuery retorna 400. Capturamos silenciosamente e devolvemos lista vazia.
-    try:
-        cloud_run_rows = await loop.run_in_executor(
-            None, _run_query, client, sql_cloud_run, from_ts, to_ts
-        )
-    except Exception as exc:
-        logger.warning("Cloud Run service breakdown indisponível (provavelmente Standard export): %s", exc)
-        cloud_run_rows = []
-
-    try:
-        cloud_run_label_rows = await loop.run_in_executor(
-            None, _run_query, client, sql_cloud_run_label, from_ts, to_ts
-        )
-    except Exception as exc:
-        logger.warning("Cloud Run by label indisponível: %s", exc)
-        cloud_run_label_rows = []
 
     # Detecta a moeda nativa do billing export.
     # Prioridade: 1) env var GCP_BILLING_NATIVE_CURRENCY (override explícito)
@@ -435,18 +398,6 @@ async def build_dashboard(
         for r in daily_rows
     ]
 
-    cloud_run_services: list[GcpCloudRunServiceRow] = [
-        GcpCloudRunServiceRow(
-            service_name=str(r.get("service_name") or "(desconhecido)"),
-            location=str(r.get("location") or "—"),
-            project_id=str(r.get("project_id") or "—"),
-            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
-            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
-        )
-        for r in cloud_run_rows
-        if _to_decimal(r.get("net_cost")) > 0
-    ]
-
     cloud_run_by_label: list[GcpCloudRunByLabelRow] = [
         GcpCloudRunByLabelRow(
             service_name=str(r.get("service_name") or "(sem label)"),
@@ -472,7 +423,6 @@ async def build_dashboard(
         by_service=by_service,
         by_sku=by_sku,
         daily=daily,
-        cloud_run_services=cloud_run_services,
         cloud_run_by_label=cloud_run_by_label,
         cached=False,
         fetched_at=datetime.now(timezone.utc).isoformat(),

@@ -37,14 +37,6 @@ export type GcpCloudRunByLabelRow = {
   cost_brl: string;
 };
 
-export type GcpCloudRunServiceRow = {
-  service_name: string;
-  location: string;
-  project_id: string;
-  cost_usd: string;
-  cost_brl: string;
-};
-
 export type GcpBillingDashboardResponse = {
   from_date: string;
   to_date: string;
@@ -58,7 +50,6 @@ export type GcpBillingDashboardResponse = {
   by_service: GcpBillingServiceRow[];
   by_sku: GcpBillingSkuRow[];
   daily: GcpBillingDailyPoint[];
-  cloud_run_services: GcpCloudRunServiceRow[];
   cloud_run_by_label: GcpCloudRunByLabelRow[];
   cached: boolean;
   fetched_at: string;

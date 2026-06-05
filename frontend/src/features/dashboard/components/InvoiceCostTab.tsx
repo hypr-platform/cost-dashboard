@@ -210,6 +210,7 @@ export default function InvoiceCostTab() {
                 tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(0)}k` : `${v}`)} width={42} />
               <YAxis yAxisId="custo" orientation="right" tick={{ fontSize: 10, fill: "#666" }} tickLine={false} axisLine={false}
                 tickFormatter={(v) => `R$${v >= 1000 ? (v / 1000).toFixed(0) + "k" : v.toFixed(0)}`} width={56} />
+              <YAxis yAxisId="porNota" hide domain={[0, "dataMax"]} />
               <Tooltip content={<ChartTooltip />} />
               <Legend
                 onClick={(o) => toggleSeries(String(o.dataKey))}
@@ -233,6 +234,7 @@ export default function InvoiceCostTab() {
               <Line yAxisId="custo" type="monotone" dataKey="custo" name="Total (R$)" stroke="#ededed" strokeWidth={1.5} dot={false} hide={hidden["custo"]} />
               <Line yAxisId="custo" type="monotone" dataKey="invoiceReader" name="invoice-reader (R$)" stroke="#f59e42" strokeWidth={1.5} dot={false} hide={hidden["invoiceReader"]} />
               <Line yAxisId="custo" type="monotone" dataKey="captcha" name="captcha (R$)" stroke="#a78bfa" strokeWidth={1.5} dot={false} hide={hidden["captcha"]} />
+              <Line yAxisId="porNota" type="monotone" dataKey="porNota" name="Custo/nota (R$)" stroke="#34c78a" strokeWidth={1.5} strokeDasharray="4 3" dot={false} hide={hidden["porNota"]} />
             </ComposedChart>
           </ResponsiveContainer>
         ) : !data && !error ? (
