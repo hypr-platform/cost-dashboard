@@ -4222,12 +4222,13 @@ function HomeContent() {
     return <SessionLoading message="Redirecionando para login..." />;
   if (!isAllowedDomain)
     return <SessionLoading message="Validando domínio..." />;
+  const isExternalPage = EXTERNAL_PAGES.has(resolvedActivePage);
   const showInitialDashboardSkeleton =
-    shouldFetchData && !data && !error && isLoading;
+    !isExternalPage && shouldFetchData && !data && !error && isLoading;
   if (showInitialDashboardSkeleton)
     return <PageSkeleton page={resolvedActivePage} />;
 
-  const dashboardLoadFailed = Boolean(error || !data);
+  const dashboardLoadFailed = !isExternalPage && Boolean(error || !data);
   const dashboardErrorMessage =
     error instanceof Error
       ? error.message
@@ -4246,7 +4247,7 @@ function HomeContent() {
   // skeleton (instead of the stale numbers) makes filter changes feel
   // responsive on DSP / Campaign Journey / Attention pages.
   const showFilterChangeSkeleton =
-    shouldFetchData && isPeriodStale && (isValidating || isLoading);
+    !isExternalPage && shouldFetchData && isPeriodStale && (isValidating || isLoading);
   if (showFilterChangeSkeleton)
     return <PageSkeleton page={resolvedActivePage} />;
   const periodRangeCompactLabel =
@@ -8781,7 +8782,7 @@ function HomeContent() {
       </aside>
 
       <section className={`content ${isPeriodStale ? "contentLoading" : ""}`}>
-        <div className="topbar">
+        <div className={`topbar${EXTERNAL_PAGES.has(resolvedActivePage) ? " topbarHidden" : ""}`}>
           <div className="topbarLeft">
             <h1 className="topbarTitle">{periodHeroLabel}</h1>
             <div className="topbarSubtitle">

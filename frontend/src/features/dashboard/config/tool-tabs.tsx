@@ -81,7 +81,7 @@ export const TOOL_TABS: readonly ToolTab[] = [
     key: "GoogleCloud",
     label: "Google Cloud",
     slug: "google-cloud",
-    enabled: false,
+    enabled: true,
     Component: GoogleCloudTab,
     Icon: GoogleCloudIcon,
   },

@@ -174,6 +174,11 @@ def _bytes_to_usd(bytes_billed: int, price_per_tib: Decimal) -> Decimal:
     )
 
 
+# Timeout do servidor para queries de metadata BQ (deve ser menor que o timeout do frontend de 60s).
+_BQ_QUERY_TIMEOUT_SECONDS = 50
+
+# Query principal: sem `query` (texto SQL) e sem `referenced_tables` — colunas pesadas.
+# Buscamos só o que precisamos para agregações.
 _JOBS_QUERY_TEMPLATE = """
 SELECT
   job_id,
@@ -182,7 +187,6 @@ SELECT
   creation_time,
   total_bytes_billed,
   total_slot_ms,
-  query,
   referenced_tables
 FROM `{project}`.`region-{region}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
 WHERE job_type = 'QUERY'
@@ -190,6 +194,13 @@ WHERE job_type = 'QUERY'
   AND error_result IS NULL
   AND creation_time BETWEEN @from_ts AND @to_ts
   AND total_bytes_billed > 0
+"""
+
+# Query secundária: busca texto SQL só dos top N jobs mais caros por bytes.
+_TOP_JOBS_SQL_TEMPLATE = """
+SELECT job_id, query
+FROM `{project}`.`region-{region}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+WHERE job_id IN UNNEST(@job_ids)
 """
 
 
@@ -208,7 +219,7 @@ def _run_region_query(
         ]
     )
     rows: list[dict[str, Any]] = []
-    for row in client.query(sql, job_config=job_config).result():
+    for row in client.query(sql, job_config=job_config).result(timeout=_BQ_QUERY_TIMEOUT_SECONDS):
         rows.append(
             {
                 "job_id": row["job_id"],
@@ -217,7 +228,7 @@ def _run_region_query(
                 "creation_time": row["creation_time"],
                 "total_bytes_billed": int(row["total_bytes_billed"] or 0),
                 "total_slot_ms": int(row["total_slot_ms"] or 0),
-                "query": row["query"] or "",
+                "query": "",  # preenchido depois só para top N
                 "referenced_tables": [
                     {
                         "project_id": t.get("project_id"),
@@ -230,6 +241,26 @@ def _run_region_query(
             }
         )
     return rows
+
+
+def _fetch_top_queries_sql(
+    client: bigquery.Client,
+    project: str,
+    region: str,
+    job_ids: list[str],
+) -> dict[str, str]:
+    if not job_ids:
+        return {}
+    sql = _TOP_JOBS_SQL_TEMPLATE.format(project=project, region=region)
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("job_ids", "STRING", job_ids),
+        ]
+    )
+    return {
+        row["job_id"]: (row["query"] or "")
+        for row in client.query(sql, job_config=job_config).result(timeout=15)
+    }
 
 
 async def build_dashboard(
@@ -378,8 +409,24 @@ async def build_dashboard(
     )[:DEFAULT_TOP_TABLES]
 
     query_costs.sort(key=lambda x: x[0], reverse=True)
+    top_n = query_costs[:DEFAULT_TOP_QUERIES]
+
+    # Busca o texto SQL só dos top N jobs — query separada e leve
+    top_job_ids_by_region: dict[str, list[str]] = defaultdict(list)
+    for _, row in top_n:
+        top_job_ids_by_region[row["region"]].append(row["job_id"])
+
+    sql_by_job: dict[str, str] = {}
+    for region, job_ids in top_job_ids_by_region.items():
+        try:
+            sql_by_job.update(
+                _fetch_top_queries_sql(client, project, region, job_ids)
+            )
+        except Exception as exc:
+            logger.warning("Falha ao buscar SQL dos top queries região=%s: %s", region, exc)
+
     top_queries: list[BqCostQueryRow] = []
-    for bytes_billed, row in query_costs[:DEFAULT_TOP_QUERIES]:
+    for bytes_billed, row in top_n:
         usd = _bytes_to_usd(bytes_billed, price_per_tib)
         brl = (usd * rate).quantize(Decimal("0.01"))
         creation_time = row["creation_time"]
@@ -387,7 +434,7 @@ async def build_dashboard(
             creation_iso = creation_time.isoformat()
         else:
             creation_iso = str(creation_time)
-        preview = (row["query"] or "").strip()
+        preview = sql_by_job.get(row["job_id"], "").strip()
         if len(preview) > QUERY_PREVIEW_CHARS:
             preview = preview[:QUERY_PREVIEW_CHARS] + "…"
         top_queries.append(

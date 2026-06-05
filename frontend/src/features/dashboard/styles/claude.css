@@ -101,6 +101,41 @@
   background: rgba(255, 255, 255, 0.06);
 }
 
+.brDateInput {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.brDateInputButton {
+  background: transparent;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  padding: 2px 4px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+}
+
+.brDateInputButton:hover {
+  color: #ededed;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.brDateInputPicker {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  pointer-events: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
 .claudeMonthNavToday {
   background: transparent;
   border: none;
@@ -171,6 +206,40 @@
   flex-wrap: wrap;
 }
 
+.claudeTableHeaderBtn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.claudeTableHeaderBtnLeft {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.claudeTableChevron {
+  color: #666;
+  flex-shrink: 0;
+  transition: transform 0.18s ease, color 0.15s;
+}
+
+.claudeTableChevronCollapsed {
+  transform: rotate(-90deg);
+}
+
+.claudeTableHeaderBtn:hover .claudeTableChevron {
+  color: #aaa;
+}
+
 .claudeTableTitle {
   font-size: 13px;
   font-weight: 500;
@@ -184,6 +253,62 @@
   font-feature-settings: "tnum";
 }
 
+.gcpTimeline {
+  gap: 12px;
+}
+
+.gcpTimelineHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.gcpTimelineControls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.gcpServiceHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.gcpServiceTabs {
+  display: flex;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.gcpServiceTab {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.gcpServiceTab:hover {
+  color: #ccc;
+}
+
+.gcpServiceTabActive {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ededed;
+}
+
 .claudeTableSkeleton {
   height: 220px;
   border-radius: 6px;
@@ -195,6 +320,74 @@
   );
   background-size: 200% 100%;
   animation: claudeShimmer 1.4s ease-in-out infinite;
+}
+
+.claudeTableLoading tbody tr {
+  border-top: 0.5px solid rgba(255, 255, 255, 0.04);
+}
+
+.claudeTableCellSkeleton {
+  display: block;
+  height: 11px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.02),
+    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0.02)
+  );
+  background-size: 200% 100%;
+  animation: claudeShimmer 1.4s ease-in-out infinite;
+}
+
+.claudeTableCellSkeletonText {
+  height: 12px;
+  width: 60%;
+}
+
+.claudeTableCellSkeletonSub {
+  height: 10px;
+  width: 40%;
+  margin-top: 4px;
+  opacity: 0.65;
+}
+
+.claudeTableCellSkeletonNum {
+  height: 12px;
+  width: 60%;
+  margin-left: auto;
+}
+
+.claudeHeaderMetaSkeleton {
+  display: inline-block;
+  height: 11px;
+  width: 220px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.02),
+    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0.02)
+  );
+  background-size: 200% 100%;
+  animation: claudeShimmer 1.4s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+.claudeTableHintSkeleton {
+  display: inline-block;
+  height: 10px;
+  width: 80px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.02),
+    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0.02)
+  );
+  background-size: 200% 100%;
+  animation: claudeShimmer 1.4s ease-in-out infinite;
+  vertical-align: middle;
 }
 
 @keyframes claudeShimmer {
@@ -331,6 +524,53 @@
   color: #888;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.bqCostKpiInfoWrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+}
+
+.bqCostKpiInfoIcon {
+  color: #555;
+  transition: color 0.15s;
+  display: block;
+}
+
+.bqCostKpiInfoWrap:hover .bqCostKpiInfoIcon {
+  color: #aaa;
+}
+
+.bqCostKpiTooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #ccc;
+  white-space: normal;
+  width: 220px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 100;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.bqCostKpiInfoWrap:hover .bqCostKpiTooltip {
+  opacity: 1;
 }
 
 .bqCostKpiValue {

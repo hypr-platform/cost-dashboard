@@ -374,6 +374,10 @@
   gap: 24px;
 }
 
+.topbarHidden {
+  display: none;
+}
+
 .topbarLeft {
   display: flex;
   flex-direction: column;

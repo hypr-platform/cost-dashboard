@@ -2,6 +2,7 @@
 
 import { Fragment, type ReactNode } from "react";
 import { todayKey } from "@/features/dashboard/utils/cost-format";
+import BRDateInput from "./BRDateInput";
 
 type Props = {
   from: string;
@@ -26,27 +27,23 @@ export default function CostDateRangeControls({
     <div className="claudeHeaderControls bqCostControls">
       <label className="bqCostField">
         <span className="bqCostFieldLabel">De</span>
-        <input
-          type="date"
+        <BRDateInput
           className="claudeDayInput"
           value={from}
           max={to}
-          onChange={(e) => {
-            if (e.target.value) onChangeFrom(e.target.value);
-          }}
+          onChange={onChangeFrom}
+          ariaLabel="Data inicial"
         />
       </label>
       <label className="bqCostField">
         <span className="bqCostFieldLabel">Até</span>
-        <input
-          type="date"
+        <BRDateInput
           className="claudeDayInput"
           value={to}
-          max={todayKey()}
           min={from}
-          onChange={(e) => {
-            if (e.target.value) onChangeTo(e.target.value);
-          }}
+          max={todayKey()}
+          onChange={onChangeTo}
+          ariaLabel="Data final"
         />
       </label>
       {extraFields ? <Fragment>{extraFields}</Fragment> : null}

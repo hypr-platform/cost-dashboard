@@ -46,13 +46,24 @@ export default function BigQueryTab() {
   const [regions, setRegions] = useState<string>("");
   const [expandedQuery, setExpandedQuery] = useState<string | null>(null);
 
-  const url = buildUrl(apiBase, from, to, regions);
+  const [committedFrom, setCommittedFrom] = useState<string>(daysAgoKey(29));
+  const [committedTo, setCommittedTo] = useState<string>(todayKey());
+  const [committedRegions, setCommittedRegions] = useState<string>("");
+
+  const url = buildUrl(apiBase, committedFrom, committedTo, committedRegions);
   const { data, error, isValidating, mutate } =
     useSWR<BqCostDashboardResponse>(url, fetchBigQueryCostDashboard, {
       shouldRetryOnError: false,
       dedupingInterval: 60_000,
       revalidateOnFocus: false,
     });
+
+  function handleRefresh() {
+    setCommittedFrom(from);
+    setCommittedTo(to);
+    setCommittedRegions(regions);
+    mutate();
+  }
 
   const totalBrl = Number(data?.total_cost_brl ?? 0);
   const totalUsd = Number(data?.total_cost_usd ?? 0);
@@ -193,7 +204,7 @@ export default function BigQueryTab() {
           to={to}
           onChangeFrom={setFrom}
           onChangeTo={setTo}
-          onRefresh={() => mutate()}
+          onRefresh={handleRefresh}
           isValidating={isValidating}
           extraFields={
             <label className="bqCostField">

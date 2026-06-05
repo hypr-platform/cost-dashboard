@@ -30,6 +30,8 @@ from backend.models.gcp_billing import (
     GcpBillingProjectRow,
     GcpBillingServiceRow,
     GcpBillingSkuRow,
+    GcpCloudRunByLabelRow,
+    GcpCloudRunServiceRow,
 )
 from backend.services.exchange_rate import get_exchange_rate
 
@@ -39,6 +41,15 @@ DEFAULT_CACHE_TTL = 1800
 DEFAULT_MAX_RANGE_DAYS = 92
 DEFAULT_TOP_SKUS = 50
 TABLE_FQN_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+
+
+def _native_currency_override() -> str | None:
+    """Permite forçar a moeda nativa via GCP_BILLING_NATIVE_CURRENCY (ex: BRL ou USD).
+    Evita dependência de detecção automática via ANY_VALUE(currency) que pode ser
+    não-determinístico em billing accounts com linhas em múltiplas moedas.
+    """
+    raw = (os.getenv("GCP_BILLING_NATIVE_CURRENCY") or "").strip().upper()
+    return raw if raw in ("BRL", "USD") else None
 
 
 def _table_fqn() -> str | None:
@@ -209,6 +220,61 @@ ORDER BY day
 """.strip()
 
 
+def _query_cloud_run_services(table: str) -> str:
+    """Agrega custo do Cloud Run por service name, extraindo de resource.global_name.
+
+    resource.global_name para Cloud Run tem o formato:
+      //run.googleapis.com/projects/{project}/locations/{location}/services/{service_name}
+    Parseia com REGEXP_EXTRACT para obter service_name e location.
+    Filtra service.description = 'Cloud Run' e exclui linhas sem resource name.
+    """
+    return f"""
+SELECT
+  REGEXP_EXTRACT(resource.global_name, r'/services/([^/]+)$') AS service_name,
+  REGEXP_EXTRACT(resource.global_name, r'/locations/([^/]+)/services/') AS location,
+  project.id AS project_id,
+  SUM({_NET_COST_EXPR}) AS net_cost
+FROM `{table}`
+WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
+  AND service.description = 'Cloud Run'
+  AND resource.global_name IS NOT NULL
+  AND resource.global_name != ''
+GROUP BY service_name, location, project_id
+HAVING service_name IS NOT NULL
+ORDER BY net_cost DESC
+""".strip()
+
+
+def _query_cloud_run_by_label(table: str) -> str:
+    """Agrega custo do Cloud Run pelo label 'service' adicionado nos services/functions.
+
+    Linhas sem o label 'service' são agrupadas como '(sem label)'.
+    """
+    return f"""
+SELECT
+  COALESCE(
+    (SELECT l.value FROM UNNEST(labels) l WHERE l.key = 'service' LIMIT 1),
+    '(sem label)'
+  ) AS service_name,
+  SUM({_NET_COST_EXPR}) AS net_cost
+FROM `{table}`
+WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
+  AND service.description = 'Cloud Run'
+GROUP BY service_name
+ORDER BY net_cost DESC
+""".strip()
+
+
+def _query_currency(table: str) -> str:
+    return f"""
+SELECT currency, COUNT(*) AS cnt
+FROM `{table}`
+WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
+GROUP BY currency
+ORDER BY cnt DESC
+""".strip()
+
+
 def _run_query(client: bigquery.Client, sql: str, from_ts: datetime, to_ts: datetime) -> list[dict[str, Any]]:
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
@@ -247,36 +313,91 @@ async def build_dashboard(
     sql_service = _query_by_service(table)
     sql_sku = _query_by_sku(table, DEFAULT_TOP_SKUS)
     sql_daily = _query_daily(table)
+    sql_currency = _query_currency(table)
+    sql_cloud_run = _query_cloud_run_services(table)
+    sql_cloud_run_label = _query_cloud_run_by_label(table)
 
     loop = asyncio.get_running_loop()
     try:
-        project_rows, service_rows, sku_rows, daily_rows = await asyncio.gather(
+        project_rows, service_rows, sku_rows, daily_rows, currency_rows = await asyncio.gather(
             loop.run_in_executor(None, _run_query, client, sql_project, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_service, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_sku, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_daily, from_ts, to_ts),
+            loop.run_in_executor(None, _run_query, client, sql_currency, from_ts, to_ts),
         )
     except Exception as exc:
         logger.exception("Falha ao consultar GCP billing export.")
         raise RuntimeError(f"BigQuery falhou: {exc}") from exc
 
-    rate = get_exchange_rate(to_d)
+    # Cloud Run por service: usa resource.global_name, disponível apenas no Detailed export.
+    # Se a tabela for o Standard export (gcp_billing_export_v1_*), a coluna não existe
+    # e o BigQuery retorna 400. Capturamos silenciosamente e devolvemos lista vazia.
+    try:
+        cloud_run_rows = await loop.run_in_executor(
+            None, _run_query, client, sql_cloud_run, from_ts, to_ts
+        )
+    except Exception as exc:
+        logger.warning("Cloud Run service breakdown indisponível (provavelmente Standard export): %s", exc)
+        cloud_run_rows = []
+
+    try:
+        cloud_run_label_rows = await loop.run_in_executor(
+            None, _run_query, client, sql_cloud_run_label, from_ts, to_ts
+        )
+    except Exception as exc:
+        logger.warning("Cloud Run by label indisponível: %s", exc)
+        cloud_run_label_rows = []
+
+    # Detecta a moeda nativa do billing export.
+    # Prioridade: 1) env var GCP_BILLING_NATIVE_CURRENCY (override explícito)
+    #             2) coluna `currency` da tabela (auto-detecção)
+    #             3) fallback "USD"
+    # ANY_VALUE(currency) pode ser não-determinístico em contas com linhas multi-moeda,
+    # por isso o override via env var é preferível quando a moeda é conhecida.
+    override = _native_currency_override()
+    if override:
+        native_currency = override
+        logger.info("GCP billing currency: %s (via GCP_BILLING_NATIVE_CURRENCY override)", native_currency)
+    else:
+        native_currency = "USD"
+        if currency_rows:
+            # currency_rows: [{currency: "BRL", cnt: 1234}, {currency: "USD", cnt: 5}, ...]
+            # Já ordenado por cnt DESC — pega a moeda mais frequente.
+            logger.warning("GCP billing currency distribution: %s", currency_rows)
+            dominant = str(currency_rows[0].get("currency") or "").strip().upper()
+            if dominant in ("BRL", "USD"):
+                native_currency = dominant
+        logger.warning("GCP billing native_currency resolved: %s", native_currency)
+
+    if native_currency == "BRL":
+        rate = Decimal("1")
+        usd_rate = get_exchange_rate(to_d)
+    else:
+        rate = get_exchange_rate(to_d)
+        usd_rate = rate
+
+    def to_brl(native: Decimal) -> Decimal:
+        return native if native_currency == "BRL" else _q2(native * rate)
+
+    def to_usd(native: Decimal) -> Decimal:
+        return _q2(native / usd_rate) if native_currency == "BRL" else native
 
     by_project: list[GcpBillingProjectRow] = []
-    total_net_usd = Decimal("0")
-    total_credits_usd = Decimal("0")
+    total_net_native = Decimal("0")
+    total_credits_native = Decimal("0")
     for r in project_rows:
         net = _to_decimal(r.get("net_cost"))
         credits_amount = _to_decimal(r.get("credits_amount"))
-        total_net_usd += net
-        total_credits_usd += credits_amount
+        total_net_native += net
+        total_credits_native += credits_amount
         by_project.append(
             GcpBillingProjectRow(
                 project_id=str(r.get("project_id") or "(sem projeto)"),
                 project_name=(r.get("project_name") or None),
-                cost_usd=_q2(net),
-                cost_brl=_q2(net * rate),
-                credits_usd=_q2(credits_amount),
+                cost_usd=to_usd(net),
+                cost_brl=to_brl(net),
+                credits_usd=to_usd(credits_amount),
             )
         )
     by_project.sort(key=lambda r: r.cost_brl, reverse=True)
@@ -285,8 +406,8 @@ async def build_dashboard(
         GcpBillingServiceRow(
             service_id=str(r.get("service_id") or ""),
             service_description=str(r.get("service_description") or r.get("service_id") or "—"),
-            cost_usd=_q2(_to_decimal(r.get("net_cost"))),
-            cost_brl=_q2(_to_decimal(r.get("net_cost")) * rate),
+            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
+            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
         )
         for r in service_rows
     ]
@@ -297,8 +418,8 @@ async def build_dashboard(
             sku_id=str(r.get("sku_id") or ""),
             sku_description=str(r.get("sku_description") or r.get("sku_id") or "—"),
             service_description=str(r.get("service_description") or "—"),
-            cost_usd=_q2(_to_decimal(r.get("net_cost"))),
-            cost_brl=_q2(_to_decimal(r.get("net_cost")) * rate),
+            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
+            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
             usage_amount=_q6(_to_decimal(r.get("usage_amount"))),
             usage_unit=(r.get("usage_unit") or None),
         )
@@ -308,27 +429,51 @@ async def build_dashboard(
     daily: list[GcpBillingDailyPoint] = [
         GcpBillingDailyPoint(
             day=r["day"],
-            cost_usd=_q2(_to_decimal(r.get("net_cost"))),
-            cost_brl=_q2(_to_decimal(r.get("net_cost")) * rate),
+            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
+            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
         )
         for r in daily_rows
     ]
 
-    total_gross_usd = total_net_usd - total_credits_usd
+    cloud_run_services: list[GcpCloudRunServiceRow] = [
+        GcpCloudRunServiceRow(
+            service_name=str(r.get("service_name") or "(desconhecido)"),
+            location=str(r.get("location") or "—"),
+            project_id=str(r.get("project_id") or "—"),
+            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
+            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
+        )
+        for r in cloud_run_rows
+        if _to_decimal(r.get("net_cost")) > 0
+    ]
+
+    cloud_run_by_label: list[GcpCloudRunByLabelRow] = [
+        GcpCloudRunByLabelRow(
+            service_name=str(r.get("service_name") or "(sem label)"),
+            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
+            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
+        )
+        for r in cloud_run_label_rows
+        if _to_decimal(r.get("net_cost")) > 0
+    ]
+
+    total_gross_native = total_net_native - total_credits_native
 
     response = GcpBillingDashboardResponse(
         from_date=from_d,
         to_date=to_d,
-        currency="USD",
-        exchange_rate=rate.quantize(Decimal("0.0001")),
-        total_cost_usd=_q2(total_net_usd),
-        total_cost_brl=_q2(total_net_usd * rate),
-        total_credits_usd=_q2(total_credits_usd),
-        total_gross_usd=_q2(total_gross_usd),
+        currency=native_currency,
+        exchange_rate=usd_rate.quantize(Decimal("0.0001")),
+        total_cost_usd=to_usd(total_net_native),
+        total_cost_brl=to_brl(total_net_native),
+        total_credits_usd=to_usd(total_credits_native),
+        total_gross_usd=to_usd(total_gross_native),
         by_project=by_project,
         by_service=by_service,
         by_sku=by_sku,
         daily=daily,
+        cloud_run_services=cloud_run_services,
+        cloud_run_by_label=cloud_run_by_label,
         cached=False,
         fetched_at=datetime.now(timezone.utc).isoformat(),
     )
