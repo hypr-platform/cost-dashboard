@@ -174,93 +174,107 @@ def _bytes_to_usd(bytes_billed: int, price_per_tib: Decimal) -> Decimal:
     )
 
 
-# Timeout do servidor para queries de metadata BQ (deve ser menor que o timeout do frontend de 60s).
-_BQ_QUERY_TIMEOUT_SECONDS = 50
+# Timeout do servidor por query de agregação. Cada query agrega no BigQuery
+# (GROUP BY) e devolve poucas linhas — deve completar em segundos.
+_BQ_QUERY_TIMEOUT_SECONDS = 45
 
-# Query principal: sem `query` (texto SQL) e sem `referenced_tables` — colunas pesadas.
-# Buscamos só o que precisamos para agregações.
-_JOBS_QUERY_TEMPLATE = """
-SELECT
-  job_id,
-  user_email,
-  statement_type,
-  creation_time,
-  total_bytes_billed,
-  total_slot_ms,
-  referenced_tables
-FROM `{project}`.`region-{region}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
-WHERE job_type = 'QUERY'
+# Filtro comum a todas as queries de agregação.
+_WHERE = """
+  job_type = 'QUERY'
   AND state = 'DONE'
   AND error_result IS NULL
   AND creation_time BETWEEN @from_ts AND @to_ts
   AND total_bytes_billed > 0
 """
 
-# Query secundária: busca texto SQL só dos top N jobs mais caros por bytes.
-_TOP_JOBS_SQL_TEMPLATE = """
-SELECT job_id, query
-FROM `{project}`.`region-{region}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
-WHERE job_id IN UNNEST(@job_ids)
-"""
+
+def _table_ref(project: str, region: str) -> str:
+    return f"`{project}`.`region-{region}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
 
 
-def _run_region_query(
+def _q_by_user(project: str, region: str) -> str:
+    return f"""
+SELECT
+  IFNULL(NULLIF(LOWER(TRIM(user_email)), ''), '(sem usuário)') AS user_email,
+  COUNT(*) AS jobs,
+  SUM(total_bytes_billed) AS bytes_billed,
+  SUM(total_slot_ms) AS slot_ms
+FROM {_table_ref(project, region)}
+WHERE {_WHERE}
+GROUP BY user_email
+""".strip()
+
+
+def _q_by_statement(project: str, region: str) -> str:
+    return f"""
+SELECT
+  IFNULL(statement_type, 'UNKNOWN') AS statement_type,
+  COUNT(*) AS jobs,
+  SUM(total_bytes_billed) AS bytes_billed,
+  SUM(total_slot_ms) AS slot_ms
+FROM {_table_ref(project, region)}
+WHERE {_WHERE}
+GROUP BY statement_type
+""".strip()
+
+
+def _q_by_table(project: str, region: str, top_n: int) -> str:
+    # Rateia o custo do job entre as tabelas referenciadas válidas (mesma lógica
+    # anterior em Python: share = bytes / nº de refs válidas).
+    return f"""
+WITH jobs AS (
+  SELECT
+    total_bytes_billed,
+    ARRAY(
+      SELECT AS STRUCT t.project_id, t.dataset_id, t.table_id
+      FROM UNNEST(referenced_tables) t
+      WHERE t.project_id IS NOT NULL AND t.dataset_id IS NOT NULL AND t.table_id IS NOT NULL
+    ) AS refs
+  FROM {_table_ref(project, region)}
+  WHERE {_WHERE}
+)
+SELECT
+  CONCAT(r.project_id, '.', r.dataset_id, '.', r.table_id) AS table_fqn,
+  COUNT(*) AS jobs,
+  SUM(total_bytes_billed / ARRAY_LENGTH(refs)) AS bytes_billed
+FROM jobs, UNNEST(refs) AS r
+WHERE ARRAY_LENGTH(refs) > 0
+GROUP BY table_fqn
+ORDER BY bytes_billed DESC
+LIMIT {int(top_n)}
+""".strip()
+
+
+def _q_top_queries(project: str, region: str, top_n: int) -> str:
+    return f"""
+SELECT
+  job_id, user_email, statement_type, creation_time,
+  total_bytes_billed, total_slot_ms, query
+FROM {_table_ref(project, region)}
+WHERE {_WHERE}
+ORDER BY total_bytes_billed DESC
+LIMIT {int(top_n)}
+""".strip()
+
+
+def _run_sql(
     client: bigquery.Client,
-    project: str,
-    region: str,
+    sql: str,
     from_ts: datetime,
     to_ts: datetime,
 ) -> list[dict[str, Any]]:
-    sql = _JOBS_QUERY_TEMPLATE.format(project=project, region=region)
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("from_ts", "TIMESTAMP", from_ts),
             bigquery.ScalarQueryParameter("to_ts", "TIMESTAMP", to_ts),
         ]
     )
-    rows: list[dict[str, Any]] = []
-    for row in client.query(sql, job_config=job_config).result(timeout=_BQ_QUERY_TIMEOUT_SECONDS):
-        rows.append(
-            {
-                "job_id": row["job_id"],
-                "user_email": row["user_email"],
-                "statement_type": row["statement_type"],
-                "creation_time": row["creation_time"],
-                "total_bytes_billed": int(row["total_bytes_billed"] or 0),
-                "total_slot_ms": int(row["total_slot_ms"] or 0),
-                "query": "",  # preenchido depois só para top N
-                "referenced_tables": [
-                    {
-                        "project_id": t.get("project_id"),
-                        "dataset_id": t.get("dataset_id"),
-                        "table_id": t.get("table_id"),
-                    }
-                    for t in (row["referenced_tables"] or [])
-                ],
-                "region": region,
-            }
+    return [
+        dict(row)
+        for row in client.query(sql, job_config=job_config).result(
+            timeout=_BQ_QUERY_TIMEOUT_SECONDS
         )
-    return rows
-
-
-def _fetch_top_queries_sql(
-    client: bigquery.Client,
-    project: str,
-    region: str,
-    job_ids: list[str],
-) -> dict[str, str]:
-    if not job_ids:
-        return {}
-    sql = _TOP_JOBS_SQL_TEMPLATE.format(project=project, region=region)
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ArrayQueryParameter("job_ids", "STRING", job_ids),
-        ]
-    )
-    return {
-        row["job_id"]: (row["query"] or "")
-        for row in client.query(sql, job_config=job_config).result(timeout=15)
-    }
+    ]
 
 
 async def build_dashboard(
@@ -286,73 +300,63 @@ async def build_dashboard(
     from_ts = datetime.combine(from_d, dtime.min, tzinfo=timezone.utc)
     to_ts = datetime.combine(to_d, dtime.max, tzinfo=timezone.utc)
 
+    # Agrega no BigQuery (GROUP BY) por região: 4 queries leves por região,
+    # cada uma retornando poucas linhas. Muito mais rápido que puxar todos os
+    # jobs para Python.
     loop = asyncio.get_running_loop()
-    tasks = [
-        loop.run_in_executor(
-            None, _run_region_query, client, project, region, from_ts, to_ts
-        )
-        for region in regions
-    ]
+
+    async def _run(sql: str) -> list[dict[str, Any]]:
+        return await loop.run_in_executor(None, _run_sql, client, sql, from_ts, to_ts)
+
+    tasks: list[Any] = []
+    task_meta: list[tuple[str, str]] = []  # (kind, region)
+    for region in regions:
+        tasks.append(_run(_q_by_user(project, region)));        task_meta.append(("user", region))
+        tasks.append(_run(_q_by_statement(project, region)));   task_meta.append(("stmt", region))
+        tasks.append(_run(_q_by_table(project, region, DEFAULT_TOP_TABLES))); task_meta.append(("table", region))
+        tasks.append(_run(_q_top_queries(project, region, DEFAULT_TOP_QUERIES))); task_meta.append(("top", region))
+
     try:
         results = await asyncio.gather(*tasks)
     except Exception as exc:
         logger.exception("Falha ao consultar INFORMATION_SCHEMA.JOBS_BY_PROJECT.")
         raise RuntimeError(f"BigQuery falhou: {exc}") from exc
 
-    all_rows: list[dict[str, Any]] = []
-    for region_rows in results:
-        all_rows.extend(region_rows)
-
     price_per_tib = _price_per_tib()
     rate = get_exchange_rate(to_d)
 
-    by_user_acc: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"jobs": 0, "bytes": 0, "slot": 0}
-    )
-    by_stmt_acc: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"jobs": 0, "bytes": 0, "slot": 0}
-    )
-    by_table_acc: dict[str, dict[str, int | float]] = defaultdict(
-        lambda: {"jobs": 0, "bytes": 0.0}
-    )
-    query_costs: list[tuple[int, dict[str, Any]]] = []
+    # Merge entre regiões.
+    by_user_acc: dict[str, dict[str, int]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0})
+    by_stmt_acc: dict[str, dict[str, int]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0})
+    by_table_acc: dict[str, dict[str, float]] = defaultdict(lambda: {"jobs": 0, "bytes": 0.0})
+    top_candidates: list[dict[str, Any]] = []
 
-    total_jobs = len(all_rows)
-    total_bytes = 0
-    total_slot = 0
+    for (kind, region), rows in zip(task_meta, results):
+        if kind == "user":
+            for r in rows:
+                acc = by_user_acc[str(r.get("user_email") or "(sem usuário)")]
+                acc["jobs"] += int(r.get("jobs") or 0)
+                acc["bytes"] += int(r.get("bytes_billed") or 0)
+                acc["slot"] += int(r.get("slot_ms") or 0)
+        elif kind == "stmt":
+            for r in rows:
+                acc = by_stmt_acc[str(r.get("statement_type") or "UNKNOWN")]
+                acc["jobs"] += int(r.get("jobs") or 0)
+                acc["bytes"] += int(r.get("bytes_billed") or 0)
+                acc["slot"] += int(r.get("slot_ms") or 0)
+        elif kind == "table":
+            for r in rows:
+                acc = by_table_acc[str(r.get("table_fqn") or "")]
+                acc["jobs"] += int(r.get("jobs") or 0)
+                acc["bytes"] += float(r.get("bytes_billed") or 0)
+        elif kind == "top":
+            for r in rows:
+                r["region"] = region
+                top_candidates.append(r)
 
-    for row in all_rows:
-        bytes_billed = row["total_bytes_billed"]
-        slot_ms = row["total_slot_ms"]
-        total_bytes += bytes_billed
-        total_slot += slot_ms
-
-        user_key = (row["user_email"] or "").strip().lower() or "(sem usuário)"
-        bu = by_user_acc[user_key]
-        bu["jobs"] += 1
-        bu["bytes"] += bytes_billed
-        bu["slot"] += slot_ms
-
-        stmt_key = row["statement_type"] or "UNKNOWN"
-        bs = by_stmt_acc[stmt_key]
-        bs["jobs"] += 1
-        bs["bytes"] += bytes_billed
-        bs["slot"] += slot_ms
-
-        refs = [
-            t
-            for t in row["referenced_tables"]
-            if t["project_id"] and t["dataset_id"] and t["table_id"]
-        ]
-        if refs and bytes_billed > 0:
-            share = bytes_billed / len(refs)
-            for t in refs:
-                fqn = f"{t['project_id']}.{t['dataset_id']}.{t['table_id']}"
-                bt = by_table_acc[fqn]
-                bt["jobs"] += 1
-                bt["bytes"] = float(bt["bytes"]) + share
-
-        query_costs.append((bytes_billed, row))
+    total_jobs = sum(v["jobs"] for v in by_user_acc.values())
+    total_bytes = sum(v["bytes"] for v in by_user_acc.values())
+    total_slot = sum(v["slot"] for v in by_user_acc.values())
 
     def _row_user(acc_key: str, acc: dict[str, int]) -> BqCostUserRow:
         usd = _bytes_to_usd(acc["bytes"], price_per_tib)
@@ -390,7 +394,7 @@ async def build_dashboard(
         reverse=True,
     )
 
-    def _row_table(fqn: str, acc: dict[str, int | float]) -> BqCostTableRow:
+    def _row_table(fqn: str, acc: dict[str, float]) -> BqCostTableRow:
         bytes_int = int(round(float(acc["bytes"])))
         usd = _bytes_to_usd(bytes_int, price_per_tib)
         brl = (usd * rate).quantize(Decimal("0.01"))
@@ -408,43 +412,26 @@ async def build_dashboard(
         reverse=True,
     )[:DEFAULT_TOP_TABLES]
 
-    query_costs.sort(key=lambda x: x[0], reverse=True)
-    top_n = query_costs[:DEFAULT_TOP_QUERIES]
-
-    # Busca o texto SQL só dos top N jobs — query separada e leve
-    top_job_ids_by_region: dict[str, list[str]] = defaultdict(list)
-    for _, row in top_n:
-        top_job_ids_by_region[row["region"]].append(row["job_id"])
-
-    sql_by_job: dict[str, str] = {}
-    for region, job_ids in top_job_ids_by_region.items():
-        try:
-            sql_by_job.update(
-                _fetch_top_queries_sql(client, project, region, job_ids)
-            )
-        except Exception as exc:
-            logger.warning("Falha ao buscar SQL dos top queries região=%s: %s", region, exc)
-
+    # Top queries: merge dos top-N por região, ordena global por bytes, pega top N.
+    top_candidates.sort(key=lambda r: int(r.get("total_bytes_billed") or 0), reverse=True)
     top_queries: list[BqCostQueryRow] = []
-    for bytes_billed, row in top_n:
+    for row in top_candidates[:DEFAULT_TOP_QUERIES]:
+        bytes_billed = int(row.get("total_bytes_billed") or 0)
         usd = _bytes_to_usd(bytes_billed, price_per_tib)
         brl = (usd * rate).quantize(Decimal("0.01"))
-        creation_time = row["creation_time"]
-        if hasattr(creation_time, "isoformat"):
-            creation_iso = creation_time.isoformat()
-        else:
-            creation_iso = str(creation_time)
-        preview = sql_by_job.get(row["job_id"], "").strip()
+        creation_time = row.get("creation_time")
+        creation_iso = creation_time.isoformat() if hasattr(creation_time, "isoformat") else str(creation_time)
+        preview = (row.get("query") or "").strip()
         if len(preview) > QUERY_PREVIEW_CHARS:
             preview = preview[:QUERY_PREVIEW_CHARS] + "…"
         top_queries.append(
             BqCostQueryRow(
-                job_id=row["job_id"],
-                user_email=(row["user_email"] or None),
-                statement_type=row["statement_type"],
+                job_id=row.get("job_id"),
+                user_email=(row.get("user_email") or None),
+                statement_type=row.get("statement_type"),
                 creation_time=creation_iso,
                 bytes_billed=bytes_billed,
-                slot_ms=row["total_slot_ms"],
+                slot_ms=int(row.get("total_slot_ms") or 0),
                 cost_usd=usd.quantize(Decimal("0.01")),
                 cost_brl=brl,
                 query_preview=preview,

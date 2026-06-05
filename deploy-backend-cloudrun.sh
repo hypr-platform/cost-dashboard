@@ -32,7 +32,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --platform managed \
   --allow-unauthenticated \
   --cpu 0.5 \
-  --memory 512Mi \
+  --memory 1Gi \
   --concurrency 1 \
   --timeout 300 \
   --min-instances 1 \

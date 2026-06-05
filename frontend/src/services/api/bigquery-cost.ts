@@ -62,7 +62,7 @@ export function fetchBigQueryCostDashboard(
   url: string,
 ): Promise<BqCostDashboardResponse> {
   return fetchJsonWithTimeout<BqCostDashboardResponse>(url, {
-    timeoutMs: 60000,
+    timeoutMs: 90000,
     errorMessage: "Falha ao carregar custos do BigQuery.",
   });
 }
