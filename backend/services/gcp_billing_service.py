@@ -22,6 +22,8 @@ from decimal import Decimal
 from typing import Any
 
 from google.cloud import bigquery
+from google.oauth2 import service_account
+from googleapiclient.discovery import build as gapi_build
 
 from backend import bigquery_store
 from backend.models.gcp_billing import (
@@ -219,24 +221,79 @@ ORDER BY day
 """.strip()
 
 
-def _query_cloud_run_by_label(table: str) -> str:
-    """Agrega custo do Cloud Run pelo label 'service' adicionado nos services/functions.
-
-    Linhas sem o label 'service' são agrupadas como '(sem label)'.
-    """
+def _query_cloud_run_cost_by_region(table: str) -> str:
+    """Custo de Cloud Run por (dia, região) — base do rateio por CPU."""
     return f"""
 SELECT
-  COALESCE(
-    (SELECT l.value FROM UNNEST(labels) l WHERE l.key = 'service' LIMIT 1),
-    '(sem label)'
-  ) AS service_name,
+  DATE(usage_start_time) AS dia,
+  location.region AS regiao,
   SUM({_NET_COST_EXPR}) AS net_cost
 FROM `{table}`
 WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
   AND service.description = 'Cloud Run'
-GROUP BY service_name
-ORDER BY net_cost DESC
+GROUP BY dia, regiao
 """.strip()
+
+
+def _query_cloud_run_cost_by_label(table: str) -> str:
+    """Custo exato de Cloud Run por (dia, service) via label `service`.
+
+    Só retorna linhas que têm o label — disponível a partir do dia em que os
+    labels foram aplicados no template das revisões.
+    """
+    return f"""
+SELECT
+  DATE(usage_start_time) AS dia,
+  (SELECT l.value FROM UNNEST(labels) l WHERE l.key = 'service' LIMIT 1) AS svc,
+  SUM({_NET_COST_EXPR}) AS net_cost
+FROM `{table}`
+WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
+  AND service.description = 'Cloud Run'
+  AND EXISTS(SELECT 1 FROM UNNEST(labels) l WHERE l.key = 'service')
+GROUP BY dia, svc
+""".strip()
+
+
+_CPU_METRIC = "run.googleapis.com/container/cpu/allocation_time"
+
+
+def _fetch_cpu_by_service(
+    project_id: str,
+    credentials: service_account.Credentials,
+    from_d: date,
+    to_d: date,
+) -> dict[str, dict[str, dict[str, float]]]:
+    """cpu[regiao][service][dia] = vCPU-segundos (Cloud Monitoring).
+
+    Granularidade diária para permitir o merge híbrido (label por dia quando
+    existe, senão rateio por CPU). Janelas alinhadas a meia-noite UTC.
+    """
+    mon = gapi_build("monitoring", "v3", credentials=credentials, cache_discovery=False)
+    start = datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc)
+    end = datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1)
+    resp = mon.projects().timeSeries().list(
+        name=f"projects/{project_id}",
+        filter=f'metric.type="{_CPU_METRIC}"',
+        interval_startTime=start.isoformat(),
+        interval_endTime=end.isoformat(),
+        aggregation_alignmentPeriod="86400s",
+        aggregation_perSeriesAligner="ALIGN_SUM",
+        aggregation_groupByFields=["resource.labels.location", "resource.labels.service_name"],
+        aggregation_crossSeriesReducer="REDUCE_SUM",
+    ).execute()
+    out: dict[str, dict[str, dict[str, float]]] = {}
+    for ts in resp.get("timeSeries", []):
+        labels = ts.get("resource", {}).get("labels", {})
+        region = labels.get("location", "?")
+        svc = labels.get("service_name", "?")
+        for p in ts.get("points", []):
+            day = p["interval"]["startTime"][:10]
+            v = p["value"].get("doubleValue")
+            if v is None:
+                v = float(p["value"].get("int64Value", 0))
+            out.setdefault(region, {}).setdefault(svc, {})
+            out[region][svc][day] = out[region][svc].get(day, 0.0) + v
+    return out
 
 
 def _query_currency(table: str) -> str:
@@ -288,9 +345,26 @@ async def build_dashboard(
     sql_sku = _query_by_sku(table, DEFAULT_TOP_SKUS)
     sql_daily = _query_daily(table)
     sql_currency = _query_currency(table)
-    sql_cloud_run_label = _query_cloud_run_by_label(table)
+    sql_cloud_run_region = _query_cloud_run_cost_by_region(table)
+    sql_cloud_run_label = _query_cloud_run_cost_by_label(table)
 
-    # Todas as queries em paralelo (inclui cloud_run_by_label, antes sequencial).
+    # Credenciais para o Cloud Monitoring (rateio de Cloud Run por service).
+    creds_info = bigquery_store._credentials_info()
+    mon_credentials = service_account.Credentials.from_service_account_info(
+        creds_info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    ) if creds_info else None
+    project_id_for_mon = bigquery_store._project_id()
+
+    def _fetch_cpu() -> dict[str, dict[str, dict[str, float]]]:
+        if mon_credentials is None:
+            return {}
+        try:
+            return _fetch_cpu_by_service(project_id_for_mon, mon_credentials, from_d, to_d)
+        except Exception as exc:  # Monitoring indisponível: degrada para vazio
+            logger.warning("Cloud Run CPU por service indisponível: %s", exc)
+            return {}
+
     loop = asyncio.get_running_loop()
     try:
         (
@@ -299,14 +373,18 @@ async def build_dashboard(
             sku_rows,
             daily_rows,
             currency_rows,
+            cloud_run_region_rows,
             cloud_run_label_rows,
+            cpu_by_service,
         ) = await asyncio.gather(
             loop.run_in_executor(None, _run_query, client, sql_project, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_service, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_sku, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_daily, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_currency, from_ts, to_ts),
+            loop.run_in_executor(None, _run_query, client, sql_cloud_run_region, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_cloud_run_label, from_ts, to_ts),
+            loop.run_in_executor(None, _fetch_cpu),
         )
     except Exception as exc:
         logger.exception("Falha ao consultar GCP billing export.")
@@ -398,15 +476,72 @@ async def build_dashboard(
         for r in daily_rows
     ]
 
-    cloud_run_by_label: list[GcpCloudRunByLabelRow] = [
-        GcpCloudRunByLabelRow(
-            service_name=str(r.get("service_name") or "(sem label)"),
-            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
-            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
-        )
-        for r in cloud_run_label_rows
-        if _to_decimal(r.get("net_cost")) > 0
-    ]
+    # Cloud Run por service — híbrido POR DIA:
+    #   - se há custo exato via label `service` naquele dia → usa o label
+    #   - senão → rateia o custo real da região pelo uso de CPU (Monitoring)
+    # Assim o retroativo (dias sem label) continua via rateio e os dias novos
+    # (com label) ficam exatos, sem dupla contagem.
+
+    # custo real por (dia, região)
+    region_cost_by_day: dict[str, dict[str, Decimal]] = {}
+    for r in cloud_run_region_rows:
+        d = r["dia"].isoformat()
+        region = str(r.get("regiao") or "")
+        region_cost_by_day.setdefault(d, {})[region] = _to_decimal(r.get("net_cost"))
+
+    # custo exato por (dia, service) via label
+    label_cost_by_day: dict[str, dict[str, Decimal]] = {}
+    for r in cloud_run_label_rows:
+        d = r["dia"].isoformat()
+        svc = str(r.get("svc") or "")
+        if svc:
+            label_cost_by_day.setdefault(d, {})[svc] = _to_decimal(r.get("net_cost"))
+
+    svc_native: dict[str, Decimal] = {}
+    all_days = set(region_cost_by_day) | set(label_cost_by_day)
+    for d in all_days:
+        day_labels = label_cost_by_day.get(d, {})
+        labeled_services = {s for s, v in day_labels.items() if v > 0}
+        # 1) services com label nesse dia → valor exato
+        for svc, v in day_labels.items():
+            if v > 0:
+                svc_native[svc] = svc_native.get(svc, Decimal("0")) + v
+        # 2) o resto da região (sem label) → rateio por CPU entre os não-rotulados
+        for region, region_cost in region_cost_by_day.get(d, {}).items():
+            region_cpu_day = {
+                svc: days.get(d, 0.0)
+                for svc, days in cpu_by_service.get(region, {}).items()
+            }
+            # remove o que já foi contado via label
+            unlabeled_cpu = {s: c for s, c in region_cpu_day.items() if s not in labeled_services}
+            labeled_cost_region = sum(
+                (day_labels.get(s, Decimal("0")) for s in region_cpu_day if s in labeled_services),
+                Decimal("0"),
+            )
+            remaining = region_cost - labeled_cost_region
+            total_unlabeled_cpu = sum(unlabeled_cpu.values())
+            if remaining <= 0:
+                continue
+            if total_unlabeled_cpu <= 0:
+                svc_native["(sem detalhe)"] = svc_native.get("(sem detalhe)", Decimal("0")) + remaining
+                continue
+            for svc, svc_cpu in unlabeled_cpu.items():
+                frac = Decimal(str(svc_cpu / total_unlabeled_cpu))
+                svc_native[svc] = svc_native.get(svc, Decimal("0")) + remaining * frac
+
+    cloud_run_by_label: list[GcpCloudRunByLabelRow] = sorted(
+        (
+            GcpCloudRunByLabelRow(
+                service_name=svc,
+                cost_usd=_q2(to_usd(native)),
+                cost_brl=_q2(to_brl(native)),
+            )
+            for svc, native in svc_native.items()
+            if native > 0
+        ),
+        key=lambda r: r.cost_brl,
+        reverse=True,
+    )
 
     total_gross_native = total_net_native - total_credits_native
 

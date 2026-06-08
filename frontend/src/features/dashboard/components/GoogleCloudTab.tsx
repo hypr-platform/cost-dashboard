@@ -371,7 +371,7 @@ export default function GoogleCloudTab() {
           data ? (
             data.cloud_run_by_label.length
               ? `${data.cloud_run_by_label.length} services`
-              : "aguardando dados (labels adicionados hoje)"
+              : "sem dados de Cloud Run no período"
           ) : (
             <span className="claudeTableHintSkeleton" aria-hidden />
           )
@@ -380,7 +380,7 @@ export default function GoogleCloudTab() {
         error={error}
         rowKey={(r) => r.service_name}
         columns={cloudRunLabelColumns}
-        emptyMessage="Nenhum custo de Cloud Run com label 'service' no período. Os labels foram adicionados hoje — dados aparecerão a partir de amanhã."
+        emptyMessage="Sem dados de Cloud Run no período."
       />
 
       <CostBreakdownTable

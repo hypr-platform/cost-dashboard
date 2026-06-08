@@ -1,5 +1,6 @@
 import Image from "next/image";
 import type { ReactNode } from "react";
+import { SidebarToolsSection } from "@/features/dashboard/components/SidebarToolsSection";
 import { Skeleton } from "./Skeleton";
 
 interface AppShellSkeletonProps {
@@ -39,7 +40,7 @@ export function AppShellSkeleton({
 interface NavItemSpec {
   label: string;
   letter?: string;
-  icon?: "stack" | "journey" | "warn" | "danger" | "bigquery";
+  icon?: "stack" | "journey" | "warn" | "danger";
 }
 
 const CAMPAIGN_ITEMS: readonly NavItemSpec[] = [
@@ -55,10 +56,6 @@ const CAMPAIGN_ITEMS: readonly NavItemSpec[] = [
 const ATTENTION_ITEMS: readonly NavItemSpec[] = [
   { label: "Lines sem token", icon: "warn" },
   { label: "Gasto fora do mês", icon: "danger" },
-];
-
-const TOOL_ITEMS: readonly NavItemSpec[] = [
-  { label: "BigQuery", icon: "bigquery" },
 ];
 
 /**
@@ -102,17 +99,7 @@ function SidebarPreview() {
             ))}
           </div>
         </section>
-        <section className="sidebarGroup" aria-label="Ferramentas">
-          <p className="sidebarGroupTitle">Ferramentas</p>
-          <div className="sidebarGroupItems">
-            {TOOL_ITEMS.map((item) => (
-              <span key={item.label} className="navButton" aria-disabled="true">
-                <NavItemIcon spec={item} />
-                <span>{item.label}</span>
-              </span>
-            ))}
-          </div>
-        </section>
+        <SidebarToolsSection />
       </nav>
     </aside>
   );
@@ -167,25 +154,6 @@ function NavItemIcon({ spec }: { spec: NavItemSpec }) {
         <path className="icoMark" d="M7 5.6v3" />
         <circle className="icoMarkDot" cx="7" cy="10.6" r="0.7" />
       </svg>
-    );
-  }
-  if (spec.icon === "bigquery") {
-    return (
-      <span className="brandIcon" aria-hidden="true">
-        <svg
-          className="brandIconSvg"
-          viewBox="0 0 16 16"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.3"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <ellipse cx="8" cy="4" rx="5.5" ry="2" />
-          <path d="M2.5 4v4c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4" />
-          <path d="M2.5 8v4c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V8" />
-        </svg>
-      </span>
     );
   }
   if (spec.icon === "danger") {

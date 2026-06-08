@@ -47,12 +47,12 @@ import {
   TOOL_TAB_BY_KEY,
   TOOL_TAB_KEYS,
   VISIBLE_TOOL_SLUG_TO_KEY,
-  VISIBLE_TOOL_TABS,
   type ToolTabKey,
 } from "@/features/dashboard/config/tool-tabs";
 import { PageSkeleton } from "@/features/dashboard/skeletons";
 import { SessionLoading } from "@/features/auth/components/SessionLoading";
 import { HeroSummary } from "@/features/dashboard/components/HeroSummary";
+import { SidebarToolsSection } from "@/features/dashboard/components/SidebarToolsSection";
 import { PlatformResendCard } from "@/features/dashboard/components/PlatformResendCard";
 import {
   RESEND_CHART_COLORS,
@@ -8759,24 +8759,14 @@ function HomeContent() {
               </button>
             </div>
           </section>
-          {VISIBLE_TOOL_TABS.length > 0 ? (
-            <section className="sidebarGroup" aria-label="Ferramentas">
-              <p className="sidebarGroupTitle">Ferramentas</p>
-              <div className="sidebarGroupItems">
-                {VISIBLE_TOOL_TABS.map((tab) => (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    className={`navButton ${resolvedActivePage === tab.key ? "navButtonActive" : ""}`}
-                    onClick={() => router.push(`/${tab.slug}`)}
-                  >
-                    <tab.Icon />
-                    <span>{tab.label}</span>
-                  </button>
-                ))}
-              </div>
-            </section>
-          ) : null}
+          <SidebarToolsSection
+            activeKey={
+              TOOL_TAB_KEYS.has(resolvedActivePage as ToolTabKey)
+                ? (resolvedActivePage as ToolTabKey)
+                : undefined
+            }
+          />
+
         </nav>
         <div className="sidebarSyncFooter" data-tooltip="Sincronizado de hora em hora">
           <span className="sidebarSyncDot sidebarSyncDotok" aria-hidden="true" />
