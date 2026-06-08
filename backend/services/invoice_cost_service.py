@@ -147,6 +147,12 @@ def _q4(v: Decimal) -> Decimal:
     return v.quantize(Decimal("0.0001"))
 
 
+def _q8(v: Decimal) -> Decimal:
+    # custo por nota pode ser fração de centavo — preserva precisão para o
+    # frontend formatar com casas adaptativas (evita arredondar para zero).
+    return v.quantize(Decimal("0.00000001"))
+
+
 def _query_invoices(table: str) -> str:
     return f"""
 SELECT DATE(processed_at) AS dia, COUNT(*) AS total
@@ -358,7 +364,7 @@ async def build_dashboard(
                 captcha_brl=_q2(captcha),
                 invoice_reader_brl=_q2(reader),
                 total_brl=_q2(total),
-                cost_per_invoice_brl=_q4(per_invoice),
+                cost_per_invoice_brl=_q8(per_invoice),
                 source=source,
             )
         )
@@ -373,7 +379,7 @@ async def build_dashboard(
         total_captcha_brl=_q2(total_captcha),
         total_invoice_reader_brl=_q2(total_reader),
         total_cost_brl=_q2(total_cost),
-        avg_cost_per_invoice_brl=_q4(avg_per_invoice),
+        avg_cost_per_invoice_brl=_q8(avg_per_invoice),
         daily=daily,
         cached=False,
         fetched_at=datetime.now(timezone.utc).isoformat(),

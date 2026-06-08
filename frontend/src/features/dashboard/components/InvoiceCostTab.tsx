@@ -24,11 +24,18 @@ function buildUrl(apiBase: string, from: string, to: string): string {
   return `${base}/api/invoice-cost/dashboard?${params.toString()}`;
 }
 
+// Custo por nota: precisão adaptativa. Valores muito pequenos ganham mais
+// casas decimais em vez de arredondar para R$ 0,0000.
 function fmtBrl4(v: string | number): string {
   const n = Number(v);
-  return `R$ ${(Number.isFinite(n) ? n : 0).toLocaleString("pt-BR", {
-    minimumFractionDigits: 4,
-    maximumFractionDigits: 4,
+  if (!Number.isFinite(n) || n === 0) return "R$ 0,00";
+  // nº de casas para mostrar ao menos 2 dígitos significativos do valor
+  let decimals = 4;
+  if (n < 0.0001) decimals = 8;
+  else if (n < 0.01) decimals = 6;
+  return `R$ ${n.toLocaleString("pt-BR", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
   })}`;
 }
 
