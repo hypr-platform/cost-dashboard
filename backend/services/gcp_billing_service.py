@@ -20,6 +20,7 @@ import time
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -42,6 +43,17 @@ DEFAULT_CACHE_TTL = 1800
 DEFAULT_MAX_RANGE_DAYS = 92
 DEFAULT_TOP_SKUS = 50
 TABLE_FQN_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+
+# Fuso de billing — alinhado ao GCP Cloud Billing Reports (horário do Pacífico).
+BILLING_TZ = os.getenv("BILLING_TZ") or "America/Los_Angeles"
+_TZ = ZoneInfo(BILLING_TZ)
+
+
+def _tz_bounds(from_d: date, to_d: date) -> tuple[datetime, datetime]:
+    """Instantes UTC da meia-noite do fuso de billing (início de from_d, fim de to_d)."""
+    start = datetime(from_d.year, from_d.month, from_d.day, tzinfo=_TZ).astimezone(timezone.utc)
+    end = (datetime(to_d.year, to_d.month, to_d.day, tzinfo=_TZ) + timedelta(days=1)).astimezone(timezone.utc)
+    return start, end
 
 
 def _native_currency_override() -> str | None:
@@ -212,7 +224,7 @@ LIMIT {int(top_n)}
 def _query_daily(table: str) -> str:
     return f"""
 SELECT
-  DATE(usage_start_time) AS day,
+  DATE(usage_start_time, '{BILLING_TZ}') AS day,
   SUM({_NET_COST_EXPR}) AS net_cost
 FROM `{table}`
 WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
@@ -225,7 +237,7 @@ def _query_cloud_run_cost_by_region(table: str) -> str:
     """Custo de Cloud Run por (dia, região) — base do rateio por CPU."""
     return f"""
 SELECT
-  DATE(usage_start_time) AS dia,
+  DATE(usage_start_time, '{BILLING_TZ}') AS dia,
   location.region AS regiao,
   SUM({_NET_COST_EXPR}) AS net_cost
 FROM `{table}`
@@ -243,7 +255,7 @@ def _query_cloud_run_cost_by_label(table: str) -> str:
     """
     return f"""
 SELECT
-  DATE(usage_start_time) AS dia,
+  DATE(usage_start_time, '{BILLING_TZ}') AS dia,
   (SELECT l.value FROM UNNEST(labels) l WHERE l.key = 'service' LIMIT 1) AS svc,
   SUM({_NET_COST_EXPR}) AS net_cost
 FROM `{table}`
@@ -266,11 +278,10 @@ def _fetch_cpu_by_service(
     """cpu[regiao][service][dia] = vCPU-segundos (Cloud Monitoring).
 
     Granularidade diária para permitir o merge híbrido (label por dia quando
-    existe, senão rateio por CPU). Janelas alinhadas a meia-noite UTC.
+    existe, senão rateio por CPU). Janelas alinhadas ao fuso de billing.
     """
     mon = gapi_build("monitoring", "v3", credentials=credentials, cache_discovery=False)
-    start = datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc)
-    end = datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1)
+    start, end = _tz_bounds(from_d, to_d)
     resp = mon.projects().timeSeries().list(
         name=f"projects/{project_id}",
         filter=f'metric.type="{_CPU_METRIC}"',
@@ -337,8 +348,9 @@ async def build_dashboard(
             return cached.model_copy(update={"cached": True})
 
     client = bigquery_store._get_client()
-    from_ts = datetime.combine(from_d, dtime.min, tzinfo=timezone.utc)
-    to_ts = datetime.combine(to_d + timedelta(days=1), dtime.min, tzinfo=timezone.utc)
+    # Janela alinhada ao fuso de billing (meia-noite PST), para os totais
+    # baterem com o GCP Console.
+    from_ts, to_ts = _tz_bounds(from_d, to_d)
 
     sql_project = _query_by_project(table)
     sql_service = _query_by_service(table)

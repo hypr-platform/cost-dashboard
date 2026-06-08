@@ -26,6 +26,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from google.cloud import bigquery
 from google.oauth2 import service_account
@@ -38,6 +39,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_TTL = 1800
 DEFAULT_MAX_RANGE_DAYS = 92
+
+# Fuso de billing — alinhado ao GCP Cloud Billing Reports (horário do Pacífico),
+# para que os totais e o agrupamento diário batam com o GCP Console.
+BILLING_TZ = os.getenv("BILLING_TZ") or "America/Los_Angeles"
+_TZ = ZoneInfo(BILLING_TZ)
+
+
+def _pst_bounds(from_d: date, to_d: date) -> tuple[datetime, datetime]:
+    """Instantes UTC correspondentes à meia-noite do fuso de billing
+    (início de from_d e fim de to_d). Lida com DST automaticamente."""
+    start = datetime(from_d.year, from_d.month, from_d.day, tzinfo=_TZ).astimezone(timezone.utc)
+    end = (datetime(to_d.year, to_d.month, to_d.day, tzinfo=_TZ) + timedelta(days=1)).astimezone(timezone.utc)
+    return start, end
 DEFAULT_INVOICES_TABLE = "site-hypr.hypr_invoice_data.invoices-processed"
 
 # Services que processam notas: (service_name no Cloud Run, região, chave de saída).
@@ -155,9 +169,9 @@ def _q8(v: Decimal) -> Decimal:
 
 def _query_invoices(table: str) -> str:
     return f"""
-SELECT DATE(processed_at) AS dia, COUNT(*) AS total
+SELECT DATE(processed_at, '{BILLING_TZ}') AS dia, COUNT(*) AS total
 FROM `{table}`
-WHERE DATE(processed_at) BETWEEN @from_d AND @to_d
+WHERE DATE(processed_at, '{BILLING_TZ}') BETWEEN @from_d AND @to_d
 GROUP BY dia
 """.strip()
 
@@ -168,12 +182,12 @@ _NET = "cost + COALESCE((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0)"
 def _query_cost_by_region(billing_table: str) -> str:
     return f"""
 SELECT
-  DATE(usage_start_time) AS dia,
+  DATE(usage_start_time, '{BILLING_TZ}') AS dia,
   location.region AS regiao,
   SUM({_NET}) AS net
 FROM `{billing_table}`
 WHERE service.description = 'Cloud Run'
-  AND DATE(usage_start_time) BETWEEN @from_d AND @to_d
+  AND DATE(usage_start_time, '{BILLING_TZ}') BETWEEN @from_d AND @to_d
 GROUP BY dia, regiao
 """.strip()
 
@@ -184,12 +198,12 @@ def _query_cost_by_label(billing_table: str) -> str:
     names = ", ".join(f"'{name}'" for name, _, _ in INVOICE_SERVICES)
     return f"""
 SELECT
-  DATE(usage_start_time) AS dia,
+  DATE(usage_start_time, '{BILLING_TZ}') AS dia,
   (SELECT l.value FROM UNNEST(labels) l WHERE l.key = 'service' LIMIT 1) AS svc,
   SUM({_NET}) AS net
 FROM `{billing_table}`
 WHERE service.description = 'Cloud Run'
-  AND DATE(usage_start_time) BETWEEN @from_d AND @to_d
+  AND DATE(usage_start_time, '{BILLING_TZ}') BETWEEN @from_d AND @to_d
   AND (SELECT l.value FROM UNNEST(labels) l WHERE l.key = 'service' LIMIT 1) IN ({names})
 GROUP BY dia, svc
 """.strip()
@@ -214,11 +228,11 @@ def _fetch_cpu_allocation(
 ) -> dict[str, dict[str, dict[str, float]]]:
     """Retorna cpu[regiao][service][dia] = vCPU-segundos, via Cloud Monitoring.
 
-    Janelas diárias alinhadas a meia-noite UTC (batem com DATE() do billing).
+    Janelas diárias alinhadas à meia-noite do fuso de billing (batem com
+    DATE(..., BILLING_TZ) do billing export).
     """
     mon = gapi_build("monitoring", "v3", credentials=credentials, cache_discovery=False)
-    start = datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc)
-    end = datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1)
+    start, end = _pst_bounds(from_d, to_d)
 
     region_filter = " OR ".join(f'resource.labels.location="{r}"' for r in regions)
     resp = mon.projects().timeSeries().list(
