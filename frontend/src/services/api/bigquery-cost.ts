@@ -56,6 +56,15 @@ export type BqCostDashboardResponse = {
   top_queries: BqCostQueryRow[];
   cached: boolean;
   fetched_at: string;
+  currency: string;
+  calibrated: boolean;
+  analysis_cost_usd: string;
+  analysis_cost_brl: string;
+  storage_cost_usd: string;
+  storage_cost_brl: string;
+  other_cost_usd: string;
+  other_cost_brl: string;
+  price_by_region: Record<string, string>;
 };
 
 export function fetchBigQueryCostDashboard(

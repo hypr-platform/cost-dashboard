@@ -95,10 +95,13 @@ class BqCostDashboardResponse(BaseModel):
     to_date: date
     regions: list[str]
     exchange_rate: Decimal
+    # Tarifa efetiva média (USD/TiB) — blended real, não mais o flat fixo.
     price_usd_per_tib: Decimal
     total_jobs: int
     total_bytes_billed: int
     total_slot_ms: int
+    # Total da aba = custo total do serviço BigQuery no billing (análise + storage
+    # + outros), para bater com a linha "BigQuery" da aba Google Cloud.
     total_cost_usd: Decimal
     total_cost_brl: Decimal
     by_user: list[BqCostUserRow]
@@ -107,3 +110,16 @@ class BqCostDashboardResponse(BaseModel):
     top_queries: list[BqCostQueryRow]
     cached: bool = False
     fetched_at: str
+    # Moeda nativa do billing (BRL/USD) usada na calibração.
+    currency: str = "USD"
+    # Se o custo veio calibrado pelo billing export (True) ou do flat on-demand (False).
+    calibrated: bool = False
+    # Quebra do custo total do serviço BigQuery.
+    analysis_cost_usd: Decimal = Decimal("0")
+    analysis_cost_brl: Decimal = Decimal("0")
+    storage_cost_usd: Decimal = Decimal("0")
+    storage_cost_brl: Decimal = Decimal("0")
+    other_cost_usd: Decimal = Decimal("0")
+    other_cost_brl: Decimal = Decimal("0")
+    # Tarifa efetiva por região (USD/TiB), derivada do billing.
+    price_by_region: dict[str, Decimal] = {}

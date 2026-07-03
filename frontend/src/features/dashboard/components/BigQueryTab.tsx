@@ -187,8 +187,11 @@ export default function BigQueryTab() {
         <div className="claudeHeaderTitle">
           <h1 className="claudeHeaderHeading">Custos BigQuery</h1>
           <p className="claudeHeaderSubtitle">
-            Queries cobradas entre {dayLabel(from)} e {dayLabel(to)} ·
-            estimativa on-demand a {data?.price_usd_per_tib ?? "—"} USD/TiB.
+            Custo do serviço BigQuery entre {dayLabel(from)} e {dayLabel(to)}
+            {data?.calibrated
+              ? ` · calibrado pelo billing · tarifa média ${data.price_usd_per_tib} USD/TiB`
+              : ` · estimativa on-demand a ${data?.price_usd_per_tib ?? "—"} USD/TiB`}
+            .
           </p>
           <p className="claudeHeaderMeta">
             {data
@@ -235,6 +238,17 @@ export default function BigQueryTab() {
           label="Custo total"
           value={data ? BRL.format(totalBrl) : null}
           hint={data ? formatUsd(totalUsd) : null}
+          tooltip={
+            data?.calibrated
+              ? `Custo total do serviço BigQuery no billing — o mesmo número da aba Google Cloud. Composição: análise (query) ${BRL.format(Number(data.analysis_cost_brl))} + storage ${BRL.format(Number(data.storage_cost_brl))} + outros ${BRL.format(Number(data.other_cost_brl))}. A análise é precificada pela tarifa real de cada região (ex.: São Paulo ≈ 2× a US).`
+              : "Estimativa on-demand a partir dos bytes faturados (billing indisponível para calibrar)."
+          }
+        />
+        <CostKpi
+          label="Análise (query)"
+          value={data ? BRL.format(Number(data.analysis_cost_brl)) : null}
+          hint={data ? formatUsd(Number(data.analysis_cost_usd)) : null}
+          tooltip="Custo só de execução de queries (SKUs 'Analysis' do billing), rateado por usuário/query nas tabelas abaixo. Storage e streaming entram no Custo total, mas não são atribuíveis por query."
         />
         <CostKpi
           label="Bytes faturados"

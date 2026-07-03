@@ -25,6 +25,7 @@ from google.cloud import bigquery
 
 from backend import bigquery_store
 from backend.services import gcp_quota
+from backend.services import gcp_billing_service as gbs
 from backend.models.bigquery_cost import (
     BqCostDashboardResponse,
     BqCostLimitStatus,
@@ -193,6 +194,55 @@ def _bytes_to_usd(bytes_billed: int, price_per_tib: Decimal) -> Decimal:
     )
 
 
+def _categorize_bq_sku(sku: str) -> str:
+    """Classifica um SKU do serviço BigQuery em análise / storage / outros."""
+    s = (sku or "").lower()
+    if s.startswith("analysis") or "on-demand" in s:
+        return "analysis"
+    if "storage" in s:
+        return "storage"
+    return "other"  # streaming, data transfer, etc.
+
+
+# Regiões multi-região do BigQuery cujo custo aparece no billing com
+# location.region = NULL. Usadas para casar a tarifa efetiva com o JOBS.
+_MULTI_REGIONS = {"us", "eu"}
+
+
+def _billing_bigquery_by_region_and_category(
+    client: bigquery.Client, from_ts: datetime, to_ts: datetime
+) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
+    """Do billing export, custo líquido (nativo) do serviço 'BigQuery' no período.
+
+    Retorna (analysis_by_region, by_category), onde analysis_by_region mapeia a
+    região (multi-região NULL → 'us') para o custo de SKUs 'Analysis%', e
+    by_category agrega o serviço todo em analysis/storage/other.
+    """
+    table = gbs._table_fqn()
+    if table is None:
+        return {}, {}
+    net = gbs._NET_COST_EXPR
+    sql = f"""
+SELECT location.region AS region, sku.description AS sku, SUM({net}) AS net
+FROM `{table}`
+WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
+  AND service.description = 'BigQuery'
+GROUP BY region, sku
+""".strip()
+    rows = gbs._run_query(client, sql, from_ts, to_ts)
+    analysis_by_region: dict[str, Decimal] = {}
+    by_category: dict[str, Decimal] = {}
+    for r in rows:
+        net_native = gbs._to_decimal(r.get("net"))
+        cat = _categorize_bq_sku(r.get("sku") or "")
+        by_category[cat] = by_category.get(cat, Decimal("0")) + net_native
+        if cat == "analysis":
+            reg = r.get("region")
+            key = "us" if not reg else str(reg)
+            analysis_by_region[key] = analysis_by_region.get(key, Decimal("0")) + net_native
+    return analysis_by_region, by_category
+
+
 # Timeout do servidor por query de agregação. Cada query agrega no BigQuery
 # (GROUP BY) e devolve poucas linhas — deve completar em segundos.
 _BQ_QUERY_TIMEOUT_SECONDS = 45
@@ -342,51 +392,120 @@ async def build_dashboard(
         raise RuntimeError(f"BigQuery falhou: {exc}") from exc
 
     price_per_tib = _price_per_tib()
-    rate = get_exchange_rate(to_d)
 
-    # Merge entre regiões.
-    by_user_acc: dict[str, dict[str, int]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0})
-    by_stmt_acc: dict[str, dict[str, int]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0})
-    by_table_acc: dict[str, dict[str, float]] = defaultdict(lambda: {"jobs": 0, "bytes": 0.0})
+    # Agrupa os resultados do JOBS por região (para precificar cada região com
+    # a sua tarifa efetiva).
+    region_data: dict[str, dict[str, list[dict[str, Any]]]] = {
+        region: {"user": [], "stmt": [], "table": [], "top": []} for region in regions
+    }
+    for (kind, region), rows in zip(task_meta, results):
+        region_data[region][kind] = rows
+
+    # --- Calibração pelo billing export (mesma fonte da aba Google Cloud) ---
+    # Tarifa efetiva por região = custo 'Analysis' do billing / bytes do JOBS.
+    # Assim o total de análise bate exatamente com a fatura, e o rateio por
+    # usuário/query herda a tarifa real (ex.: São Paulo custa ~2x a US).
+    calibrated = gbs._table_fqn() is not None
+    analysis_by_region: dict[str, Decimal] = {}
+    cat_native: dict[str, Decimal] = {}
+    if calibrated:
+        bfrom_ts, bto_ts = gbs._tz_bounds(from_d, to_d)
+        try:
+            currency_rows, billing = await asyncio.gather(
+                loop.run_in_executor(
+                    None, gbs._run_query, client,
+                    gbs._query_currency(gbs._table_fqn()), bfrom_ts, bto_ts,
+                ),
+                loop.run_in_executor(
+                    None, _billing_bigquery_by_region_and_category, client, bfrom_ts, bto_ts,
+                ),
+            )
+            analysis_by_region, cat_native = billing
+            native_currency, usd_rate, to_brl, to_usd = gbs._resolve_currency_rates(
+                currency_rows, to_d
+            )
+        except Exception as exc:  # calibração falhou → cai no flat on-demand
+            logger.warning("Calibração pelo billing indisponível, usando flat on-demand: %s", exc)
+            calibrated = False
+
+    if not calibrated:
+        native_currency = "USD"
+        usd_rate = get_exchange_rate(to_d)
+
+        def to_brl(n: Decimal) -> Decimal:
+            return (n * usd_rate).quantize(Decimal("0.01"))
+
+        def to_usd(n: Decimal) -> Decimal:
+            return n
+
+    # Tarifa (moeda nativa) por TiB, por região.
+    flat_native = price_per_tib if native_currency == "USD" else price_per_tib * usd_rate
+    rate_native_by_region: dict[str, Decimal] = {}
+    price_by_region: dict[str, Decimal] = {}
+    for region in regions:
+        region_bytes = sum(int(r.get("bytes_billed") or 0) for r in region_data[region]["user"])
+        billing_native = analysis_by_region.get(region)
+        if calibrated and billing_native is not None and region_bytes > 0:
+            rate_native = billing_native / (Decimal(region_bytes) / BYTES_PER_TIB)
+        else:
+            rate_native = flat_native
+        rate_native_by_region[region] = rate_native
+        price_by_region[region] = to_usd(rate_native).quantize(Decimal("0.0001"))
+
+    def _cost_native(bytes_val: float, region: str) -> Decimal:
+        return (Decimal(str(bytes_val)) / BYTES_PER_TIB) * rate_native_by_region[region]
+
+    # Merge entre regiões, já com custo calibrado por região.
+    by_user_acc: dict[str, dict[str, Any]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0, "cost": Decimal("0")})
+    by_stmt_acc: dict[str, dict[str, Any]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0, "cost": Decimal("0")})
+    by_table_acc: dict[str, dict[str, Any]] = defaultdict(lambda: {"jobs": 0, "bytes": 0.0, "cost": Decimal("0")})
     top_candidates: list[dict[str, Any]] = []
 
-    for (kind, region), rows in zip(task_meta, results):
-        if kind == "user":
-            for r in rows:
-                acc = by_user_acc[str(r.get("user_email") or "(sem usuário)")]
-                acc["jobs"] += int(r.get("jobs") or 0)
-                acc["bytes"] += int(r.get("bytes_billed") or 0)
-                acc["slot"] += int(r.get("slot_ms") or 0)
-        elif kind == "stmt":
-            for r in rows:
-                acc = by_stmt_acc[str(r.get("statement_type") or "UNKNOWN")]
-                acc["jobs"] += int(r.get("jobs") or 0)
-                acc["bytes"] += int(r.get("bytes_billed") or 0)
-                acc["slot"] += int(r.get("slot_ms") or 0)
-        elif kind == "table":
-            for r in rows:
-                acc = by_table_acc[str(r.get("table_fqn") or "")]
-                acc["jobs"] += int(r.get("jobs") or 0)
-                acc["bytes"] += float(r.get("bytes_billed") or 0)
-        elif kind == "top":
-            for r in rows:
-                r["region"] = region
-                top_candidates.append(r)
+    for region in regions:
+        rd = region_data[region]
+        for r in rd["user"]:
+            acc = by_user_acc[str(r.get("user_email") or "(sem usuário)")]
+            b = int(r.get("bytes_billed") or 0)
+            acc["jobs"] += int(r.get("jobs") or 0)
+            acc["bytes"] += b
+            acc["slot"] += int(r.get("slot_ms") or 0)
+            acc["cost"] += _cost_native(b, region)
+        for r in rd["stmt"]:
+            acc = by_stmt_acc[str(r.get("statement_type") or "UNKNOWN")]
+            b = int(r.get("bytes_billed") or 0)
+            acc["jobs"] += int(r.get("jobs") or 0)
+            acc["bytes"] += b
+            acc["slot"] += int(r.get("slot_ms") or 0)
+            acc["cost"] += _cost_native(b, region)
+        for r in rd["table"]:
+            acc = by_table_acc[str(r.get("table_fqn") or "")]
+            b = float(r.get("bytes_billed") or 0)
+            acc["jobs"] += int(r.get("jobs") or 0)
+            acc["bytes"] += b
+            acc["cost"] += _cost_native(b, region)
+        for r in rd["top"]:
+            r["region"] = region
+            top_candidates.append(r)
 
     total_jobs = sum(v["jobs"] for v in by_user_acc.values())
     total_bytes = sum(v["bytes"] for v in by_user_acc.values())
     total_slot = sum(v["slot"] for v in by_user_acc.values())
+    analysis_attributed = sum((v["cost"] for v in by_user_acc.values()), Decimal("0"))
 
-    def _row_user(acc_key: str, acc: dict[str, int]) -> BqCostUserRow:
-        usd = _bytes_to_usd(acc["bytes"], price_per_tib)
-        brl = (usd * rate).quantize(Decimal("0.01"))
+    # Custo de análise/storage/outros do serviço BigQuery (nativo).
+    analysis_native = cat_native.get("analysis", analysis_attributed) if calibrated else analysis_attributed
+    storage_native = cat_native.get("storage", Decimal("0"))
+    other_native = cat_native.get("other", Decimal("0"))
+    total_native = analysis_native + storage_native + other_native
+
+    def _row_user(acc_key: str, acc: dict[str, Any]) -> BqCostUserRow:
         return BqCostUserRow(
             user_email=acc_key,
             jobs=acc["jobs"],
             bytes_billed=acc["bytes"],
             slot_ms=acc["slot"],
-            cost_usd=usd.quantize(Decimal("0.01")),
-            cost_brl=brl,
+            cost_usd=to_usd(acc["cost"]).quantize(Decimal("0.01")),
+            cost_brl=to_brl(acc["cost"]).quantize(Decimal("0.01")),
         )
 
     by_user = sorted(
@@ -395,16 +514,14 @@ async def build_dashboard(
         reverse=True,
     )
 
-    def _row_stmt(acc_key: str, acc: dict[str, int]) -> BqCostStatementRow:
-        usd = _bytes_to_usd(acc["bytes"], price_per_tib)
-        brl = (usd * rate).quantize(Decimal("0.01"))
+    def _row_stmt(acc_key: str, acc: dict[str, Any]) -> BqCostStatementRow:
         return BqCostStatementRow(
             statement_type=acc_key,
             jobs=acc["jobs"],
             bytes_billed=acc["bytes"],
             slot_ms=acc["slot"],
-            cost_usd=usd.quantize(Decimal("0.01")),
-            cost_brl=brl,
+            cost_usd=to_usd(acc["cost"]).quantize(Decimal("0.01")),
+            cost_brl=to_brl(acc["cost"]).quantize(Decimal("0.01")),
         )
 
     by_statement_type = sorted(
@@ -413,16 +530,13 @@ async def build_dashboard(
         reverse=True,
     )
 
-    def _row_table(fqn: str, acc: dict[str, float]) -> BqCostTableRow:
-        bytes_int = int(round(float(acc["bytes"])))
-        usd = _bytes_to_usd(bytes_int, price_per_tib)
-        brl = (usd * rate).quantize(Decimal("0.01"))
+    def _row_table(fqn: str, acc: dict[str, Any]) -> BqCostTableRow:
         return BqCostTableRow(
             table_fqn=fqn,
             jobs=int(acc["jobs"]),
-            bytes_billed=bytes_int,
-            cost_usd=usd.quantize(Decimal("0.01")),
-            cost_brl=brl,
+            bytes_billed=int(round(float(acc["bytes"]))),
+            cost_usd=to_usd(acc["cost"]).quantize(Decimal("0.01")),
+            cost_brl=to_brl(acc["cost"]).quantize(Decimal("0.01")),
         )
 
     by_table = sorted(
@@ -436,8 +550,7 @@ async def build_dashboard(
     top_queries: list[BqCostQueryRow] = []
     for row in top_candidates[:DEFAULT_TOP_QUERIES]:
         bytes_billed = int(row.get("total_bytes_billed") or 0)
-        usd = _bytes_to_usd(bytes_billed, price_per_tib)
-        brl = (usd * rate).quantize(Decimal("0.01"))
+        native = _cost_native(bytes_billed, row["region"])
         creation_time = row.get("creation_time")
         creation_iso = creation_time.isoformat() if hasattr(creation_time, "isoformat") else str(creation_time)
         preview = (row.get("query") or "").strip()
@@ -451,33 +564,47 @@ async def build_dashboard(
                 creation_time=creation_iso,
                 bytes_billed=bytes_billed,
                 slot_ms=int(row.get("total_slot_ms") or 0),
-                cost_usd=usd.quantize(Decimal("0.01")),
-                cost_brl=brl,
+                cost_usd=to_usd(native).quantize(Decimal("0.01")),
+                cost_brl=to_brl(native).quantize(Decimal("0.01")),
                 query_preview=preview,
                 region=row["region"],
             )
         )
 
-    total_usd = _bytes_to_usd(total_bytes, price_per_tib)
-    total_brl = (total_usd * rate).quantize(Decimal("0.01"))
+    # Tarifa efetiva média (USD/TiB) para exibição.
+    total_tib = Decimal(total_bytes) / BYTES_PER_TIB
+    analysis_usd_attr = to_usd(analysis_attributed)
+    blended_usd_per_tib = (
+        (analysis_usd_attr / total_tib).quantize(Decimal("0.0001"))
+        if total_tib > 0 else price_per_tib
+    )
 
     response = BqCostDashboardResponse(
         from_date=from_d,
         to_date=to_d,
         regions=list(regions),
-        exchange_rate=rate.quantize(Decimal("0.0001")),
-        price_usd_per_tib=price_per_tib,
+        exchange_rate=usd_rate.quantize(Decimal("0.0001")),
+        price_usd_per_tib=blended_usd_per_tib,
         total_jobs=total_jobs,
         total_bytes_billed=total_bytes,
         total_slot_ms=total_slot,
-        total_cost_usd=total_usd.quantize(Decimal("0.01")),
-        total_cost_brl=total_brl,
+        total_cost_usd=to_usd(total_native).quantize(Decimal("0.01")),
+        total_cost_brl=to_brl(total_native).quantize(Decimal("0.01")),
         by_user=by_user,
         by_statement_type=by_statement_type,
         by_table=by_table,
         top_queries=top_queries,
         cached=False,
         fetched_at=datetime.now(timezone.utc).isoformat(),
+        currency=native_currency,
+        calibrated=calibrated,
+        analysis_cost_usd=to_usd(analysis_native).quantize(Decimal("0.01")),
+        analysis_cost_brl=to_brl(analysis_native).quantize(Decimal("0.01")),
+        storage_cost_usd=to_usd(storage_native).quantize(Decimal("0.01")),
+        storage_cost_brl=to_brl(storage_native).quantize(Decimal("0.01")),
+        other_cost_usd=to_usd(other_native).quantize(Decimal("0.01")),
+        other_cost_brl=to_brl(other_native).quantize(Decimal("0.01")),
+        price_by_region=price_by_region,
     )
 
     _cache_put(cache_key, response)
