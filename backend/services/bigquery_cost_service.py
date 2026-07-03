@@ -32,6 +32,7 @@ from backend.models.bigquery_cost import (
     BqCostQueryRow,
     BqCostStatementRow,
     BqCostTableRow,
+    BqCostUserDailyPoint,
     BqCostUserRow,
 )
 from backend.services.exchange_rate import get_exchange_rate
@@ -209,6 +210,29 @@ def _categorize_bq_sku(sku: str) -> str:
 _MULTI_REGIONS = {"us", "eu"}
 
 
+def _compute_region_rates(
+    analysis_by_region: dict[str, Decimal],
+    region_bytes_by_region: dict[str, int],
+    native_currency: str,
+    usd_rate: Decimal,
+    price_per_tib: Decimal,
+) -> dict[str, Decimal]:
+    """Tarifa (moeda nativa) por TiB, por região.
+
+    Calibra pela fatura quando há custo 'Analysis' e bytes na região; senão cai
+    no flat on-demand convertido para a moeda nativa.
+    """
+    flat_native = price_per_tib if native_currency == "USD" else price_per_tib * usd_rate
+    out: dict[str, Decimal] = {}
+    for region, region_bytes in region_bytes_by_region.items():
+        billing_native = analysis_by_region.get(region)
+        if billing_native is not None and region_bytes > 0:
+            out[region] = billing_native / (Decimal(region_bytes) / BYTES_PER_TIB)
+        else:
+            out[region] = flat_native
+    return out
+
+
 def _billing_bigquery_by_region_and_category(
     client: bigquery.Client, from_ts: datetime, to_ts: datetime
 ) -> tuple[dict[str, Decimal], dict[str, Decimal]]:
@@ -314,6 +338,18 @@ LIMIT {int(top_n)}
 """.strip()
 
 
+def _q_daily_by_user(project: str, region: str) -> str:
+    return f"""
+SELECT
+  DATE(creation_time) AS day,
+  IFNULL(NULLIF(LOWER(TRIM(user_email)), ''), '(sem usuário)') AS user_email,
+  SUM(total_bytes_billed) AS bytes_billed
+FROM {_table_ref(project, region)}
+WHERE {_WHERE}
+GROUP BY day, user_email
+""".strip()
+
+
 def _q_top_queries(project: str, region: str, top_n: int) -> str:
     return f"""
 SELECT
@@ -322,6 +358,57 @@ SELECT
 FROM {_table_ref(project, region)}
 WHERE {_WHERE}
 ORDER BY total_bytes_billed DESC
+LIMIT {int(top_n)}
+""".strip()
+
+
+def _q_region_bytes(project: str, region: str) -> str:
+    return f"""
+SELECT IFNULL(SUM(total_bytes_billed), 0) AS bytes_billed
+FROM {_table_ref(project, region)}
+WHERE {_WHERE}
+""".strip()
+
+
+def _q_user_query_groups(project: str, region: str, top_n: int, no_user: bool) -> str:
+    """Queries do usuário agrupadas por padrão (literais normalizados).
+
+    Normaliza strings ('...') → '?' e números → ? antes de agrupar, para que N
+    execuções da mesma query (variando só os valores) caiam num único padrão —
+    revelando 'esse padrão rodou N vezes = custo X'.
+    """
+    user_filter = (
+        "(user_email IS NULL OR TRIM(user_email) = '')"
+        if no_user
+        else "LOWER(TRIM(user_email)) = @user_email"
+    )
+    return rf"""
+WITH base AS (
+  SELECT
+    total_bytes_billed,
+    total_slot_ms,
+    statement_type,
+    query,
+    REGEXP_REPLACE(
+      REGEXP_REPLACE(
+        REGEXP_REPLACE(query, r"'[^']*'", "'?'"),
+        r"\b\d+\b", "?"
+      ),
+      r"\s+", " "
+    ) AS pattern
+  FROM {_table_ref(project, region)}
+  WHERE {_WHERE} AND {user_filter}
+)
+SELECT
+  pattern,
+  COUNT(*) AS jobs,
+  SUM(total_bytes_billed) AS bytes_billed,
+  SUM(total_slot_ms) AS slot_ms,
+  ANY_VALUE(query) AS sample_query,
+  ANY_VALUE(statement_type) AS statement_type
+FROM base
+GROUP BY pattern
+ORDER BY bytes_billed DESC
 LIMIT {int(top_n)}
 """.strip()
 
@@ -338,6 +425,28 @@ def _run_sql(
             bigquery.ScalarQueryParameter("to_ts", "TIMESTAMP", to_ts),
         ]
     )
+    return [
+        dict(row)
+        for row in client.query(sql, job_config=job_config).result(
+            timeout=_BQ_QUERY_TIMEOUT_SECONDS
+        )
+    ]
+
+
+def _run_sql_user(
+    client: bigquery.Client,
+    sql: str,
+    from_ts: datetime,
+    to_ts: datetime,
+    user_email: str | None,
+) -> list[dict[str, Any]]:
+    params = [
+        bigquery.ScalarQueryParameter("from_ts", "TIMESTAMP", from_ts),
+        bigquery.ScalarQueryParameter("to_ts", "TIMESTAMP", to_ts),
+    ]
+    if user_email is not None:
+        params.append(bigquery.ScalarQueryParameter("user_email", "STRING", user_email))
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
     return [
         dict(row)
         for row in client.query(sql, job_config=job_config).result(
@@ -384,6 +493,7 @@ async def build_dashboard(
         tasks.append(_run(_q_by_statement(project, region)));   task_meta.append(("stmt", region))
         tasks.append(_run(_q_by_table(project, region, DEFAULT_TOP_TABLES))); task_meta.append(("table", region))
         tasks.append(_run(_q_top_queries(project, region, DEFAULT_TOP_QUERIES))); task_meta.append(("top", region))
+        tasks.append(_run(_q_daily_by_user(project, region))); task_meta.append(("daily", region))
 
     try:
         results = await asyncio.gather(*tasks)
@@ -396,7 +506,7 @@ async def build_dashboard(
     # Agrupa os resultados do JOBS por região (para precificar cada região com
     # a sua tarifa efetiva).
     region_data: dict[str, dict[str, list[dict[str, Any]]]] = {
-        region: {"user": [], "stmt": [], "table": [], "top": []} for region in regions
+        region: {"user": [], "stmt": [], "table": [], "top": [], "daily": []} for region in regions
     }
     for (kind, region), rows in zip(task_meta, results):
         region_data[region][kind] = rows
@@ -439,18 +549,21 @@ async def build_dashboard(
             return n
 
     # Tarifa (moeda nativa) por TiB, por região.
-    flat_native = price_per_tib if native_currency == "USD" else price_per_tib * usd_rate
-    rate_native_by_region: dict[str, Decimal] = {}
-    price_by_region: dict[str, Decimal] = {}
-    for region in regions:
-        region_bytes = sum(int(r.get("bytes_billed") or 0) for r in region_data[region]["user"])
-        billing_native = analysis_by_region.get(region)
-        if calibrated and billing_native is not None and region_bytes > 0:
-            rate_native = billing_native / (Decimal(region_bytes) / BYTES_PER_TIB)
-        else:
-            rate_native = flat_native
-        rate_native_by_region[region] = rate_native
-        price_by_region[region] = to_usd(rate_native).quantize(Decimal("0.0001"))
+    region_bytes_by_region = {
+        region: sum(int(r.get("bytes_billed") or 0) for r in region_data[region]["user"])
+        for region in regions
+    }
+    rate_native_by_region = _compute_region_rates(
+        analysis_by_region if calibrated else {},
+        region_bytes_by_region,
+        native_currency,
+        usd_rate,
+        price_per_tib,
+    )
+    price_by_region: dict[str, Decimal] = {
+        region: to_usd(rate).quantize(Decimal("0.0001"))
+        for region, rate in rate_native_by_region.items()
+    }
 
     def _cost_native(bytes_val: float, region: str) -> Decimal:
         return (Decimal(str(bytes_val)) / BYTES_PER_TIB) * rate_native_by_region[region]
@@ -460,6 +573,7 @@ async def build_dashboard(
     by_stmt_acc: dict[str, dict[str, Any]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0, "cost": Decimal("0")})
     by_table_acc: dict[str, dict[str, Any]] = defaultdict(lambda: {"jobs": 0, "bytes": 0.0, "cost": Decimal("0")})
     top_candidates: list[dict[str, Any]] = []
+    daily_acc: dict[tuple[Any, str], Decimal] = defaultdict(lambda: Decimal("0"))
 
     for region in regions:
         rd = region_data[region]
@@ -486,6 +600,10 @@ async def build_dashboard(
         for r in rd["top"]:
             r["region"] = region
             top_candidates.append(r)
+        for r in rd["daily"]:
+            day = r.get("day")
+            user = str(r.get("user_email") or "(sem usuário)")
+            daily_acc[(day, user)] += _cost_native(int(r.get("bytes_billed") or 0), region)
 
     total_jobs = sum(v["jobs"] for v in by_user_acc.values())
     total_bytes = sum(v["bytes"] for v in by_user_acc.values())
@@ -571,6 +689,19 @@ async def build_dashboard(
             )
         )
 
+    by_user_daily = sorted(
+        (
+            BqCostUserDailyPoint(
+                day=day,
+                user_email=user,
+                cost_usd=to_usd(native).quantize(Decimal("0.01")),
+                cost_brl=to_brl(native).quantize(Decimal("0.01")),
+            )
+            for (day, user), native in daily_acc.items()
+        ),
+        key=lambda p: (p.day, p.user_email),
+    )
+
     # Tarifa efetiva média (USD/TiB) para exibição.
     total_tib = Decimal(total_bytes) / BYTES_PER_TIB
     analysis_usd_attr = to_usd(analysis_attributed)
@@ -594,6 +725,7 @@ async def build_dashboard(
         by_statement_type=by_statement_type,
         by_table=by_table,
         top_queries=top_queries,
+        by_user_daily=by_user_daily,
         cached=False,
         fetched_at=datetime.now(timezone.utc).isoformat(),
         currency=native_currency,
@@ -609,6 +741,167 @@ async def build_dashboard(
 
     _cache_put(cache_key, response)
     return response
+
+
+DEFAULT_TOP_USER_QUERIES = 25
+_NO_USER_KEY = "(sem usuário)"
+
+
+async def build_user_queries(
+    from_str: str | None,
+    to_str: str | None,
+    regions_str: str | None,
+    user_email: str | None,
+    use_cache: bool = True,  # noqa: ARG001 — sem cache próprio; SWR cacheia no front
+) -> "BqUserQueriesResponse":
+    """Queries mais caras de um usuário no período (drill-down da tabela por usuário)."""
+    from backend.models.bigquery_cost import BqUserQueriesResponse, BqUserQueryGroup
+
+    if not is_enabled():
+        raise RuntimeError(
+            "Integração BigQuery desabilitada: configure BQ_PROJECT_ID e GCP_CREDS_JSON_CREDS_BASE64."
+        )
+
+    from_d, to_d, regions = _resolve_window(from_str, to_str, regions_str)
+    user = (user_email or "").strip()
+    if not user:
+        raise ValueError("`user_email` é obrigatório.")
+    no_user = user.lower() == _NO_USER_KEY
+    user_norm = None if no_user else user.lower()
+
+    client = bigquery_store._get_client()
+    project = bigquery_store._project_id()
+    from_ts = datetime.combine(from_d, dtime.min, tzinfo=timezone.utc)
+    to_ts = datetime.combine(to_d, dtime.max, tzinfo=timezone.utc)
+    loop = asyncio.get_running_loop()
+
+    # Por região: queries do usuário (top N) + bytes totais da região (p/ tarifa).
+    q_tasks: list[Any] = []
+    q_meta: list[tuple[str, str]] = []
+    for region in regions:
+        q_tasks.append(loop.run_in_executor(
+            None, _run_sql_user, client,
+            _q_user_query_groups(project, region, DEFAULT_TOP_USER_QUERIES, no_user),
+            from_ts, to_ts, user_norm,
+        ))
+        q_meta.append(("q", region))
+        q_tasks.append(loop.run_in_executor(
+            None, _run_sql, client, _q_region_bytes(project, region), from_ts, to_ts,
+        ))
+        q_meta.append(("bytes", region))
+
+    try:
+        results = await asyncio.gather(*q_tasks)
+    except Exception as exc:
+        logger.exception("Falha ao consultar queries do usuário.")
+        raise RuntimeError(f"BigQuery falhou: {exc}") from exc
+
+    user_rows_by_region: dict[str, list[dict[str, Any]]] = {}
+    region_bytes_by_region: dict[str, int] = {}
+    for (kind, region), rows in zip(q_meta, results):
+        if kind == "q":
+            user_rows_by_region[region] = rows
+        else:
+            region_bytes_by_region[region] = int(rows[0].get("bytes_billed") or 0) if rows else 0
+
+    # Calibração (mesma tarifa por região do dashboard).
+    price_per_tib = _price_per_tib()
+    calibrated = gbs._table_fqn() is not None
+    analysis_by_region: dict[str, Decimal] = {}
+    native_currency = "USD"
+    usd_rate = get_exchange_rate(to_d)
+
+    def to_brl(n: Decimal) -> Decimal:
+        return (n * usd_rate).quantize(Decimal("0.01"))
+
+    def to_usd(n: Decimal) -> Decimal:
+        return n
+
+    if calibrated:
+        bfrom_ts, bto_ts = gbs._tz_bounds(from_d, to_d)
+        try:
+            currency_rows, billing = await asyncio.gather(
+                loop.run_in_executor(
+                    None, gbs._run_query, client,
+                    gbs._query_currency(gbs._table_fqn()), bfrom_ts, bto_ts,
+                ),
+                loop.run_in_executor(
+                    None, _billing_bigquery_by_region_and_category, client, bfrom_ts, bto_ts,
+                ),
+            )
+            analysis_by_region, _cat = billing
+            native_currency, usd_rate, to_brl, to_usd = gbs._resolve_currency_rates(
+                currency_rows, to_d
+            )
+        except Exception as exc:
+            logger.warning("Calibração pelo billing indisponível (user queries): %s", exc)
+            calibrated = False
+
+    rate_native_by_region = _compute_region_rates(
+        analysis_by_region if calibrated else {},
+        region_bytes_by_region,
+        native_currency,
+        usd_rate,
+        price_per_tib,
+    )
+
+    # Mescla padrões entre regiões (mesmo padrão pode rodar em regiões distintas).
+    def _truncate(s: str) -> str:
+        s = (s or "").strip()
+        return s[:QUERY_PREVIEW_CHARS] + "…" if len(s) > QUERY_PREVIEW_CHARS else s
+
+    acc: dict[str, dict[str, Any]] = {}
+    total_native = Decimal("0")
+    for region, rows in user_rows_by_region.items():
+        rate = rate_native_by_region[region]
+        for r in rows:
+            pattern = str(r.get("pattern") or "")
+            bytes_billed = int(r.get("bytes_billed") or 0)
+            native = (Decimal(bytes_billed) / BYTES_PER_TIB) * rate
+            total_native += native
+            g = acc.get(pattern)
+            if g is None:
+                g = acc[pattern] = {
+                    "pattern": pattern,
+                    "sample": r.get("sample_query") or "",
+                    "statement_type": r.get("statement_type"),
+                    "jobs": 0,
+                    "bytes": 0,
+                    "slot": 0,
+                    "native": Decimal("0"),
+                }
+            g["jobs"] += int(r.get("jobs") or 0)
+            g["bytes"] += bytes_billed
+            g["slot"] += int(r.get("slot_ms") or 0)
+            g["native"] += native
+
+    groups = sorted(acc.values(), key=lambda g: g["native"], reverse=True)[:DEFAULT_TOP_USER_QUERIES]
+    query_groups = [
+        BqUserQueryGroup(
+            pattern_preview=_truncate(g["pattern"]),
+            sample_query=_truncate(g["sample"]),
+            statement_type=g["statement_type"],
+            jobs=g["jobs"],
+            bytes_billed=g["bytes"],
+            slot_ms=g["slot"],
+            cost_usd=to_usd(g["native"]).quantize(Decimal("0.01")),
+            cost_brl=to_brl(g["native"]).quantize(Decimal("0.01")),
+        )
+        for g in groups
+    ]
+
+    return BqUserQueriesResponse(
+        user_email=user,
+        from_date=from_d,
+        to_date=to_d,
+        currency=native_currency,
+        exchange_rate=usd_rate.quantize(Decimal("0.0001")),
+        total_cost_usd=to_usd(total_native).quantize(Decimal("0.01")),
+        total_cost_brl=to_brl(total_native).quantize(Decimal("0.01")),
+        groups=query_groups,
+        cached=False,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 # --------------------------------------------------------------------------- #

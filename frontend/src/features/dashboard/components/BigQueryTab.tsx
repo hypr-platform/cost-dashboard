@@ -25,6 +25,8 @@ import {
   type CostColumn,
 } from "@/features/dashboard/components/cost";
 import BqLimitCard from "@/features/dashboard/components/BqLimitCard";
+import BqUserTimeline from "@/features/dashboard/components/BqUserTimeline";
+import BqUserQueriesModal from "@/features/dashboard/components/BqUserQueriesModal";
 
 function buildUrl(
   apiBase: string,
@@ -46,6 +48,11 @@ export default function BigQueryTab() {
   const [to, setTo] = useState<string>(todayKey());
   const [regions, setRegions] = useState<string>("");
   const [expandedQuery, setExpandedQuery] = useState<string | null>(null);
+  const [selectedUser, setSelectedUser] = useState<{
+    email: string;
+    costBrl: string;
+    costUsd: string;
+  } | null>(null);
 
   const [committedFrom, setCommittedFrom] = useState<string>(daysAgoKey(29));
   const [committedTo, setCommittedTo] = useState<string>(todayKey());
@@ -262,15 +269,41 @@ export default function BigQueryTab() {
         />
       </section>
 
+      {data?.by_user_daily.length ? (
+        <BqUserTimeline daily={data.by_user_daily} />
+      ) : null}
+
       <CostBreakdownTable
         title="Por usuário"
-        hint={data ? `${data.by_user.length} usuários` : "—"}
+        hint={
+          data
+            ? `${data.by_user.length} usuários · clique para ver as queries`
+            : "—"
+        }
         rows={data?.by_user}
         error={error}
         rowKey={(u) => u.user_email}
         columns={userColumns}
         emptyMessage="Nenhum job no intervalo."
+        onRowClick={(u) =>
+          setSelectedUser({
+            email: u.user_email,
+            costBrl: u.cost_brl,
+            costUsd: u.cost_usd,
+          })
+        }
       />
+
+      {selectedUser ? (
+        <BqUserQueriesModal
+          apiBase={apiBase}
+          from={committedFrom}
+          to={committedTo}
+          regions={committedRegions}
+          user={selectedUser}
+          onClose={() => setSelectedUser(null)}
+        />
+      ) : null}
 
       <CostBreakdownTable
         title="Por statement type"

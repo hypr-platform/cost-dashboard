@@ -39,6 +39,15 @@ class BqCostTableRow(BaseModel):
     cost_brl: Decimal
 
 
+class BqCostUserDailyPoint(BaseModel):
+    """Custo de análise (query) de um usuário num dia — série temporal empilhada."""
+
+    day: date
+    user_email: str
+    cost_usd: Decimal
+    cost_brl: Decimal
+
+
 class BqCostQueryRow(BaseModel):
     job_id: str
     user_email: str | None
@@ -50,6 +59,34 @@ class BqCostQueryRow(BaseModel):
     cost_brl: Decimal
     query_preview: str
     region: str
+
+
+class BqUserQueryGroup(BaseModel):
+    """Padrão de query de um usuário (literais normalizados), agregado."""
+
+    pattern_preview: str
+    sample_query: str
+    statement_type: str | None
+    jobs: int
+    bytes_billed: int
+    slot_ms: int
+    cost_usd: Decimal
+    cost_brl: Decimal
+
+
+class BqUserQueriesResponse(BaseModel):
+    """Padrões de query mais caros de um usuário (drill-down da tabela por usuário)."""
+
+    user_email: str
+    from_date: date
+    to_date: date
+    currency: str
+    exchange_rate: Decimal
+    total_cost_usd: Decimal
+    total_cost_brl: Decimal
+    groups: list[BqUserQueryGroup]
+    cached: bool = False
+    fetched_at: str
 
 
 class BqCostLimitStatus(BaseModel):
@@ -108,6 +145,7 @@ class BqCostDashboardResponse(BaseModel):
     by_statement_type: list[BqCostStatementRow]
     by_table: list[BqCostTableRow]
     top_queries: list[BqCostQueryRow]
+    by_user_daily: list[BqCostUserDailyPoint] = []
     cached: bool = False
     fetched_at: str
     # Moeda nativa do billing (BRL/USD) usada na calibração.

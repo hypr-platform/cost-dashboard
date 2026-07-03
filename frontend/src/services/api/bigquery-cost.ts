@@ -26,6 +26,13 @@ export type BqCostTableRow = {
   cost_brl: string;
 };
 
+export type BqCostUserDailyPoint = {
+  day: string;
+  user_email: string;
+  cost_usd: string;
+  cost_brl: string;
+};
+
 export type BqCostQueryRow = {
   job_id: string;
   user_email: string | null;
@@ -54,6 +61,7 @@ export type BqCostDashboardResponse = {
   by_statement_type: BqCostStatementRow[];
   by_table: BqCostTableRow[];
   top_queries: BqCostQueryRow[];
+  by_user_daily: BqCostUserDailyPoint[];
   cached: boolean;
   fetched_at: string;
   currency: string;
@@ -73,6 +81,39 @@ export function fetchBigQueryCostDashboard(
   return fetchJsonWithTimeout<BqCostDashboardResponse>(url, {
     timeoutMs: 90000,
     errorMessage: "Falha ao carregar custos do BigQuery.",
+  });
+}
+
+export type BqUserQueryGroup = {
+  pattern_preview: string;
+  sample_query: string;
+  statement_type: string | null;
+  jobs: number;
+  bytes_billed: number;
+  slot_ms: number;
+  cost_usd: string;
+  cost_brl: string;
+};
+
+export type BqUserQueriesResponse = {
+  user_email: string;
+  from_date: string;
+  to_date: string;
+  currency: string;
+  exchange_rate: string;
+  total_cost_usd: string;
+  total_cost_brl: string;
+  groups: BqUserQueryGroup[];
+  cached: boolean;
+  fetched_at: string;
+};
+
+export function fetchBqUserQueries(
+  url: string,
+): Promise<BqUserQueriesResponse> {
+  return fetchJsonWithTimeout<BqUserQueriesResponse>(url, {
+    timeoutMs: 90000,
+    errorMessage: "Falha ao carregar as queries do usuário.",
   });
 }
 

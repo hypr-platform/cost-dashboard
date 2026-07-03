@@ -612,6 +612,17 @@
   overflow: auto;
 }
 
+.bqCostQueryPattern {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #ededed;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 520px;
+}
+
 .bqCostKpiValueSkeleton {
   display: block;
   height: 26px;

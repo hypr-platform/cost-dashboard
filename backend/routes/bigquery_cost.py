@@ -7,7 +7,11 @@ import logging
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from backend.models.bigquery_cost import BqCostDashboardResponse, BqCostLimitStatus
+from backend.models.bigquery_cost import (
+    BqCostDashboardResponse,
+    BqCostLimitStatus,
+    BqUserQueriesResponse,
+)
 from backend.services import bigquery_cost_service
 
 
@@ -56,6 +60,32 @@ async def get_dashboard(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Falha ao montar dashboard de custos BigQuery.")
+        raise HTTPException(status_code=502, detail=f"Falha na consulta: {exc}") from exc
+
+
+@router.get("/user-queries", response_model=BqUserQueriesResponse)
+async def get_user_queries(
+    user_email: str = Query(..., description="Usuário (email/SA) a detalhar."),
+    from_date: str | None = Query(default=None, alias="from"),
+    to_date: str | None = Query(default=None, alias="to"),
+    regions: str | None = Query(default=None),
+) -> BqUserQueriesResponse:
+    if not bigquery_cost_service.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Integração BigQuery desabilitada (BQ_PROJECT_ID/credenciais ausentes).",
+        )
+    try:
+        return await bigquery_cost_service.build_user_queries(
+            from_str=from_date,
+            to_str=to_date,
+            regions_str=regions,
+            user_email=user_email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Falha ao consultar queries do usuário BigQuery.")
         raise HTTPException(status_code=502, detail=f"Falha na consulta: {exc}") from exc
 
 
