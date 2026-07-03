@@ -114,19 +114,35 @@ def set_daily_limit_mib(mib: int) -> dict[str, Any]:
         logger.info("Override %s MiB acima do teto %s; limitando ao teto.", mib, ceiling)
         mib = int(ceiling)
     existing = status.get("consumer_override_id")
+    body = {"overrideValue": str(int(mib))}
+    base = f"{_SU}/v1beta1/{_parent()}/limits/{_LIMIT_ID}/consumerOverrides"
     if existing:
-        # Substitui: remove o override atual antes de criar o novo (evita 409).
-        _delete_override(session, existing)
-    url = (
-        f"{_SU}/v1beta1/{_parent()}/limits/{_LIMIT_ID}/consumerOverrides?force=true"
-    )
-    resp = session.post(url, json={"overrideValue": str(int(mib))}, timeout=_HTTP_TIMEOUT)
+        # PATCH in-place: atualiza sem remover antes (não deixa o projeto sem
+        # bloqueio na janela entre delete e create).
+        resp = session.patch(
+            f"{base}/{existing}?force=true&updateMask=overrideValue",
+            json=body,
+            timeout=_HTTP_TIMEOUT,
+        )
+    else:
+        resp = session.post(f"{base}?force=true", json=body, timeout=_HTTP_TIMEOUT)
     if resp.status_code >= 400:
-        raise RuntimeError(f"Service Usage {resp.status_code}: {resp.text}")
+        # Loga o corpo completo (pode conter e-mail da SA / nº do projeto), mas
+        # não propaga isso para o cliente.
+        logger.error("Service Usage %s ao aplicar quota: %s", resp.status_code, resp.text)
+        raise RuntimeError(f"Falha na API de quota do GCP (HTTP {resp.status_code}).")
     op = resp.json()
     if op.get("name") and not op.get("done"):
         _poll(session, op["name"])
-    return get_status()
+    # Verifica que o override aplicado bate com o pedido; senão o bloqueio não
+    # está de fato valendo (fail-open) e precisamos sinalizar.
+    applied = get_status()
+    got = applied.get("consumer_override_mib")
+    if got is None or abs(int(got) - int(mib)) > max(1, int(mib) // 1000):
+        raise RuntimeError(
+            f"Override aplicado ({got} MiB) diverge do solicitado ({mib} MiB)."
+        )
+    return applied
 
 
 def _delete_override(session: AuthorizedSession, override_id: str) -> None:
@@ -136,7 +152,8 @@ def _delete_override(session: AuthorizedSession, override_id: str) -> None:
     )
     resp = session.delete(url, timeout=_HTTP_TIMEOUT)
     if resp.status_code >= 400:
-        raise RuntimeError(f"Service Usage {resp.status_code}: {resp.text}")
+        logger.error("Service Usage %s ao remover quota: %s", resp.status_code, resp.text)
+        raise RuntimeError(f"Falha na API de quota do GCP (HTTP {resp.status_code}).")
     op = resp.json()
     if op.get("name") and not op.get("done"):
         _poll(session, op["name"])

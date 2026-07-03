@@ -50,16 +50,17 @@ BYTES_PER_TIB = Decimal(2**40)
 # billing (Pacífico), alinhado ao reset da quota "Query usage per day" do GCP.
 BQ_LIMIT_SCOPE = "project"
 DEFAULT_WARN_PCT = Decimal("80")
-BILLING_TZ = os.getenv("BILLING_TZ") or "America/Los_Angeles"
-_LIMIT_TZ = ZoneInfo(BILLING_TZ)
+# A quota "query usage per day" do BigQuery reseta à meia-noite do Pacífico —
+# fixo de propósito (não usa BILLING_TZ) para o cálculo do gasto do dia e do
+# reset baterem exatamente com o reset da quota.
+QUOTA_RESET_TZ = "America/Los_Angeles"
+_LIMIT_TZ = ZoneInfo(QUOTA_RESET_TZ)
 _LIMIT_STATUS_TTL = 45  # segundos: evita reconsultar INFORMATION_SCHEMA a cada poll
 # Preço usado para converter R$ <-> bytes no limite. O grosso do gasto é em
 # southamerica-east1 (on-demand ~US$8.44/TiB); o billing real de hoje bate com
 # esse valor, não com o flat 6.25 das tabelas do dashboard. Override via env.
 DEFAULT_ENFORCE_USD_PER_TIB = Decimal("8.44")
 MIB_PER_TIB = Decimal(1024 * 1024)
-# Tolerância ao comparar o override aplicado no GCP com o esperado (arredondamentos).
-_QUOTA_MATCH_TOLERANCE = Decimal("0.01")
 
 
 def is_enabled() -> bool:
@@ -568,15 +569,19 @@ def set_limit(
 
 def clear_limit(updated_by: str | None = None) -> bool:
     had_limit = get_limit() is not None
-    # Sempre tenta remover o override do GCP (mesmo sem registro local, para não
-    # deixar o projeto travado por um override órfão).
+    # Remove o override do GCP primeiro. Se falhar, NÃO apaga o registro local e
+    # propaga o erro — caso contrário o projeto ficaria travado por um override
+    # órfão enquanto a UI mostra "sem limite".
     try:
-        gcp_quota.clear_daily_limit()
-    except Exception:  # noqa: BLE001
+        removed = gcp_quota.clear_daily_limit()
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Falha ao remover bloqueio de quota do BigQuery.")
+        raise RuntimeError(
+            "Falha ao remover o bloqueio de quota no GCP; o limite não foi removido. Tente de novo."
+        ) from exc
     if not had_limit:
         _clear_limit_status_cache()
-        return False
+        return removed
     bigquery_store.write_bq_limit_event(
         BQ_LIMIT_SCOPE,
         limit_brl=None,
@@ -669,39 +674,48 @@ def build_limit_status(use_cache: bool = True) -> BqCostLimitStatus:
         else:
             status = "ok"
 
-    # Cap esperado em MiB/TiB e estado real da quota do GCP (bloqueio efetivo).
-    enforced_limit_mib: int | None = None
-    enforced_limit_tib: Decimal | None = None
-    if limit_brl is not None and limit_brl > 0:
-        enforced_limit_mib = _brl_to_mib(limit_brl, price_per_tib, rate)
-        enforced_limit_tib = (Decimal(enforced_limit_mib) / MIB_PER_TIB).quantize(Decimal("0.01"))
+    # Alvo em bytes a partir do R$ configurado (o que o bloqueio deve aplicar).
+    has_limit = limit_brl is not None and limit_brl > 0
+    target_mib = _brl_to_mib(limit_brl, price_per_tib, rate) if has_limit else None
 
+    # O override aplicado no GCP é a fonte da verdade do bloqueio (persiste entre
+    # dias; só o contador de uso reseta à meia-noite). Comparar o override contra
+    # um valor recalculado causaria falso "drift" quando o câmbio muda, então
+    # apenas refletimos o que está de fato aplicado.
     enforcement = "off"
     enforce_error: str | None = None
     quota_effective_tib: Decimal | None = None
+    enforced_limit_mib: int | None = None
+    enforced_limit_tib: Decimal | None = None
     try:
         q = gcp_quota.get_status()
         if q.get("effective_mib") is not None:
             quota_effective_tib = (Decimal(q["effective_mib"]) / MIB_PER_TIB).quantize(Decimal("0.01"))
         override_mib = q.get("consumer_override_mib")
-        if limit_brl is None or limit_brl <= 0:
-            enforcement = "stray" if override_mib is not None else "off"
-        elif override_mib is None:
-            enforcement = "off"  # limite salvo mas quota não aplicada
-        elif enforced_limit_mib and abs(Decimal(override_mib) - Decimal(enforced_limit_mib)) <= (
-            Decimal(enforced_limit_mib) * _QUOTA_MATCH_TOLERANCE
-        ):
+        if override_mib is not None:
+            enforced_limit_mib = int(override_mib)
+        if has_limit and override_mib is not None:
             enforcement = "enforced"
+        elif has_limit:
+            enforcement = "off"  # limite salvo mas quota não aplicada
+        elif override_mib is not None:
+            enforcement = "stray"  # override no GCP sem limite salvo aqui
         else:
-            enforcement = "drift"  # override existe mas diverge do limite atual
+            enforcement = "off"
     except Exception as exc:  # noqa: BLE001
         enforcement = "error"
         enforce_error = str(exc)
         logger.warning("Falha ao consultar quota do GCP para status do limite: %s", exc)
 
+    # Cap exibido: o que está aplicado (fonte da verdade) ou, se ainda não
+    # aplicado, o alvo calculado a partir do R$ configurado.
+    display_mib = enforced_limit_mib if enforced_limit_mib is not None else target_mib
+    if display_mib is not None:
+        enforced_limit_tib = (Decimal(display_mib) / MIB_PER_TIB).quantize(Decimal("0.01"))
+
     payload = BqCostLimitStatus(
         day=day,
-        timezone=BILLING_TZ,
+        timezone=QUOTA_RESET_TZ,
         regions=list(regions),
         limit_brl=limit_brl,
         warn_pct=warn_pct,

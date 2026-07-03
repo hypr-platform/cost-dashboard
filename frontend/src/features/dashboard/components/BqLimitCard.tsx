@@ -39,12 +39,6 @@ const ENFORCE_META: Record<
     locked: false,
     hint: "O limite está salvo, mas a quota do GCP não está aplicada. Salve o limite de novo para reaplicar o bloqueio.",
   },
-  drift: {
-    label: "Ressincronizar",
-    tone: "warn",
-    locked: false,
-    hint: "A quota aplicada no GCP diverge do limite atual. Salve o limite de novo para sincronizar.",
-  },
   stray: {
     label: "Override órfão",
     tone: "warn",
@@ -65,6 +59,20 @@ function LockIcon({ open }: { open: boolean }) {
       <rect x="2.5" y="6.5" width="9" height="6" rx="1.2" />
       {open ? <path d="M4.5 6.5V4.5a2.5 2.5 0 0 1 4.9-.7" /> : <path d="M4.5 6.5V4.5a2.5 2.5 0 0 1 5 0v2" />}
     </svg>
+  );
+}
+
+function EstimateInfo({ text }: { text: string }) {
+  return (
+    <span className="bqLimitEst" tabIndex={0} role="note">
+      <svg viewBox="0 0 14 14" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <circle cx="7" cy="7" r="5.5" />
+        <path d="M7 6.5v3.5" />
+        <circle cx="7" cy="4.5" r="0.5" fill="currentColor" stroke="none" />
+      </svg>
+      estimativa
+      <span className="bqLimitEstTip">{text}</span>
+    </span>
   );
 }
 
@@ -134,7 +142,7 @@ export default function BqLimitCard({
   const pctUsed = data?.pct_used != null ? Number(data.pct_used) : null;
   const capTib = data?.enforced_limit_tib ? Number(data.enforced_limit_tib) : null;
   const editValue = parseBrlInput(limitInput);
-  const blocksImmediately = editValue != null && editValue < spent;
+  const blocksImmediately = editValue != null && editValue <= spent;
 
   const meterPct = useMemo(() => {
     if (!hasLimit || limit <= 0) return 0;
@@ -152,7 +160,12 @@ export default function BqLimitCard({
       setActionError("Informe um valor em reais maior que zero.");
       return;
     }
-    const warn = Number(warnInput);
+    const warnRaw = warnInput.trim();
+    const warn = warnRaw ? Number(warnRaw) : NaN;
+    if (warnRaw && (!Number.isFinite(warn) || warn < 0 || warn > 100)) {
+      setActionError("O alerta deve ser um número entre 0 e 100.");
+      return;
+    }
     setBusy(true);
     setActionError(null);
     try {
@@ -246,12 +259,13 @@ export default function BqLimitCard({
       </div>
       {editValue != null ? (
         <p className="bqLimitEditHint">
-          Bloqueia em ≈{" "}
+          ≈{" "}
           {(editValue / (Number(data?.price_usd_per_tib ?? 8.44) * Number(data?.exchange_rate ?? 1))).toLocaleString(
             "pt-BR",
             { maximumFractionDigits: 1 },
           )}{" "}
-          TiB/dia · aplica a quota no projeto inteiro.
+          TiB/dia (estimado) · aplica a quota no projeto inteiro e vale todos os
+          dias até você alterar.
         </p>
       ) : null}
       {blocksImmediately ? (
@@ -334,10 +348,16 @@ export default function BqLimitCard({
         <>
           <div className="bqLimitValueRow">
             <span className="bqLimitSpent">{BRL.format(spent)}</span>
-            <span className="bqLimitOfLimit">de {BRL.format(limit)}</span>
+            <span className="bqLimitOfLimit">de {BRL.format(limit)} / dia</span>
             {pctUsed != null ? (
               <span className="bqLimitPct">{pctUsed.toFixed(0)}%</span>
             ) : null}
+          </div>
+          <div className="bqLimitSubRow">
+            <EstimateInfo
+              text={`O bloqueio é exato em bytes (≈${capTib != null ? capTib.toLocaleString("pt-BR", { maximumFractionDigits: 1 }) : "—"} TiB/dia). O valor em R$ usa preço on-demand (${data?.price_usd_per_tib} USD/TiB) + câmbio (${data?.exchange_rate}), então pode variar alguns %. A projeção do fim do dia é uma previsão. A verdade final é o billing export do GCP.`}
+            />
+            <span className="bqLimitGasto">gasto de hoje · atualiza a cada minuto</span>
           </div>
 
           <div className="bqLimitMeter" role="progressbar" aria-valuenow={meterPct} aria-valuemin={0} aria-valuemax={100}>
@@ -375,9 +395,12 @@ export default function BqLimitCard({
             <span>
               {enforce?.locked ? (
                 <>
-                  Bloqueia em <strong>≈ {capTib != null ? capTib.toLocaleString("pt-BR", { maximumFractionDigits: 1 }) : "—"} TiB/dia</strong>.
-                  Ao estourar, todas as queries on-demand do projeto param até a
-                  meia-noite ({data?.timezone}).
+                  Limite <strong>diário</strong>: bloqueia em{" "}
+                  <strong>≈ {capTib != null ? capTib.toLocaleString("pt-BR", { maximumFractionDigits: 1 }) : "—"} TiB/dia</strong>.
+                  Renova sozinho todo dia à meia-noite ({data?.timezone}) e{" "}
+                  <strong>fica ativo até você alterar</strong> — não precisa
+                  reconfigurar. Ao estourar, toda query on-demand do projeto para
+                  até o dia seguinte.
                 </>
               ) : (
                 <>{enforce?.hint}</>
@@ -395,8 +418,9 @@ export default function BqLimitCard({
         <div className="bqLimitEmpty">
           <p className="bqLimitEmptyText">
             Nenhum limite definido. Hoje já foram gastos{" "}
-            <strong>{BRL.format(spent)}</strong> em queries. Defina um teto diário
-            para acompanhar o gasto e ser avisado antes de estourar.
+            <strong>{BRL.format(spent)}</strong> em queries. Defina um teto{" "}
+            <strong>diário</strong> — ele bloqueia o projeto ao estourar e vale
+            todos os dias automaticamente, até você alterar.
           </p>
           <button
             type="button"

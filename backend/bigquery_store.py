@@ -712,8 +712,10 @@ def write_bq_limit_event(
     row = {
         "event_id": str(uuid.uuid4()),
         "scope": scope,
-        "limit_brl": None if limit_brl is None else float(limit_brl),
-        "warn_pct": None if warn_pct is None else float(warn_pct),
+        # NUMERIC aceita até 9 casas decimais; arredonda para evitar erro de escala
+        # com floats como 19728.711000000003.
+        "limit_brl": None if limit_brl is None else round(float(limit_brl), 2),
+        "warn_pct": None if warn_pct is None else round(float(warn_pct), 2),
         "is_deleted": bool(is_deleted),
         "updated_at": now.isoformat(),
         "updated_by": updated_by,

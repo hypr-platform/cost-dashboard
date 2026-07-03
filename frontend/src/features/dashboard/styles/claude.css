@@ -1204,10 +1204,64 @@
   font-weight: 600;
 }
 
+
 .bqLimitEditHint {
   margin: 0;
   font-size: 12px;
   color: #8a8a8a;
+}
+
+.bqLimitSubRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: -4px;
+  flex-wrap: wrap;
+}
+
+.bqLimitGasto {
+  font-size: 11px;
+  color: #6a6a6a;
+}
+
+.bqLimitEst {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #8a8a8a;
+  cursor: help;
+  outline: none;
+}
+.bqLimitEst svg {
+  color: #6a6a6a;
+}
+.bqLimitEst:hover,
+.bqLimitEst:focus-visible {
+  color: #b8b8b8;
+}
+
+.bqLimitEstTip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  width: 300px;
+  padding: 10px 12px;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #cdcdcd;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+  z-index: 100;
+}
+.bqLimitEst:hover .bqLimitEstTip,
+.bqLimitEst:focus-visible .bqLimitEstTip {
+  opacity: 1;
 }
 
 .bqLimitWarn {

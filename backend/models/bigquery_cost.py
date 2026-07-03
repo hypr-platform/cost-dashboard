@@ -60,11 +60,10 @@ class BqCostLimitStatus(BaseModel):
     mas a projeção linear do dia estoura).
 
     `enforcement` reflete o bloqueio real via quota do GCP (consumer override em
-    `bigquery.googleapis.com/quota/query/usage`): `enforced` (override ativo e
-    igual ao limite), `off` (limite salvo mas sem bloqueio), `drift` (override
-    diverge do limite), `stray` (há override sem limite salvo), `error`
-    (falha ao consultar/aplicar). Ao estourar, TODA query on-demand do projeto
-    falha até a meia-noite do fuso de billing.
+    `bigquery.googleapis.com/quota/query/usage`): `enforced` (override ativo),
+    `off` (limite salvo mas sem bloqueio aplicado), `stray` (há override sem
+    limite salvo), `error` (falha ao consultar/aplicar). Ao estourar, TODA query
+    on-demand do projeto falha até a meia-noite do Pacífico.
     """
 
     day: date

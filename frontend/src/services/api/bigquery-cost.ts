@@ -74,12 +74,7 @@ export type BqLimitStatusValue =
   | "warning"
   | "exceeded";
 
-export type BqEnforcementValue =
-  | "enforced"
-  | "off"
-  | "drift"
-  | "stray"
-  | "error";
+export type BqEnforcementValue = "enforced" | "off" | "stray" | "error";
 
 export type BqCostLimitStatus = {
   day: string;

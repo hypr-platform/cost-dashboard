@@ -83,10 +83,15 @@ def put_limit(
     if not bigquery_cost_service.is_enabled():
         raise HTTPException(status_code=503, detail="Integração BigQuery desabilitada.")
     try:
-        bigquery_cost_service.set_limit(
+        enforce_error = bigquery_cost_service.set_limit(
             payload.limit_brl, warn_pct=payload.warn_pct, updated_by=x_user_email
         )
-        return bigquery_cost_service.build_limit_status(use_cache=False)
+        status = bigquery_cost_service.build_limit_status(use_cache=False)
+        # Se o bloqueio não foi aplicado, propaga o motivo (o status recalcula a
+        # partir da quota atual e não teria a mensagem do erro de escrita).
+        if enforce_error and status.enforcement != "enforced":
+            status = status.model_copy(update={"enforce_error": enforce_error})
+        return status
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
