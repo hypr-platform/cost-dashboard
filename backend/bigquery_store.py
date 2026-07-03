@@ -13,6 +13,7 @@ DEFAULT_DATASET = "cost_dashboard_rt"
 DEFAULT_LOCATION = "US"
 RUNS_TABLE = "dashboard_refresh_runs"
 BUDGET_TABLE = "budget_targets_history"
+BQ_LIMIT_TABLE = "bq_cost_limit_history"
 LINE_DAILY_COST_TABLE = "dsp_line_daily_cost"
 LINE_COSTS_TABLE = "line_costs"
 DIM_CAMPAIGN_TABLE = "dim_campaign"
@@ -117,6 +118,25 @@ def _ensure_budget_table(client: bigquery.Client) -> None:
     table = bigquery.Table(table_ref, schema=schema)
     table.time_partitioning = bigquery.TimePartitioning(field="updated_at")
     table.clustering_fields = ["month_key", "platform", "is_deleted"]
+    client.create_table(table, exists_ok=True)
+
+
+def _ensure_bq_limit_table(client: bigquery.Client) -> None:
+    table_ref = _table_ref(BQ_LIMIT_TABLE)
+    schema = [
+        bigquery.SchemaField("event_id", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("scope", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("limit_brl", "NUMERIC", mode="NULLABLE"),
+        bigquery.SchemaField("warn_pct", "NUMERIC", mode="NULLABLE"),
+        bigquery.SchemaField("is_deleted", "BOOL", mode="REQUIRED"),
+        bigquery.SchemaField("updated_at", "TIMESTAMP", mode="REQUIRED"),
+        bigquery.SchemaField("updated_by", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("source", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED"),
+    ]
+    table = bigquery.Table(table_ref, schema=schema)
+    table.time_partitioning = bigquery.TimePartitioning(field="updated_at")
+    table.clustering_fields = ["scope", "is_deleted"]
     client.create_table(table, exists_ok=True)
 
 
@@ -270,6 +290,7 @@ def ensure_infra() -> bool:
         client.create_dataset(dataset, exists_ok=True)
         _ensure_runs_table(client)
         _ensure_budget_table(client)
+        _ensure_bq_limit_table(client)
         _ensure_line_daily_cost_table(client)
         _ensure_line_costs_table(client)
         _migrate_line_costs_columns(client)
@@ -672,6 +693,71 @@ def read_budget_targets_for_month(month_key: str, global_scope: str) -> dict[str
         if platform and target is not None:
             out[str(platform)] = float(target)
     return out
+
+
+def write_bq_limit_event(
+    scope: str,
+    *,
+    limit_brl: float | None,
+    warn_pct: float | None,
+    is_deleted: bool,
+    updated_by: str | None = None,
+    source: str = "api",
+) -> str:
+    if not ensure_infra():
+        raise RuntimeError("BigQuery não está habilitado.")
+    client = _get_client()
+    table_ref = _table_ref(BQ_LIMIT_TABLE)
+    now = datetime.now(timezone.utc)
+    row = {
+        "event_id": str(uuid.uuid4()),
+        "scope": scope,
+        "limit_brl": None if limit_brl is None else float(limit_brl),
+        "warn_pct": None if warn_pct is None else float(warn_pct),
+        "is_deleted": bool(is_deleted),
+        "updated_at": now.isoformat(),
+        "updated_by": updated_by,
+        "source": source,
+        "created_at": now.isoformat(),
+    }
+    errors = client.insert_rows_json(table_ref, [row])
+    if errors:
+        raise RuntimeError(f"Falha ao gravar limite BigQuery: {errors}")
+    return now.isoformat()
+
+
+def read_bq_limit(scope: str) -> dict[str, Any] | None:
+    """Estado mais recente do limite para o escopo. None se nunca definido ou removido."""
+    if not ensure_infra():
+        raise RuntimeError("BigQuery não está habilitado.")
+    client = _get_client()
+    query = f"""
+        SELECT limit_brl, warn_pct, is_deleted, updated_at, updated_by
+        FROM `{_project_id()}.{_dataset_id()}.{BQ_LIMIT_TABLE}`
+        WHERE scope = @scope
+        ORDER BY updated_at DESC
+        LIMIT 1
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("scope", "STRING", scope)]
+    )
+    rows = list(client.query(query, job_config=job_config).result())
+    if not rows:
+        return None
+    row = rows[0]
+    if row.get("is_deleted"):
+        return None
+    limit_brl = row.get("limit_brl")
+    if limit_brl is None:
+        return None
+    updated_at = row.get("updated_at")
+    warn_pct = row.get("warn_pct")
+    return {
+        "limit_brl": float(limit_brl),
+        "warn_pct": float(warn_pct) if warn_pct is not None else None,
+        "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at),
+        "updated_by": row.get("updated_by"),
+    }
 
 
 def read_refresh_metrics(window_hours: int = 24, trigger: str = "manual_api") -> dict[str, Any] | None:

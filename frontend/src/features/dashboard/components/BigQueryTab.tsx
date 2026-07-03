@@ -24,6 +24,7 @@ import {
   CostMoneyCell,
   type CostColumn,
 } from "@/features/dashboard/components/cost";
+import BqLimitCard from "@/features/dashboard/components/BqLimitCard";
 
 function buildUrl(
   apiBase: string,
@@ -226,6 +227,8 @@ export default function BigQueryTab() {
           {error instanceof Error ? error.message : "Falha ao carregar dados."}
         </p>
       ) : null}
+
+      <BqLimitCard apiBase={apiBase} userEmail={undefined} />
 
       <section className="bqCostKpis">
         <CostKpi

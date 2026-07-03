@@ -6,7 +6,12 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query
 
-from backend.models.gcp_billing import GcpBillingDashboardResponse
+from backend.models.gcp_billing import (
+    GcpBillingComparisonResponse,
+    GcpBillingDashboardResponse,
+    GcpBillingDayDetailResponse,
+    GcpBillingDaySkusResponse,
+)
 from backend.services import gcp_billing_service
 
 logger = logging.getLogger(__name__)
@@ -43,4 +48,93 @@ async def get_dashboard(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Falha ao montar dashboard de GCP Billing.")
+        raise HTTPException(status_code=502, detail=f"Falha na consulta: {exc}") from exc
+
+
+@router.get("/day-detail", response_model=GcpBillingDayDetailResponse)
+async def get_day_detail(
+    day: str | None = Query(
+        default=None,
+        alias="date",
+        description="Dia a detalhar (YYYY-MM-DD).",
+    ),
+    no_cache: bool = Query(default=False),
+) -> GcpBillingDayDetailResponse:
+    if not gcp_billing_service.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Integração GCP Billing desabilitada (configure GCP_BILLING_TABLE e credenciais BQ).",
+        )
+    try:
+        return await gcp_billing_service.build_day_detail(
+            date_str=day,
+            use_cache=not no_cache,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Falha ao montar detalhamento diário de GCP Billing.")
+        raise HTTPException(status_code=502, detail=f"Falha na consulta: {exc}") from exc
+
+
+@router.get("/compare", response_model=GcpBillingComparisonResponse)
+async def get_comparison(
+    from_date: str | None = Query(
+        default=None,
+        alias="from",
+        description="Início do intervalo atual (YYYY-MM-DD).",
+    ),
+    to_date: str | None = Query(
+        default=None,
+        alias="to",
+        description="Fim do intervalo atual (YYYY-MM-DD).",
+    ),
+    no_cache: bool = Query(default=False),
+) -> GcpBillingComparisonResponse:
+    if not gcp_billing_service.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Integração GCP Billing desabilitada (configure GCP_BILLING_TABLE e credenciais BQ).",
+        )
+    try:
+        return await gcp_billing_service.build_comparison(
+            from_str=from_date,
+            to_str=to_date,
+            use_cache=not no_cache,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Falha ao comparar períodos de GCP Billing.")
+        raise HTTPException(status_code=502, detail=f"Falha na consulta: {exc}") from exc
+
+
+@router.get("/day-detail/skus", response_model=GcpBillingDaySkusResponse)
+async def get_day_service_skus(
+    day: str | None = Query(
+        default=None,
+        alias="date",
+        description="Dia (YYYY-MM-DD).",
+    ),
+    service_id: str | None = Query(
+        default=None,
+        description="ID do serviço GCP a detalhar.",
+    ),
+    no_cache: bool = Query(default=False),
+) -> GcpBillingDaySkusResponse:
+    if not gcp_billing_service.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Integração GCP Billing desabilitada (configure GCP_BILLING_TABLE e credenciais BQ).",
+        )
+    try:
+        return await gcp_billing_service.build_day_service_skus(
+            date_str=day,
+            service_id=service_id,
+            use_cache=not no_cache,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Falha ao montar SKUs do serviço no dia.")
         raise HTTPException(status_code=502, detail=f"Falha na consulta: {exc}") from exc

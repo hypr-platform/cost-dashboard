@@ -265,6 +265,18 @@
   flex-wrap: wrap;
 }
 
+.gcpTimelineTitleGroup {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.gcpTimelineHint {
+  font-size: 11px;
+  color: #888;
+}
+
 .gcpTimelineControls {
   display: flex;
   align-items: center;
@@ -630,4 +642,581 @@
   background-size: 200% 100%;
   animation: claudeShimmer 1.4s ease-in-out infinite;
   margin-top: 4px;
+}
+
+/* --- Modal de detalhamento diário (drill-down do gráfico) --- */
+.gcpDayModalOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+  animation: gcpDayModalFade 0.15s ease-out;
+}
+
+@keyframes gcpDayModalFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.gcpDayModal {
+  width: 100%;
+  max-width: 1040px;
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  border-radius: 12px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  animation: gcpDayModalRise 0.18s ease-out;
+  overflow: hidden;
+}
+
+@keyframes gcpDayModalRise {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.gcpDayModalHeader {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px 24px;
+  border-bottom: 1px solid #222;
+}
+
+.gcpDayModalTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gcpDayModalClose {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: none;
+  color: #888;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.gcpDayModalClose:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #ededed;
+  border-color: #3a3a3a;
+}
+
+.gcpDayModalBody {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 24px;
+}
+
+/* Linha de tabela clicável (drill-down) */
+.claudeTableRowClickable {
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.claudeTableRowClickable:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* Sub-view de drill-down encadeado (SKUs de um serviço) */
+.gcpDrillView {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.gcpDrillBack {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: #aaa;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.gcpDrillBack:hover {
+  color: #ededed;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ----------------------------------------------------------------------- */
+/* Limite diário de gasto (aba BigQuery)                                    */
+/* ----------------------------------------------------------------------- */
+
+.bqLimitCard {
+  --bqTone: #6b7280;
+  --bqToneSoft: rgba(148, 163, 184, 0.14);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: 12px;
+  background: #141414;
+  border: 1px solid #232323;
+  overflow: hidden;
+}
+
+.bqLimitCard::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--bqTone);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.bqLimitTone-ok {
+  --bqTone: #34d399;
+  --bqToneSoft: rgba(52, 211, 153, 0.14);
+}
+.bqLimitTone-warn {
+  --bqTone: #fbbf24;
+  --bqToneSoft: rgba(251, 191, 36, 0.14);
+}
+.bqLimitTone-danger {
+  --bqTone: #f87171;
+  --bqToneSoft: rgba(248, 113, 113, 0.16);
+}
+.bqLimitTone-warn::before,
+.bqLimitTone-danger::before {
+  opacity: 1;
+}
+
+.bqLimitTopRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.bqLimitEyebrowWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bqLimitEyebrow {
+  font-size: 11px;
+  color: #8a8a8a;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+}
+
+.bqLimitPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--bqTone);
+  background: var(--bqToneSoft);
+  letter-spacing: 0.01em;
+}
+
+.bqLimitPillDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bqTone);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bqTone) 20%, transparent);
+}
+
+.bqLimitTopActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bqLimitEnforce {
+  font-size: 10.5px;
+  color: #777;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border: 0.5px solid #2c2c2c;
+  border-radius: 999px;
+  cursor: help;
+}
+
+.bqLimitValueRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bqLimitSpent {
+  font-size: 30px;
+  font-weight: 600;
+  color: #f3f3f3;
+  letter-spacing: -0.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.bqLimitOfLimit {
+  font-size: 13px;
+  color: #7c7c7c;
+  font-variant-numeric: tabular-nums;
+}
+
+.bqLimitPct {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bqTone);
+  font-variant-numeric: tabular-nums;
+}
+
+.bqLimitMeter {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: #202020;
+  overflow: visible;
+}
+
+.bqLimitMeterFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--bqTone);
+  transition: width 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--bqTone) 40%, transparent);
+}
+
+.bqLimitMeterProjected {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  transform: translateX(-1px);
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.55) 0 2px,
+    transparent 2px 4px
+  );
+  border-radius: 2px;
+}
+
+.bqLimitStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px 20px;
+  padding-top: 2px;
+}
+
+.bqLimitStat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.bqLimitStatLabel {
+  font-size: 10.5px;
+  color: #7c7c7c;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.bqLimitStatValue {
+  font-size: 14px;
+  color: #dcdcdc;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.bqLimitFootnote {
+  margin: 0;
+  font-size: 11px;
+  color: #5c5c5c;
+}
+
+.bqLimitError {
+  margin: 0;
+  font-size: 12px;
+  color: #fda4a4;
+}
+
+/* Empty state */
+.bqLimitEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.bqLimitEmptyText {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #a2a2a2;
+  max-width: 62ch;
+}
+.bqLimitEmptyText strong {
+  color: #ededed;
+  font-weight: 600;
+}
+
+/* Edit form */
+.bqLimitEditForm {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.bqLimitFields {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.bqLimitField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bqLimitFieldNarrow {
+  width: 120px;
+}
+
+.bqLimitFieldLabel {
+  font-size: 11px;
+  color: #8a8a8a;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.bqLimitInputWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #0d0d0d;
+  border: 1px solid #2f2f2f;
+  border-radius: 8px;
+  padding: 0 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.bqLimitInputWrap:focus-within {
+  border-color: #4b4b4b;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.04);
+}
+
+.bqLimitInputPrefix {
+  font-size: 14px;
+  color: #6f6f6f;
+  font-variant-numeric: tabular-nums;
+}
+
+.bqLimitInput {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #ededed;
+  font-size: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  padding: 10px 0;
+  width: 160px;
+}
+.bqLimitInput::placeholder {
+  color: #555;
+}
+
+.bqLimitInputNarrow {
+  width: 100%;
+  padding: 10px 12px;
+  background: #0d0d0d;
+  border: 1px solid #2f2f2f;
+  border-radius: 8px;
+  font-size: 15px;
+}
+.bqLimitInputNarrow:focus {
+  border-color: #4b4b4b;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.04);
+}
+
+.bqLimitActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bqLimitBtn {
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+  font-family: inherit;
+}
+.bqLimitBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.bqLimitBtnSm {
+  padding: 5px 11px;
+  font-size: 12px;
+}
+
+.bqLimitBtnPrimary {
+  background: #ededed;
+  color: #0a0a0a;
+}
+.bqLimitBtnPrimary:not(:disabled):hover {
+  background: #ffffff;
+}
+
+.bqLimitBtnGhost {
+  background: transparent;
+  border-color: #333;
+  color: #c4c4c4;
+}
+.bqLimitBtnGhost:not(:disabled):hover {
+  border-color: #4b4b4b;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.bqLimitBtnDanger {
+  background: transparent;
+  color: #f87171;
+  margin-left: auto;
+}
+.bqLimitBtnDanger:not(:disabled):hover {
+  background: rgba(248, 113, 113, 0.1);
+}
+
+.bqLimitValueSkeleton {
+  height: 30px;
+  width: 220px;
+  border-radius: 8px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.02),
+    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0.02)
+  );
+  background-size: 200% 100%;
+  animation: claudeShimmer 1.4s ease-in-out infinite;
+}
+
+/* Enforcement (bloqueio real via quota do GCP) */
+.bqLimitEnforceChip {
+  --chipTone: #fbbf24;
+  --chipSoft: rgba(251, 191, 36, 0.14);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--chipTone);
+  background: var(--chipSoft);
+  cursor: help;
+}
+.bqLimitEnforceChip[data-tone="ok"] {
+  --chipTone: #34d399;
+  --chipSoft: rgba(52, 211, 153, 0.14);
+}
+.bqLimitEnforceChip[data-tone="danger"] {
+  --chipTone: #f87171;
+  --chipSoft: rgba(248, 113, 113, 0.16);
+}
+
+.bqLimitBlockNote {
+  --noteTone: #fbbf24;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #c9c9c9;
+  background: rgba(255, 255, 255, 0.025);
+  border: 0.5px solid rgba(255, 255, 255, 0.06);
+}
+.bqLimitBlockNote svg {
+  color: var(--noteTone);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.bqLimitBlockNote[data-tone="ok"] {
+  --noteTone: #34d399;
+}
+.bqLimitBlockNote[data-tone="danger"] {
+  --noteTone: #f87171;
+  border-color: rgba(248, 113, 113, 0.22);
+  background: rgba(248, 113, 113, 0.06);
+}
+.bqLimitBlockNote strong {
+  color: #ededed;
+  font-weight: 600;
+}
+
+.bqLimitEditHint {
+  margin: 0;
+  font-size: 12px;
+  color: #8a8a8a;
+}
+
+.bqLimitWarn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #fbbf24;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.08);
+  border: 0.5px solid rgba(251, 191, 36, 0.22);
 }

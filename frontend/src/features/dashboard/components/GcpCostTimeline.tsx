@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactElement } from "react";
 import {
   AreaChart,
   Area,
@@ -9,6 +9,7 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
+  type MouseHandlerDataParam,
 } from "recharts";
 import type { GcpBillingDailyPoint } from "@/services/api/gcp-billing";
 
@@ -16,6 +17,8 @@ type Granularity = "day" | "week" | "month" | "year";
 
 type Props = {
   daily: GcpBillingDailyPoint[];
+  /** Chamado ao clicar em um dia (só disponível na granularidade "Dia"). */
+  onDaySelect?: (isoDay: string) => void;
 };
 
 function isoWeek(dateStr: string): string {
@@ -53,10 +56,9 @@ function bucketLabel(key: string, g: Granularity): string {
   return key;
 }
 
-function aggregate(
-  daily: GcpBillingDailyPoint[],
-  g: Granularity,
-): { label: string; usd: number; brl: number }[] {
+type ChartPoint = { key: string; label: string; usd: number; brl: number };
+
+function aggregate(daily: GcpBillingDailyPoint[], g: Granularity): ChartPoint[] {
   const map = new Map<string, { usd: number; brl: number }>();
   for (const p of daily) {
     const k = bucketKey(p.day, g);
@@ -68,7 +70,7 @@ function aggregate(
   }
   return Array.from(map.entries())
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => ({ label: bucketLabel(k, g), usd: v.usd, brl: v.brl }));
+    .map(([k, v]) => ({ key: k, label: bucketLabel(k, g), usd: v.usd, brl: v.brl }));
 }
 
 const GRANULARITIES: { key: Granularity; label: string }[] = [
@@ -85,6 +87,8 @@ const CURRENCY_OPTIONS = [
 
 type Currency = "brl" | "usd";
 
+const ANOMALY_COLOR = "#f06292";
+
 function formatTick(value: number, currency: Currency): string {
   if (value >= 1_000_000)
     return `${currency === "brl" ? "R$" : "US$"} ${(value / 1_000_000).toFixed(1)}M`;
@@ -93,7 +97,24 @@ function formatTick(value: number, currency: Currency): string {
   return `${currency === "brl" ? "R$" : "US$"} ${value.toFixed(0)}`;
 }
 
-export default function GcpCostTimeline({ daily }: Props) {
+/** Dias fora do padrão: valor acima de (média móvel + 2σ) das amostras anteriores.
+ * Só sinaliza picos (para cima) — que é o que dispara investigação de custo. */
+function computeAnomalies(points: ChartPoint[], key: "usd" | "brl"): Set<number> {
+  const out = new Set<number>();
+  for (let i = 0; i < points.length; i++) {
+    const prev = points.slice(Math.max(0, i - 7), i).map((p) => p[key]);
+    if (prev.length < 4) continue;
+    const mean = prev.reduce((a, b) => a + b, 0) / prev.length;
+    const variance =
+      prev.reduce((a, b) => a + (b - mean) ** 2, 0) / prev.length;
+    const std = Math.sqrt(variance);
+    if (std <= 0) continue;
+    if (points[i][key] > mean + 2 * std) out.add(i);
+  }
+  return out;
+}
+
+export default function GcpCostTimeline({ daily, onDaySelect }: Props) {
   const [granularity, setGranularity] = useState<Granularity>("day");
   const [currency, setCurrency] = useState<Currency>("brl");
 
@@ -105,10 +126,59 @@ export default function GcpCostTimeline({ daily }: Props) {
   const dataKey = currency === "brl" ? "brl" : "usd";
   const prefix = currency === "brl" ? "R$" : "US$";
 
+  const anomalies = useMemo(
+    () => computeAnomalies(points, dataKey),
+    [points, dataKey],
+  );
+
+  // Drill-down só faz sentido na granularidade "Dia" — nos demais buckets o
+  // ponto agrega vários dias e não há uma data única para detalhar.
+  const clickable = granularity === "day" && Boolean(onDaySelect);
+
+  function handleChartClick(state: MouseHandlerDataParam) {
+    if (!clickable) return;
+    const idx = Number(state?.activeIndex);
+    const point = Number.isInteger(idx) ? points[idx] : undefined;
+    if (point) onDaySelect?.(point.key);
+  }
+
+  function renderDot(props: {
+    cx?: number;
+    cy?: number;
+    index?: number;
+  }): ReactElement {
+    const { cx, cy, index } = props;
+    if (index == null || cx == null || cy == null || !anomalies.has(index)) {
+      return <g key={`dot-${index}`} />;
+    }
+    return (
+      <circle
+        key={`dot-${index}`}
+        cx={cx}
+        cy={cy}
+        r={4}
+        fill={ANOMALY_COLOR}
+        stroke="#141414"
+        strokeWidth={1.5}
+      />
+    );
+  }
+
   return (
     <section className="claudeTableCard gcpTimeline">
       <div className="gcpTimelineHeader">
-        <h2 className="claudeTableTitle">Custo ao longo do tempo</h2>
+        <div className="gcpTimelineTitleGroup">
+          <h2 className="claudeTableTitle">Custo ao longo do tempo</h2>
+          {clickable ? (
+            <span className="gcpTimelineHint">Clique em um dia para detalhar</span>
+          ) : null}
+          {anomalies.size > 0 ? (
+            <span className="gcpTimelineHint" style={{ color: ANOMALY_COLOR }}>
+              ● {anomalies.size}{" "}
+              {anomalies.size === 1 ? "dia fora do padrão" : "dias fora do padrão"}
+            </span>
+          ) : null}
+        </div>
         <div className="gcpTimelineControls">
           <div className="gcpServiceTabs">
             {CURRENCY_OPTIONS.map((c) => (
@@ -138,7 +208,12 @@ export default function GcpCostTimeline({ daily }: Props) {
       </div>
 
       <ResponsiveContainer width="100%" height={220}>
-        <AreaChart data={points} margin={{ top: 4, right: 4, left: 0, bottom: 0 }}>
+        <AreaChart
+          data={points}
+          margin={{ top: 4, right: 4, left: 0, bottom: 0 }}
+          onClick={handleChartClick}
+          style={clickable ? { cursor: "pointer" } : undefined}
+        >
           <defs>
             <linearGradient id="gcpAreaGrad" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="#7c6af7" stopOpacity={0.25} />
@@ -187,7 +262,7 @@ export default function GcpCostTimeline({ daily }: Props) {
             stroke="#7c6af7"
             strokeWidth={1.5}
             fill="url(#gcpAreaGrad)"
-            dot={false}
+            dot={renderDot}
             activeDot={{ r: 3, fill: "#7c6af7", strokeWidth: 0 }}
           />
         </AreaChart>

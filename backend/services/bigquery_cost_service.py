@@ -16,15 +16,18 @@ import os
 import threading
 import time
 from collections import defaultdict
-from datetime import date, datetime, time as dtime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from google.cloud import bigquery
 
 from backend import bigquery_store
+from backend.services import gcp_quota
 from backend.models.bigquery_cost import (
     BqCostDashboardResponse,
+    BqCostLimitStatus,
     BqCostQueryRow,
     BqCostStatementRow,
     BqCostTableRow,
@@ -42,6 +45,21 @@ DEFAULT_TOP_QUERIES = 10
 DEFAULT_TOP_TABLES = 25
 QUERY_PREVIEW_CHARS = 500
 BYTES_PER_TIB = Decimal(2**40)
+
+# Limite diário de gasto (escopo projeto). O dia reseta à meia-noite do fuso de
+# billing (Pacífico), alinhado ao reset da quota "Query usage per day" do GCP.
+BQ_LIMIT_SCOPE = "project"
+DEFAULT_WARN_PCT = Decimal("80")
+BILLING_TZ = os.getenv("BILLING_TZ") or "America/Los_Angeles"
+_LIMIT_TZ = ZoneInfo(BILLING_TZ)
+_LIMIT_STATUS_TTL = 45  # segundos: evita reconsultar INFORMATION_SCHEMA a cada poll
+# Preço usado para converter R$ <-> bytes no limite. O grosso do gasto é em
+# southamerica-east1 (on-demand ~US$8.44/TiB); o billing real de hoje bate com
+# esse valor, não com o flat 6.25 das tabelas do dashboard. Override via env.
+DEFAULT_ENFORCE_USD_PER_TIB = Decimal("8.44")
+MIB_PER_TIB = Decimal(1024 * 1024)
+# Tolerância ao comparar o override aplicado no GCP com o esperado (arredondamentos).
+_QUOTA_MATCH_TOLERANCE = Decimal("0.01")
 
 
 def is_enabled() -> bool:
@@ -463,3 +481,249 @@ async def build_dashboard(
 
     _cache_put(cache_key, response)
     return response
+
+
+# --------------------------------------------------------------------------- #
+# Limite diário de gasto (configurável pela aba BigQuery)
+# --------------------------------------------------------------------------- #
+
+_limit_status_lock = threading.Lock()
+_limit_status_cache: tuple[float, BqCostLimitStatus] | None = None
+
+
+def _clear_limit_status_cache() -> None:
+    global _limit_status_cache
+    with _limit_status_lock:
+        _limit_status_cache = None
+
+
+def _enforce_price_per_tib() -> Decimal:
+    raw = (os.getenv("BQ_ENFORCE_USD_PER_TIB") or "").strip()
+    if not raw:
+        return DEFAULT_ENFORCE_USD_PER_TIB
+    try:
+        value = Decimal(raw)
+        return value if value > 0 else DEFAULT_ENFORCE_USD_PER_TIB
+    except Exception:
+        return DEFAULT_ENFORCE_USD_PER_TIB
+
+
+def _brl_to_tib(brl: Decimal, price_per_tib: Decimal, rate: Decimal) -> Decimal:
+    """R$ -> TiB usando o preço on-demand e o câmbio."""
+    denom = price_per_tib * rate
+    if denom <= 0:
+        return Decimal("0")
+    return (brl / denom)
+
+
+def _brl_to_mib(brl: Decimal, price_per_tib: Decimal, rate: Decimal) -> int:
+    return int((_brl_to_tib(brl, price_per_tib, rate) * MIB_PER_TIB).to_integral_value())
+
+
+def get_limit() -> dict[str, Any] | None:
+    """Config atual do limite (limit_brl, warn_pct, updated_at, updated_by) ou None."""
+    return bigquery_store.read_bq_limit(BQ_LIMIT_SCOPE)
+
+
+def set_limit(
+    limit_brl: float,
+    *,
+    warn_pct: float | None = None,
+    updated_by: str | None = None,
+) -> str | None:
+    """Persiste o limite e aplica o bloqueio na quota do GCP.
+
+    Retorna None em sucesso; em falha de enforcement, retorna a mensagem de erro
+    (o limite fica salvo e monitorando, mas sem bloqueio efetivo).
+    """
+    if limit_brl <= 0:
+        raise ValueError("limit_brl deve ser maior que zero.")
+    warn = DEFAULT_WARN_PCT if warn_pct is None else Decimal(str(warn_pct))
+    if warn < 0 or warn > 100:
+        raise ValueError("warn_pct deve estar entre 0 e 100.")
+    bigquery_store.write_bq_limit_event(
+        BQ_LIMIT_SCOPE,
+        limit_brl=float(limit_brl),
+        warn_pct=float(warn),
+        is_deleted=False,
+        updated_by=updated_by,
+        source="api_put",
+    )
+    _clear_limit_status_cache()
+
+    # Aplica o bloqueio efetivo (consumer override na quota do BigQuery).
+    enforce_error: str | None = None
+    try:
+        price = _enforce_price_per_tib()
+        rate = get_exchange_rate(datetime.now(_LIMIT_TZ).date())
+        mib = _brl_to_mib(Decimal(str(limit_brl)), price, rate)
+        if mib <= 0:
+            raise RuntimeError("Conversão R$->MiB resultou em zero.")
+        gcp_quota.set_daily_limit_mib(mib)
+    except Exception as exc:  # noqa: BLE001 — enforcement não deve derrubar o PUT
+        enforce_error = str(exc)
+        logger.exception("Falha ao aplicar bloqueio de quota do BigQuery.")
+    return enforce_error
+
+
+def clear_limit(updated_by: str | None = None) -> bool:
+    had_limit = get_limit() is not None
+    # Sempre tenta remover o override do GCP (mesmo sem registro local, para não
+    # deixar o projeto travado por um override órfão).
+    try:
+        gcp_quota.clear_daily_limit()
+    except Exception:  # noqa: BLE001
+        logger.exception("Falha ao remover bloqueio de quota do BigQuery.")
+    if not had_limit:
+        _clear_limit_status_cache()
+        return False
+    bigquery_store.write_bq_limit_event(
+        BQ_LIMIT_SCOPE,
+        limit_brl=None,
+        warn_pct=None,
+        is_deleted=True,
+        updated_by=updated_by,
+        source="api_delete",
+    )
+    _clear_limit_status_cache()
+    return True
+
+
+def _spent_today_bytes(client: bigquery.Client, project: str, regions: tuple[str, ...], start_ts: datetime) -> int:
+    """Soma total_bytes_billed do dia (a partir de start_ts) nas regiões configuradas."""
+    total = 0
+    for region in regions:
+        sql = f"""
+SELECT IFNULL(SUM(total_bytes_billed), 0) AS bytes_billed
+FROM {_table_ref(project, region)}
+WHERE job_type = 'QUERY'
+  AND creation_time >= @from_ts
+  AND total_bytes_billed > 0
+""".strip()
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[bigquery.ScalarQueryParameter("from_ts", "TIMESTAMP", start_ts)]
+        )
+        rows = list(client.query(sql, job_config=job_config).result(timeout=_BQ_QUERY_TIMEOUT_SECONDS))
+        if rows:
+            total += int(rows[0].get("bytes_billed") or 0)
+    return total
+
+
+def build_limit_status(use_cache: bool = True) -> BqCostLimitStatus:
+    """Estado do limite diário: gasto de hoje vs. limite, com projeção de fim de dia."""
+    if not is_enabled():
+        raise RuntimeError(
+            "Integração BigQuery desabilitada: configure BQ_PROJECT_ID e GCP_CREDS_JSON_CREDS_BASE64."
+        )
+
+    global _limit_status_cache
+    if use_cache:
+        with _limit_status_lock:
+            if _limit_status_cache is not None:
+                ts, payload = _limit_status_cache
+                if time.time() - ts <= _LIMIT_STATUS_TTL:
+                    return payload
+
+    now_local = datetime.now(_LIMIT_TZ)
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_ts = start_local.astimezone(timezone.utc)
+    day = start_local.date()
+    elapsed = (now_local - start_local).total_seconds()
+    fraction = max(Decimal("0.0001"), min(Decimal("1"), Decimal(str(elapsed / 86400.0))))
+
+    regions = _configured_regions()
+    price_per_tib = _enforce_price_per_tib()
+    rate = get_exchange_rate(day)
+
+    client = bigquery_store._get_client()
+    project = bigquery_store._project_id()
+    spent_bytes = _spent_today_bytes(client, project, regions, start_ts)
+
+    spent_usd = _bytes_to_usd(spent_bytes, price_per_tib)
+    spent_brl = (spent_usd * rate).quantize(Decimal("0.01"))
+    projected_brl = (spent_brl / fraction).quantize(Decimal("0.01"))
+
+    stored = get_limit()
+    limit_brl: Decimal | None = None
+    warn_pct = DEFAULT_WARN_PCT
+    updated_at = None
+    updated_by = None
+    if stored is not None:
+        limit_brl = Decimal(str(stored["limit_brl"])).quantize(Decimal("0.01"))
+        if stored.get("warn_pct") is not None:
+            warn_pct = Decimal(str(stored["warn_pct"]))
+        updated_at = stored.get("updated_at")
+        updated_by = stored.get("updated_by")
+
+    pct_used: Decimal | None = None
+    if limit_brl is None or limit_brl <= 0:
+        status = "unset"
+    else:
+        pct_used = (spent_brl / limit_brl * Decimal("100")).quantize(Decimal("0.1"))
+        if spent_brl >= limit_brl:
+            status = "exceeded"
+        elif pct_used >= warn_pct:
+            status = "warning"
+        elif projected_brl >= limit_brl:
+            status = "projected"
+        else:
+            status = "ok"
+
+    # Cap esperado em MiB/TiB e estado real da quota do GCP (bloqueio efetivo).
+    enforced_limit_mib: int | None = None
+    enforced_limit_tib: Decimal | None = None
+    if limit_brl is not None and limit_brl > 0:
+        enforced_limit_mib = _brl_to_mib(limit_brl, price_per_tib, rate)
+        enforced_limit_tib = (Decimal(enforced_limit_mib) / MIB_PER_TIB).quantize(Decimal("0.01"))
+
+    enforcement = "off"
+    enforce_error: str | None = None
+    quota_effective_tib: Decimal | None = None
+    try:
+        q = gcp_quota.get_status()
+        if q.get("effective_mib") is not None:
+            quota_effective_tib = (Decimal(q["effective_mib"]) / MIB_PER_TIB).quantize(Decimal("0.01"))
+        override_mib = q.get("consumer_override_mib")
+        if limit_brl is None or limit_brl <= 0:
+            enforcement = "stray" if override_mib is not None else "off"
+        elif override_mib is None:
+            enforcement = "off"  # limite salvo mas quota não aplicada
+        elif enforced_limit_mib and abs(Decimal(override_mib) - Decimal(enforced_limit_mib)) <= (
+            Decimal(enforced_limit_mib) * _QUOTA_MATCH_TOLERANCE
+        ):
+            enforcement = "enforced"
+        else:
+            enforcement = "drift"  # override existe mas diverge do limite atual
+    except Exception as exc:  # noqa: BLE001
+        enforcement = "error"
+        enforce_error = str(exc)
+        logger.warning("Falha ao consultar quota do GCP para status do limite: %s", exc)
+
+    payload = BqCostLimitStatus(
+        day=day,
+        timezone=BILLING_TZ,
+        regions=list(regions),
+        limit_brl=limit_brl,
+        warn_pct=warn_pct,
+        spent_brl=spent_brl,
+        spent_bytes=spent_bytes,
+        spent_usd=spent_usd.quantize(Decimal("0.01")),
+        projected_brl=projected_brl,
+        pct_used=pct_used,
+        day_fraction_elapsed=fraction.quantize(Decimal("0.0001")),
+        status=status,
+        enforcement=enforcement,
+        enforced_limit_mib=enforced_limit_mib,
+        enforced_limit_tib=enforced_limit_tib,
+        quota_effective_tib=quota_effective_tib,
+        enforce_error=enforce_error,
+        exchange_rate=rate.quantize(Decimal("0.0001")),
+        price_usd_per_tib=price_per_tib,
+        updated_at=updated_at,
+        updated_by=updated_by,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    with _limit_status_lock:
+        _limit_status_cache = (time.time(), payload)
+    return payload

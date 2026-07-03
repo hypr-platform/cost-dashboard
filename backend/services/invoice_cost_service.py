@@ -45,6 +45,11 @@ DEFAULT_MAX_RANGE_DAYS = 92
 BILLING_TZ = os.getenv("BILLING_TZ") or "America/Los_Angeles"
 _TZ = ZoneInfo(BILLING_TZ)
 
+# Fuso de agrupamento das notas — o frontend manda `to=todayKey()` em UTC, então
+# UTC mantém alinhamento com a janela enviada pela UI. Pode ser sobrescrito
+# (ex.: "America/Sao_Paulo") sem afetar o agrupamento dos custos.
+INVOICES_TZ = os.getenv("INVOICES_TZ") or "UTC"
+
 
 def _pst_bounds(from_d: date, to_d: date) -> tuple[datetime, datetime]:
     """Instantes UTC correspondentes à meia-noite do fuso de billing
@@ -169,9 +174,9 @@ def _q8(v: Decimal) -> Decimal:
 
 def _query_invoices(table: str) -> str:
     return f"""
-SELECT DATE(processed_at, '{BILLING_TZ}') AS dia, COUNT(*) AS total
+SELECT DATE(processed_at, '{INVOICES_TZ}') AS dia, COUNT(*) AS total
 FROM `{table}`
-WHERE DATE(processed_at, '{BILLING_TZ}') BETWEEN @from_d AND @to_d
+WHERE DATE(processed_at, '{INVOICES_TZ}') BETWEEN @from_d AND @to_d
 GROUP BY dia
 """.strip()
 

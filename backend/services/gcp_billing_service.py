@@ -28,11 +28,15 @@ from googleapiclient.discovery import build as gapi_build
 
 from backend import bigquery_store
 from backend.models.gcp_billing import (
+    GcpBillingComparisonResponse,
     GcpBillingDailyPoint,
     GcpBillingDashboardResponse,
+    GcpBillingDayDetailResponse,
+    GcpBillingDaySkusResponse,
     GcpBillingProjectRow,
     GcpBillingServiceRow,
     GcpBillingSkuRow,
+    GcpServiceDeltaRow,
     GcpCloudRunByLabelRow,
 )
 from backend.services.exchange_rate import get_exchange_rate
@@ -101,6 +105,9 @@ def _max_range_days() -> int:
 
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, GcpBillingDashboardResponse]] = {}
+_day_cache: dict[str, tuple[float, GcpBillingDayDetailResponse]] = {}
+_day_skus_cache: dict[str, tuple[float, GcpBillingDaySkusResponse]] = {}
+_cmp_cache: dict[str, tuple[float, GcpBillingComparisonResponse]] = {}
 
 
 def _cache_get(key: str) -> GcpBillingDashboardResponse | None:
@@ -125,9 +132,78 @@ def _cache_put(key: str, payload: GcpBillingDashboardResponse) -> None:
         _cache[key] = (time.time(), payload)
 
 
+def _day_cache_get(key: str) -> GcpBillingDayDetailResponse | None:
+    ttl = _cache_ttl()
+    if ttl <= 0:
+        return None
+    with _cache_lock:
+        entry = _day_cache.get(key)
+        if entry is None:
+            return None
+        ts, payload = entry
+        if time.time() - ts > ttl:
+            _day_cache.pop(key, None)
+            return None
+        return payload
+
+
+def _day_cache_put(key: str, payload: GcpBillingDayDetailResponse) -> None:
+    if _cache_ttl() <= 0:
+        return
+    with _cache_lock:
+        _day_cache[key] = (time.time(), payload)
+
+
+def _day_skus_cache_get(key: str) -> GcpBillingDaySkusResponse | None:
+    ttl = _cache_ttl()
+    if ttl <= 0:
+        return None
+    with _cache_lock:
+        entry = _day_skus_cache.get(key)
+        if entry is None:
+            return None
+        ts, payload = entry
+        if time.time() - ts > ttl:
+            _day_skus_cache.pop(key, None)
+            return None
+        return payload
+
+
+def _day_skus_cache_put(key: str, payload: GcpBillingDaySkusResponse) -> None:
+    if _cache_ttl() <= 0:
+        return
+    with _cache_lock:
+        _day_skus_cache[key] = (time.time(), payload)
+
+
+def _cmp_cache_get(key: str) -> GcpBillingComparisonResponse | None:
+    ttl = _cache_ttl()
+    if ttl <= 0:
+        return None
+    with _cache_lock:
+        entry = _cmp_cache.get(key)
+        if entry is None:
+            return None
+        ts, payload = entry
+        if time.time() - ts > ttl:
+            _cmp_cache.pop(key, None)
+            return None
+        return payload
+
+
+def _cmp_cache_put(key: str, payload: GcpBillingComparisonResponse) -> None:
+    if _cache_ttl() <= 0:
+        return
+    with _cache_lock:
+        _cmp_cache[key] = (time.time(), payload)
+
+
 def clear_cache() -> None:
     with _cache_lock:
         _cache.clear()
+        _day_cache.clear()
+        _day_skus_cache.clear()
+        _cmp_cache.clear()
 
 
 def _parse_date(value: str | None, *, field: str) -> date:
@@ -221,6 +297,25 @@ LIMIT {int(top_n)}
 """.strip()
 
 
+def _query_by_sku_for_service(table: str, top_n: int) -> str:
+    """SKUs de um único serviço (drill-down do detalhamento do dia)."""
+    return f"""
+SELECT
+  sku.id AS sku_id,
+  ANY_VALUE(sku.description) AS sku_description,
+  ANY_VALUE(service.description) AS service_description,
+  SUM({_NET_COST_EXPR}) AS net_cost,
+  SUM(usage.amount) AS usage_amount,
+  ANY_VALUE(usage.unit) AS usage_unit
+FROM `{table}`
+WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
+  AND service.id = @service_id
+GROUP BY sku_id
+ORDER BY net_cost DESC
+LIMIT {int(top_n)}
+""".strip()
+
+
 def _query_daily(table: str) -> str:
     return f"""
 SELECT
@@ -307,6 +402,101 @@ def _fetch_cpu_by_service(
     return out
 
 
+_REQUEST_METRIC = "run.googleapis.com/request_count"
+_LATENCY_METRIC = "run.googleapis.com/request_latencies"
+
+
+def _point_value(p: dict[str, Any]) -> float:
+    v = p["value"].get("doubleValue")
+    if v is None:
+        v = float(p["value"].get("int64Value", 0))
+    return float(v)
+
+
+def _fetch_request_stats_by_service(
+    project_id: str,
+    credentials: service_account.Credentials,
+    from_d: date,
+    to_d: date,
+) -> dict[str, dict[str, float]]:
+    """stats[service] = {total, err_4xx, err_5xx} de requests no período.
+
+    `request_count` é DELTA por revisão. Agregamos com ALIGN_SUM/REDUCE_SUM por
+    (service_name, response_code_class) numa única janela, e derivamos daí tanto
+    o total (para custo por request) quanto os erros (para a taxa de erro).
+    """
+    mon = gapi_build("monitoring", "v3", credentials=credentials, cache_discovery=False)
+    start, end = _tz_bounds(from_d, to_d)
+    window_s = max(60, int((end - start).total_seconds()))
+    resp = mon.projects().timeSeries().list(
+        name=f"projects/{project_id}",
+        filter=f'metric.type="{_REQUEST_METRIC}"',
+        interval_startTime=start.isoformat(),
+        interval_endTime=end.isoformat(),
+        aggregation_alignmentPeriod=f"{window_s}s",
+        aggregation_perSeriesAligner="ALIGN_SUM",
+        aggregation_groupByFields=[
+            "resource.labels.service_name",
+            "metric.labels.response_code_class",
+        ],
+        aggregation_crossSeriesReducer="REDUCE_SUM",
+    ).execute()
+    out: dict[str, dict[str, float]] = {}
+    for ts in resp.get("timeSeries", []):
+        svc = ts.get("resource", {}).get("labels", {}).get("service_name", "?")
+        code_class = str(ts.get("metric", {}).get("labels", {}).get("response_code_class", ""))
+        total = sum(_point_value(p) for p in ts.get("points", []))
+        bucket = out.setdefault(svc, {"total": 0.0, "err_4xx": 0.0, "err_5xx": 0.0})
+        bucket["total"] += total
+        if code_class == "4xx":
+            bucket["err_4xx"] += total
+        elif code_class == "5xx":
+            bucket["err_5xx"] += total
+    return out
+
+
+_LATENCY_PERCENTILES = (("p50", 50), ("p95", 95), ("p99", 99))
+
+
+def _fetch_latencies_by_service(
+    project_id: str,
+    credentials: service_account.Credentials,
+    from_d: date,
+    to_d: date,
+) -> dict[str, dict[str, float]]:
+    """latency[service] = {p50, p95, p99} em ms (Cloud Monitoring).
+
+    `request_latencies` é uma DISTRIBUTION por revisão. Para cada percentil
+    fazemos uma chamada com ALIGN_DELTA + REDUCE_PERCENTILE_N agrupando por
+    service_name — o reducer mescla os buckets das revisões e devolve o
+    percentil real da distribuição combinada da janela.
+    """
+    mon = gapi_build("monitoring", "v3", credentials=credentials, cache_discovery=False)
+    start, end = _tz_bounds(from_d, to_d)
+    window_s = max(60, int((end - start).total_seconds()))
+    out: dict[str, dict[str, float]] = {}
+    for label, pct in _LATENCY_PERCENTILES:
+        resp = mon.projects().timeSeries().list(
+            name=f"projects/{project_id}",
+            filter=f'metric.type="{_LATENCY_METRIC}"',
+            interval_startTime=start.isoformat(),
+            interval_endTime=end.isoformat(),
+            aggregation_alignmentPeriod=f"{window_s}s",
+            aggregation_perSeriesAligner="ALIGN_DELTA",
+            aggregation_groupByFields=["resource.labels.service_name"],
+            aggregation_crossSeriesReducer=f"REDUCE_PERCENTILE_{pct}",
+        ).execute()
+        for ts in resp.get("timeSeries", []):
+            svc = ts.get("resource", {}).get("labels", {}).get("service_name", "?")
+            points = ts.get("points", [])
+            if not points:
+                continue
+            # Janela única → normalmente 1 ponto; pega o mais recente.
+            value = _point_value(points[0])
+            out.setdefault(svc, {})[label] = value
+    return out
+
+
 def _query_currency(table: str) -> str:
     return f"""
 SELECT currency, COUNT(*) AS cnt
@@ -317,11 +507,68 @@ ORDER BY cnt DESC
 """.strip()
 
 
+def _resolve_currency_rates(
+    currency_rows: list[dict[str, Any]], to_d: date
+) -> tuple[str, Decimal, Any, Any]:
+    """Resolve a moeda nativa do billing export e os conversores para BRL/USD.
+
+    Prioridade: 1) env var GCP_BILLING_NATIVE_CURRENCY (override explícito)
+                2) coluna `currency` da tabela (auto-detecção pela mais frequente)
+                3) fallback "USD"
+
+    Retorna (native_currency, usd_rate, to_brl, to_usd).
+    """
+    override = _native_currency_override()
+    if override:
+        native_currency = override
+        logger.info(
+            "GCP billing currency: %s (via GCP_BILLING_NATIVE_CURRENCY override)",
+            native_currency,
+        )
+    else:
+        native_currency = "USD"
+        if currency_rows:
+            # currency_rows já ordenado por cnt DESC — pega a moeda mais frequente.
+            logger.warning("GCP billing currency distribution: %s", currency_rows)
+            dominant = str(currency_rows[0].get("currency") or "").strip().upper()
+            if dominant in ("BRL", "USD"):
+                native_currency = dominant
+        logger.warning("GCP billing native_currency resolved: %s", native_currency)
+
+    if native_currency == "BRL":
+        rate = Decimal("1")
+        usd_rate = get_exchange_rate(to_d)
+    else:
+        rate = get_exchange_rate(to_d)
+        usd_rate = rate
+
+    def to_brl(native: Decimal) -> Decimal:
+        return native if native_currency == "BRL" else _q2(native * rate)
+
+    def to_usd(native: Decimal) -> Decimal:
+        return _q2(native / usd_rate) if native_currency == "BRL" else native
+
+    return native_currency, usd_rate, to_brl, to_usd
+
+
 def _run_query(client: bigquery.Client, sql: str, from_ts: datetime, to_ts: datetime) -> list[dict[str, Any]]:
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("from_ts", "TIMESTAMP", from_ts),
             bigquery.ScalarQueryParameter("to_ts", "TIMESTAMP", to_ts),
+        ]
+    )
+    return [dict(row) for row in client.query(sql, job_config=job_config).result()]
+
+
+def _run_query_service(
+    client: bigquery.Client, sql: str, from_ts: datetime, to_ts: datetime, service_id: str
+) -> list[dict[str, Any]]:
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("from_ts", "TIMESTAMP", from_ts),
+            bigquery.ScalarQueryParameter("to_ts", "TIMESTAMP", to_ts),
+            bigquery.ScalarQueryParameter("service_id", "STRING", service_id),
         ]
     )
     return [dict(row) for row in client.query(sql, job_config=job_config).result()]
@@ -377,6 +624,24 @@ async def build_dashboard(
             logger.warning("Cloud Run CPU por service indisponível: %s", exc)
             return {}
 
+    def _fetch_request_stats() -> dict[str, dict[str, float]]:
+        if mon_credentials is None:
+            return {}
+        try:
+            return _fetch_request_stats_by_service(project_id_for_mon, mon_credentials, from_d, to_d)
+        except Exception as exc:  # Monitoring indisponível: degrada para vazio
+            logger.warning("Cloud Run request stats por service indisponível: %s", exc)
+            return {}
+
+    def _fetch_latencies() -> dict[str, dict[str, float]]:
+        if mon_credentials is None:
+            return {}
+        try:
+            return _fetch_latencies_by_service(project_id_for_mon, mon_credentials, from_d, to_d)
+        except Exception as exc:  # Monitoring indisponível: degrada para vazio
+            logger.warning("Cloud Run latências por service indisponível: %s", exc)
+            return {}
+
     loop = asyncio.get_running_loop()
     try:
         (
@@ -388,6 +653,8 @@ async def build_dashboard(
             cloud_run_region_rows,
             cloud_run_label_rows,
             cpu_by_service,
+            request_stats_by_service,
+            latencies_by_service,
         ) = await asyncio.gather(
             loop.run_in_executor(None, _run_query, client, sql_project, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_service, from_ts, to_ts),
@@ -397,44 +664,17 @@ async def build_dashboard(
             loop.run_in_executor(None, _run_query, client, sql_cloud_run_region, from_ts, to_ts),
             loop.run_in_executor(None, _run_query, client, sql_cloud_run_label, from_ts, to_ts),
             loop.run_in_executor(None, _fetch_cpu),
+            loop.run_in_executor(None, _fetch_request_stats),
+            loop.run_in_executor(None, _fetch_latencies),
         )
     except Exception as exc:
         logger.exception("Falha ao consultar GCP billing export.")
         raise RuntimeError(f"BigQuery falhou: {exc}") from exc
 
-    # Detecta a moeda nativa do billing export.
-    # Prioridade: 1) env var GCP_BILLING_NATIVE_CURRENCY (override explícito)
-    #             2) coluna `currency` da tabela (auto-detecção)
-    #             3) fallback "USD"
+    # Detecta a moeda nativa do billing export e resolve conversores BRL/USD.
     # ANY_VALUE(currency) pode ser não-determinístico em contas com linhas multi-moeda,
     # por isso o override via env var é preferível quando a moeda é conhecida.
-    override = _native_currency_override()
-    if override:
-        native_currency = override
-        logger.info("GCP billing currency: %s (via GCP_BILLING_NATIVE_CURRENCY override)", native_currency)
-    else:
-        native_currency = "USD"
-        if currency_rows:
-            # currency_rows: [{currency: "BRL", cnt: 1234}, {currency: "USD", cnt: 5}, ...]
-            # Já ordenado por cnt DESC — pega a moeda mais frequente.
-            logger.warning("GCP billing currency distribution: %s", currency_rows)
-            dominant = str(currency_rows[0].get("currency") or "").strip().upper()
-            if dominant in ("BRL", "USD"):
-                native_currency = dominant
-        logger.warning("GCP billing native_currency resolved: %s", native_currency)
-
-    if native_currency == "BRL":
-        rate = Decimal("1")
-        usd_rate = get_exchange_rate(to_d)
-    else:
-        rate = get_exchange_rate(to_d)
-        usd_rate = rate
-
-    def to_brl(native: Decimal) -> Decimal:
-        return native if native_currency == "BRL" else _q2(native * rate)
-
-    def to_usd(native: Decimal) -> Decimal:
-        return _q2(native / usd_rate) if native_currency == "BRL" else native
+    native_currency, usd_rate, to_brl, to_usd = _resolve_currency_rates(currency_rows, to_d)
 
     by_project: list[GcpBillingProjectRow] = []
     total_net_native = Decimal("0")
@@ -541,13 +781,42 @@ async def build_dashboard(
                 frac = Decimal(str(svc_cpu / total_unlabeled_cpu))
                 svc_native[svc] = svc_native.get(svc, Decimal("0")) + remaining * frac
 
+    def _cloud_run_row(svc: str, native: Decimal) -> GcpCloudRunByLabelRow:
+        cost_usd = _q2(to_usd(native))
+        cost_brl = _q2(to_brl(native))
+        stats = request_stats_by_service.get(svc, {})
+        reqs = int(round(stats.get("total", 0.0)))
+        per_million_usd: Decimal | None = None
+        per_million_brl: Decimal | None = None
+        error_rate: Decimal | None = None
+        if reqs > 0:
+            factor = Decimal(1_000_000) / Decimal(reqs)
+            per_million_usd = _q2(cost_usd * factor)
+            per_million_brl = _q2(cost_brl * factor)
+            errors = stats.get("err_4xx", 0.0) + stats.get("err_5xx", 0.0)
+            error_rate = (Decimal(str(errors)) / Decimal(reqs)).quantize(Decimal("0.0001"))
+        lat = latencies_by_service.get(svc, {})
+
+        def _lat(key: str) -> Decimal | None:
+            v = lat.get(key)
+            return Decimal(str(v)).quantize(Decimal("0.1")) if v is not None else None
+
+        return GcpCloudRunByLabelRow(
+            service_name=svc,
+            cost_usd=cost_usd,
+            cost_brl=cost_brl,
+            requests=reqs,
+            cost_per_million_usd=per_million_usd,
+            cost_per_million_brl=per_million_brl,
+            latency_p50_ms=_lat("p50"),
+            latency_p95_ms=_lat("p95"),
+            latency_p99_ms=_lat("p99"),
+            error_rate=error_rate,
+        )
+
     cloud_run_by_label: list[GcpCloudRunByLabelRow] = sorted(
         (
-            GcpCloudRunByLabelRow(
-                service_name=svc,
-                cost_usd=_q2(to_usd(native)),
-                cost_brl=_q2(to_brl(native)),
-            )
+            _cloud_run_row(svc, native)
             for svc, native in svc_native.items()
             if native > 0
         ),
@@ -576,4 +845,304 @@ async def build_dashboard(
     )
 
     _cache_put(cache_key, response)
+    return response
+
+
+async def build_day_detail(
+    date_str: str | None,
+    use_cache: bool = True,
+) -> GcpBillingDayDetailResponse:
+    """Detalhamento de custo (projeto/serviço/SKU) de um único dia.
+
+    Drill-down do gráfico diário: reutiliza as mesmas queries do dashboard, mas
+    com a janela restrita ao dia informado, alinhada ao fuso de billing.
+    """
+    if not is_enabled():
+        raise RuntimeError(
+            "Integração GCP Billing desabilitada: configure BQ_PROJECT_ID, GCP_CREDS_JSON_CREDS_BASE64 e GCP_BILLING_TABLE."
+        )
+
+    table = _table_fqn()
+    assert table is not None  # guarded by is_enabled()
+
+    day = _parse_date(date_str, field="date")
+    cache_key = f"{day.isoformat()}|{table}"
+    if use_cache:
+        cached = _day_cache_get(cache_key)
+        if cached is not None:
+            return cached.model_copy(update={"cached": True})
+
+    client = bigquery_store._get_client()
+    # Janela de um único dia, alinhada à meia-noite do fuso de billing.
+    from_ts, to_ts = _tz_bounds(day, day)
+
+    sql_project = _query_by_project(table)
+    sql_service = _query_by_service(table)
+    sql_sku = _query_by_sku(table, DEFAULT_TOP_SKUS)
+    sql_currency = _query_currency(table)
+
+    loop = asyncio.get_running_loop()
+    try:
+        project_rows, service_rows, sku_rows, currency_rows = await asyncio.gather(
+            loop.run_in_executor(None, _run_query, client, sql_project, from_ts, to_ts),
+            loop.run_in_executor(None, _run_query, client, sql_service, from_ts, to_ts),
+            loop.run_in_executor(None, _run_query, client, sql_sku, from_ts, to_ts),
+            loop.run_in_executor(None, _run_query, client, sql_currency, from_ts, to_ts),
+        )
+    except Exception as exc:
+        logger.exception("Falha ao consultar detalhamento diário de GCP billing.")
+        raise RuntimeError(f"BigQuery falhou: {exc}") from exc
+
+    native_currency, usd_rate, to_brl, to_usd = _resolve_currency_rates(currency_rows, day)
+
+    by_project: list[GcpBillingProjectRow] = []
+    total_net_native = Decimal("0")
+    total_credits_native = Decimal("0")
+    for r in project_rows:
+        net = _to_decimal(r.get("net_cost"))
+        credits_amount = _to_decimal(r.get("credits_amount"))
+        total_net_native += net
+        total_credits_native += credits_amount
+        by_project.append(
+            GcpBillingProjectRow(
+                project_id=str(r.get("project_id") or "(sem projeto)"),
+                project_name=(r.get("project_name") or None),
+                cost_usd=to_usd(net),
+                cost_brl=to_brl(net),
+                credits_usd=to_usd(credits_amount),
+            )
+        )
+    by_project.sort(key=lambda r: r.cost_brl, reverse=True)
+
+    by_service: list[GcpBillingServiceRow] = [
+        GcpBillingServiceRow(
+            service_id=str(r.get("service_id") or ""),
+            service_description=str(r.get("service_description") or r.get("service_id") or "—"),
+            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
+            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
+        )
+        for r in service_rows
+    ]
+    by_service.sort(key=lambda r: r.cost_brl, reverse=True)
+
+    by_sku: list[GcpBillingSkuRow] = [
+        GcpBillingSkuRow(
+            sku_id=str(r.get("sku_id") or ""),
+            sku_description=str(r.get("sku_description") or r.get("sku_id") or "—"),
+            service_description=str(r.get("service_description") or "—"),
+            cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
+            cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
+            usage_amount=_q6(_to_decimal(r.get("usage_amount"))),
+            usage_unit=(r.get("usage_unit") or None),
+        )
+        for r in sku_rows
+    ]
+
+    total_gross_native = total_net_native - total_credits_native
+
+    response = GcpBillingDayDetailResponse(
+        date=day,
+        currency=native_currency,
+        exchange_rate=usd_rate.quantize(Decimal("0.0001")),
+        total_cost_usd=to_usd(total_net_native),
+        total_cost_brl=to_brl(total_net_native),
+        total_credits_usd=to_usd(total_credits_native),
+        total_gross_usd=to_usd(total_gross_native),
+        by_project=by_project,
+        by_service=by_service,
+        by_sku=by_sku,
+        cached=False,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    _day_cache_put(cache_key, response)
+    return response
+
+
+async def build_day_service_skus(
+    date_str: str | None,
+    service_id: str | None,
+    use_cache: bool = True,
+) -> GcpBillingDaySkusResponse:
+    """SKUs de um serviço específico num único dia (drill-down encadeado)."""
+    if not is_enabled():
+        raise RuntimeError(
+            "Integração GCP Billing desabilitada: configure BQ_PROJECT_ID, GCP_CREDS_JSON_CREDS_BASE64 e GCP_BILLING_TABLE."
+        )
+
+    table = _table_fqn()
+    assert table is not None  # guarded by is_enabled()
+
+    day = _parse_date(date_str, field="date")
+    svc_id = (service_id or "").strip()
+    if not svc_id:
+        raise ValueError("`service_id` é obrigatório.")
+
+    cache_key = f"{day.isoformat()}|{svc_id}|{table}"
+    if use_cache:
+        cached = _day_skus_cache_get(cache_key)
+        if cached is not None:
+            return cached.model_copy(update={"cached": True})
+
+    client = bigquery_store._get_client()
+    from_ts, to_ts = _tz_bounds(day, day)
+
+    sql_sku = _query_by_sku_for_service(table, DEFAULT_TOP_SKUS)
+    sql_currency = _query_currency(table)
+
+    loop = asyncio.get_running_loop()
+    try:
+        sku_rows, currency_rows = await asyncio.gather(
+            loop.run_in_executor(None, _run_query_service, client, sql_sku, from_ts, to_ts, svc_id),
+            loop.run_in_executor(None, _run_query, client, sql_currency, from_ts, to_ts),
+        )
+    except Exception as exc:
+        logger.exception("Falha ao consultar SKUs do serviço no dia.")
+        raise RuntimeError(f"BigQuery falhou: {exc}") from exc
+
+    native_currency, usd_rate, to_brl, to_usd = _resolve_currency_rates(currency_rows, day)
+
+    service_description: str | None = None
+    by_sku: list[GcpBillingSkuRow] = []
+    for r in sku_rows:
+        if service_description is None:
+            service_description = r.get("service_description") or None
+        by_sku.append(
+            GcpBillingSkuRow(
+                sku_id=str(r.get("sku_id") or ""),
+                sku_description=str(r.get("sku_description") or r.get("sku_id") or "—"),
+                service_description=str(r.get("service_description") or "—"),
+                cost_usd=to_usd(_to_decimal(r.get("net_cost"))),
+                cost_brl=to_brl(_to_decimal(r.get("net_cost"))),
+                usage_amount=_q6(_to_decimal(r.get("usage_amount"))),
+                usage_unit=(r.get("usage_unit") or None),
+            )
+        )
+
+    response = GcpBillingDaySkusResponse(
+        date=day,
+        service_id=svc_id,
+        service_description=service_description,
+        currency=native_currency,
+        exchange_rate=usd_rate.quantize(Decimal("0.0001")),
+        by_sku=by_sku,
+        cached=False,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    _day_skus_cache_put(cache_key, response)
+    return response
+
+
+async def build_comparison(
+    from_str: str | None,
+    to_str: str | None,
+    use_cache: bool = True,
+) -> GcpBillingComparisonResponse:
+    """Compara o custo por serviço do período atual com o período anterior.
+
+    O período anterior tem a mesma duração e termina no dia imediatamente
+    antes de `from`. Retorna o ranking de serviços por maior variação absoluta —
+    responde direto ao "subiu, por quê?".
+    """
+    if not is_enabled():
+        raise RuntimeError(
+            "Integração GCP Billing desabilitada: configure BQ_PROJECT_ID, GCP_CREDS_JSON_CREDS_BASE64 e GCP_BILLING_TABLE."
+        )
+
+    table = _table_fqn()
+    assert table is not None  # guarded by is_enabled()
+
+    from_d, to_d = _resolve_window(from_str, to_str)
+    span = (to_d - from_d).days + 1
+    prev_to = from_d - timedelta(days=1)
+    prev_from = prev_to - timedelta(days=span - 1)
+
+    cache_key = f"cmp|{from_d.isoformat()}|{to_d.isoformat()}|{table}"
+    if use_cache:
+        cached = _cmp_cache_get(cache_key)
+        if cached is not None:
+            return cached.model_copy(update={"cached": True})
+
+    client = bigquery_store._get_client()
+    cur_from_ts, cur_to_ts = _tz_bounds(from_d, to_d)
+    prev_from_ts, prev_to_ts = _tz_bounds(prev_from, prev_to)
+
+    sql_service = _query_by_service(table)
+    sql_currency = _query_currency(table)
+
+    loop = asyncio.get_running_loop()
+    try:
+        cur_rows, prev_rows, currency_rows = await asyncio.gather(
+            loop.run_in_executor(None, _run_query, client, sql_service, cur_from_ts, cur_to_ts),
+            loop.run_in_executor(None, _run_query, client, sql_service, prev_from_ts, prev_to_ts),
+            loop.run_in_executor(None, _run_query, client, sql_currency, cur_from_ts, cur_to_ts),
+        )
+    except Exception as exc:
+        logger.exception("Falha ao comparar períodos de GCP billing.")
+        raise RuntimeError(f"BigQuery falhou: {exc}") from exc
+
+    native_currency, usd_rate, to_brl, to_usd = _resolve_currency_rates(currency_rows, to_d)
+
+    cur_native: dict[str, Decimal] = {}
+    descriptions: dict[str, str] = {}
+    for r in cur_rows:
+        sid = str(r.get("service_id") or "")
+        cur_native[sid] = _to_decimal(r.get("net_cost"))
+        descriptions[sid] = str(r.get("service_description") or r.get("service_id") or "—")
+
+    prev_native: dict[str, Decimal] = {}
+    for r in prev_rows:
+        sid = str(r.get("service_id") or "")
+        prev_native[sid] = _to_decimal(r.get("net_cost"))
+        descriptions.setdefault(sid, str(r.get("service_description") or r.get("service_id") or "—"))
+
+    rows: list[GcpServiceDeltaRow] = []
+    for sid in set(cur_native) | set(prev_native):
+        cur_n = cur_native.get(sid, Decimal("0"))
+        prev_n = prev_native.get(sid, Decimal("0"))
+        delta_n = cur_n - prev_n
+        pct = (delta_n / prev_n).quantize(Decimal("0.0001")) if prev_n != 0 else None
+        rows.append(
+            GcpServiceDeltaRow(
+                service_id=sid,
+                service_description=descriptions.get(sid, "—"),
+                current_usd=to_usd(cur_n),
+                current_brl=to_brl(cur_n),
+                previous_usd=to_usd(prev_n),
+                previous_brl=to_brl(prev_n),
+                delta_usd=to_usd(delta_n),
+                delta_brl=to_brl(delta_n),
+                delta_pct=pct,
+            )
+        )
+    rows.sort(key=lambda r: abs(r.delta_brl), reverse=True)
+
+    cur_total = sum(cur_native.values(), Decimal("0"))
+    prev_total = sum(prev_native.values(), Decimal("0"))
+    delta_total = cur_total - prev_total
+    delta_total_pct = (
+        (delta_total / prev_total).quantize(Decimal("0.0001")) if prev_total != 0 else None
+    )
+
+    response = GcpBillingComparisonResponse(
+        from_date=from_d,
+        to_date=to_d,
+        prev_from_date=prev_from,
+        prev_to_date=prev_to,
+        currency=native_currency,
+        exchange_rate=usd_rate.quantize(Decimal("0.0001")),
+        current_total_usd=to_usd(cur_total),
+        current_total_brl=to_brl(cur_total),
+        previous_total_usd=to_usd(prev_total),
+        previous_total_brl=to_brl(prev_total),
+        delta_total_usd=to_usd(delta_total),
+        delta_total_brl=to_brl(delta_total),
+        delta_total_pct=delta_total_pct,
+        by_service_delta=rows,
+        cached=False,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    _cmp_cache_put(cache_key, response)
     return response

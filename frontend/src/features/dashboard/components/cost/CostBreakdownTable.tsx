@@ -18,6 +18,8 @@ type Props<T> = {
   columns: CostColumn<T>[];
   emptyMessage?: string;
   defaultCollapsed?: boolean;
+  /** Quando definido, cada linha vira clicável (drill-down). */
+  onRowClick?: (row: T) => void;
 };
 
 export default function CostBreakdownTable<T>({
@@ -29,6 +31,7 @@ export default function CostBreakdownTable<T>({
   columns,
   emptyMessage = "Sem dados no intervalo.",
   defaultCollapsed = false,
+  onRowClick,
 }: Props<T>) {
   const loading = !rows && !error;
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
@@ -130,7 +133,11 @@ export default function CostBreakdownTable<T>({
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={rowKey(row)}>
+                <tr
+                  key={rowKey(row)}
+                  className={onRowClick ? "claudeTableRowClickable" : undefined}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                >
                   {columns.map((col) => (
                     <td
                       key={col.key}

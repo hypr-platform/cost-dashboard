@@ -22,6 +22,10 @@ Uso:
     DV360_USE_DATE_GROUPBY=1 STACKADAPT_USE_DAILY_GRANULARITY=1 \
     HIVESTACK_EMIT_LINE_DAILY=1 NEXD_SYNTHESIZE_LINE_DAILY=1 \
         .venv/bin/python -m backend.scripts.backfill_line_costs_2026
+
+    # Filtrar plataforma (pode repetir):
+    .venv/bin/python -m backend.scripts.backfill_line_costs_2026 \
+        --platform StackAdapt --start 2026-05-25 --end 2026-06-07
 """
 
 from __future__ import annotations
@@ -47,6 +51,8 @@ from src.apis import nexd  # noqa: E402
 from src.utils.currency import _fetch_ptax  # noqa: E402
 
 logger = logging.getLogger("backfill_2026")
+
+ALL_PLATFORMS = ["StackAdapt", "DV360", "Xandr", "Hivestack", "Nexd"]
 
 
 def _month_start(d: date) -> date:
@@ -143,8 +149,17 @@ def _fetch_nexd_for_month(month_start: date, window_end: date) -> dict | None:
     return nexd_payload
 
 
-def run_backfill(start: date, end: date, *, dry_run: bool = False) -> dict:
-    """Executa backfill mês a mês, plataforma a plataforma."""
+def run_backfill(
+    start: date,
+    end: date,
+    *,
+    dry_run: bool = False,
+    platforms: set[str] | None = None,
+) -> dict:
+    """Executa backfill mês a mês, plataforma a plataforma.
+
+    `platforms`: subset de ALL_PLATFORMS. None = todas.
+    """
     assert start <= end, "start <= end"
 
     fx_cache = _build_fx_cache()
@@ -167,6 +182,8 @@ def run_backfill(start: date, end: date, *, dry_run: bool = False) -> dict:
         # 1. Fetch all DSPs in PLATFORMS
         results: dict[str, dict] = {}
         for platform_name, module in PLATFORMS.items():
+            if platforms is not None and platform_name not in platforms:
+                continue
             data = _fetch_platform_for_month(platform_name, module, month_start, window_end)
             if data is None:
                 summary["skipped"].append({"platform": platform_name, "month": month_start.isoformat(),
@@ -186,20 +203,22 @@ def run_backfill(start: date, end: date, *, dry_run: bool = False) -> dict:
                                  month_start.isoformat())
 
         # 3. Fetch Nexd separately (not in PLATFORMS, different shape)
-        nexd_payload = _fetch_nexd_for_month(month_start, window_end)
-        if nexd_payload is not None:
-            logger.info("  Nexd: line_daily=%d spend≈%.2f BRL",
-                        len(nexd_payload.get("line_daily") or []),
-                        float(nexd_payload.get("spend") or 0))
-            # Aplica resolução pro Nexd separado
-            try:
-                _apply_line_token_resolutions({"Nexd": nexd_payload})
-            except Exception:
-                logger.exception("apply_line_token_resolutions(Nexd) falhou no mês %s.",
-                                 month_start.isoformat())
-        else:
-            summary["skipped"].append({"platform": "Nexd", "month": month_start.isoformat(),
-                                        "reason": "fetch failed or status != ok"})
+        nexd_payload = None
+        if platforms is None or "Nexd" in platforms:
+            nexd_payload = _fetch_nexd_for_month(month_start, window_end)
+            if nexd_payload is not None:
+                logger.info("  Nexd: line_daily=%d spend≈%.2f BRL",
+                            len(nexd_payload.get("line_daily") or []),
+                            float(nexd_payload.get("spend") or 0))
+                # Aplica resolução pro Nexd separado
+                try:
+                    _apply_line_token_resolutions({"Nexd": nexd_payload})
+                except Exception:
+                    logger.exception("apply_line_token_resolutions(Nexd) falhou no mês %s.",
+                                     month_start.isoformat())
+            else:
+                summary["skipped"].append({"platform": "Nexd", "month": month_start.isoformat(),
+                                            "reason": "fetch failed or status != ok"})
 
         # 4. Build + upsert por (platform, day)
         all_sources = list(results.items())
@@ -244,7 +263,14 @@ def main() -> None:
                         help="YYYY-MM-DD (default ontem)")
     parser.add_argument("--dry-run", action="store_true", help="Não grava em BQ.")
     parser.add_argument("--log", default="/tmp/backfill-line-costs-2026.log")
+    parser.add_argument(
+        "--platform",
+        action="append",
+        choices=ALL_PLATFORMS,
+        help="Restringe a uma plataforma (pode repetir). Default: todas.",
+    )
     args = parser.parse_args()
+    platforms_filter: set[str] | None = set(args.platform) if args.platform else None
 
     logging.basicConfig(
         level=logging.INFO,
@@ -252,8 +278,13 @@ def main() -> None:
         handlers=[logging.FileHandler(args.log, mode="a"), logging.StreamHandler()],
     )
 
-    logger.info("Backfill range: %s..%s (dry_run=%s)", args.start, args.end, args.dry_run)
-    out = run_backfill(args.start, args.end, dry_run=args.dry_run)
+    logger.info(
+        "Backfill range: %s..%s platforms=%s dry_run=%s",
+        args.start, args.end,
+        sorted(platforms_filter) if platforms_filter else "all",
+        args.dry_run,
+    )
+    out = run_backfill(args.start, args.end, dry_run=args.dry_run, platforms=platforms_filter)
 
     print()
     print("=== Resumo ===")
