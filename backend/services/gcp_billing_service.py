@@ -561,6 +561,19 @@ def _run_query(client: bigquery.Client, sql: str, from_ts: datetime, to_ts: date
     return [dict(row) for row in client.query(sql, job_config=job_config).result()]
 
 
+# ---- API pública cross-service ----
+# Consumido por bigquery_cost_service para casar a calibração de custo do
+# BigQuery com a fatura (billing export). Nomes sem underscore = contrato
+# estável; não renomear/alterar assinatura sem atualizar os consumidores.
+table_fqn = _table_fqn
+tz_bounds = _tz_bounds
+run_query = _run_query
+query_currency = _query_currency
+resolve_currency_rates = _resolve_currency_rates
+to_decimal = _to_decimal
+NET_COST_EXPR = _NET_COST_EXPR
+
+
 def _run_query_service(
     client: bigquery.Client, sql: str, from_ts: datetime, to_ts: datetime, service_id: str
 ) -> list[dict[str, Any]]:

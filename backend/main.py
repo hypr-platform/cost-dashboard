@@ -27,6 +27,7 @@ from backend.routes import bigquery_cost as bigquery_cost_routes
 from backend.routes import claude as claude_routes
 from backend.routes import gcp_billing as gcp_billing_routes
 from backend.routes import invoice_cost as invoice_cost_routes
+from backend.routes import vercel_cost as vercel_cost_routes
 
 load_dotenv(override=True)
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ app.include_router(claude_routes.router)
 app.include_router(bigquery_cost_routes.router)
 app.include_router(gcp_billing_routes.router)
 app.include_router(invoice_cost_routes.router)
+app.include_router(vercel_cost_routes.router)
 
 
 @app.get("/")

@@ -16,9 +16,10 @@ import os
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from google.cloud import bigquery
@@ -242,10 +243,10 @@ def _billing_bigquery_by_region_and_category(
     região (multi-região NULL → 'us') para o custo de SKUs 'Analysis%', e
     by_category agrega o serviço todo em analysis/storage/other.
     """
-    table = gbs._table_fqn()
+    table = gbs.table_fqn()
     if table is None:
         return {}, {}
-    net = gbs._NET_COST_EXPR
+    net = gbs.NET_COST_EXPR
     sql = f"""
 SELECT location.region AS region, sku.description AS sku, SUM({net}) AS net
 FROM `{table}`
@@ -253,11 +254,11 @@ WHERE usage_start_time >= @from_ts AND usage_start_time < @to_ts
   AND service.description = 'BigQuery'
 GROUP BY region, sku
 """.strip()
-    rows = gbs._run_query(client, sql, from_ts, to_ts)
+    rows = gbs.run_query(client, sql, from_ts, to_ts)
     analysis_by_region: dict[str, Decimal] = {}
     by_category: dict[str, Decimal] = {}
     for r in rows:
-        net_native = gbs._to_decimal(r.get("net"))
+        net_native = gbs.to_decimal(r.get("net"))
         cat = _categorize_bq_sku(r.get("sku") or "")
         by_category[cat] = by_category.get(cat, Decimal("0")) + net_native
         if cat == "analysis":
@@ -455,34 +456,108 @@ def _run_sql_user(
     ]
 
 
-async def build_dashboard(
-    from_str: str | None,
-    to_str: str | None,
-    regions_str: str | None = None,
-    use_cache: bool = True,
-) -> BqCostDashboardResponse:
-    if not is_enabled():
-        raise RuntimeError(
-            "Integração BigQuery desabilitada: configure BQ_PROJECT_ID e GCP_CREDS_JSON_CREDS_BASE64."
-        )
+@dataclass
+class _Calibration:
+    """Tarifa efetiva por região + conversores de moeda para o período.
 
-    from_d, to_d, regions = _resolve_window(from_str, to_str, regions_str)
-    cache_key = f"{from_d.isoformat()}|{to_d.isoformat()}|{','.join(regions)}"
-    if use_cache:
-        cached = _cache_get(cache_key)
-        if cached is not None:
-            return cached.model_copy(update={"cached": True})
+    Calibrada pela fatura (billing export) quando disponível; caso contrário,
+    flat on-demand convertido para a moeda nativa. Compartilhada entre o
+    dashboard e o drill-down por usuário para evitar duplicar a lógica.
+    """
 
-    client = bigquery_store._get_client()
-    project = bigquery_store._project_id()
-    from_ts = datetime.combine(from_d, dtime.min, tzinfo=timezone.utc)
-    to_ts = datetime.combine(to_d, dtime.max, tzinfo=timezone.utc)
+    calibrated: bool
+    native_currency: str
+    usd_rate: Decimal
+    to_brl: Callable[[Decimal], Decimal]
+    to_usd: Callable[[Decimal], Decimal]
+    rate_native_by_region: dict[str, Decimal]
+    price_per_tib: Decimal
+    cat_native: dict[str, Decimal] = field(default_factory=dict)
 
-    # Agrega no BigQuery (GROUP BY) por região: 4 queries leves por região,
-    # cada uma retornando poucas linhas. Muito mais rápido que puxar todos os
-    # jobs para Python.
-    loop = asyncio.get_running_loop()
+    def cost_native(self, bytes_val: float, region: str) -> Decimal:
+        """Custo (moeda nativa) de `bytes_val` faturados na região."""
+        return (Decimal(str(bytes_val)) / BYTES_PER_TIB) * self.rate_native_by_region[region]
 
+
+async def _resolve_calibration(
+    client: bigquery.Client,
+    from_d: date,
+    to_d: date,
+    region_bytes_by_region: dict[str, int],
+    loop: asyncio.AbstractEventLoop,
+) -> _Calibration:
+    """Resolve a calibração de custo do período.
+
+    Tarifa efetiva por região = custo 'Analysis' do billing / bytes do JOBS, de
+    modo que o total de análise bate com a fatura e o rateio por usuário/query
+    herda a tarifa real (ex.: São Paulo custa ~2x a US). Sem billing, cai no
+    flat on-demand convertido para a moeda nativa.
+    """
+    price_per_tib = _price_per_tib()
+    calibrated = gbs.table_fqn() is not None
+    analysis_by_region: dict[str, Decimal] = {}
+    cat_native: dict[str, Decimal] = {}
+    native_currency = "USD"
+    usd_rate = get_exchange_rate(to_d)
+
+    def to_brl(n: Decimal) -> Decimal:
+        return (n * usd_rate).quantize(Decimal("0.01"))
+
+    def to_usd(n: Decimal) -> Decimal:
+        return n
+
+    if calibrated:
+        bfrom_ts, bto_ts = gbs.tz_bounds(from_d, to_d)
+        try:
+            currency_rows, billing = await asyncio.gather(
+                loop.run_in_executor(
+                    None, gbs.run_query, client,
+                    gbs.query_currency(gbs.table_fqn()), bfrom_ts, bto_ts,
+                ),
+                loop.run_in_executor(
+                    None, _billing_bigquery_by_region_and_category, client, bfrom_ts, bto_ts,
+                ),
+            )
+            analysis_by_region, cat_native = billing
+            native_currency, usd_rate, to_brl, to_usd = gbs.resolve_currency_rates(
+                currency_rows, to_d
+            )
+        except Exception as exc:  # calibração falhou → cai no flat on-demand
+            logger.warning("Calibração pelo billing indisponível, usando flat on-demand: %s", exc)
+            calibrated = False
+
+    rate_native_by_region = _compute_region_rates(
+        analysis_by_region if calibrated else {},
+        region_bytes_by_region,
+        native_currency,
+        usd_rate,
+        price_per_tib,
+    )
+    return _Calibration(
+        calibrated=calibrated,
+        native_currency=native_currency,
+        usd_rate=usd_rate,
+        to_brl=to_brl,
+        to_usd=to_usd,
+        rate_native_by_region=rate_native_by_region,
+        price_per_tib=price_per_tib,
+        cat_native=cat_native,
+    )
+
+
+async def _fetch_region_data(
+    client: bigquery.Client,
+    project: str,
+    regions: tuple[str, ...],
+    from_ts: datetime,
+    to_ts: datetime,
+    loop: asyncio.AbstractEventLoop,
+) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    """Agrega no BigQuery (GROUP BY) por região: 5 queries leves por região.
+
+    Cada query retorna poucas linhas — muito mais rápido que puxar todos os jobs
+    para Python. Retorna {região: {kind: rows}}.
+    """
     async def _run(sql: str) -> list[dict[str, Any]]:
         return await loop.run_in_executor(None, _run_sql, client, sql, from_ts, to_ts)
 
@@ -501,74 +576,31 @@ async def build_dashboard(
         logger.exception("Falha ao consultar INFORMATION_SCHEMA.JOBS_BY_PROJECT.")
         raise RuntimeError(f"BigQuery falhou: {exc}") from exc
 
-    price_per_tib = _price_per_tib()
-
-    # Agrupa os resultados do JOBS por região (para precificar cada região com
-    # a sua tarifa efetiva).
     region_data: dict[str, dict[str, list[dict[str, Any]]]] = {
         region: {"user": [], "stmt": [], "table": [], "top": [], "daily": []} for region in regions
     }
     for (kind, region), rows in zip(task_meta, results):
         region_data[region][kind] = rows
+    return region_data
 
-    # --- Calibração pelo billing export (mesma fonte da aba Google Cloud) ---
-    # Tarifa efetiva por região = custo 'Analysis' do billing / bytes do JOBS.
-    # Assim o total de análise bate exatamente com a fatura, e o rateio por
-    # usuário/query herda a tarifa real (ex.: São Paulo custa ~2x a US).
-    calibrated = gbs._table_fqn() is not None
-    analysis_by_region: dict[str, Decimal] = {}
-    cat_native: dict[str, Decimal] = {}
-    if calibrated:
-        bfrom_ts, bto_ts = gbs._tz_bounds(from_d, to_d)
-        try:
-            currency_rows, billing = await asyncio.gather(
-                loop.run_in_executor(
-                    None, gbs._run_query, client,
-                    gbs._query_currency(gbs._table_fqn()), bfrom_ts, bto_ts,
-                ),
-                loop.run_in_executor(
-                    None, _billing_bigquery_by_region_and_category, client, bfrom_ts, bto_ts,
-                ),
-            )
-            analysis_by_region, cat_native = billing
-            native_currency, usd_rate, to_brl, to_usd = gbs._resolve_currency_rates(
-                currency_rows, to_d
-            )
-        except Exception as exc:  # calibração falhou → cai no flat on-demand
-            logger.warning("Calibração pelo billing indisponível, usando flat on-demand: %s", exc)
-            calibrated = False
 
-    if not calibrated:
-        native_currency = "USD"
-        usd_rate = get_exchange_rate(to_d)
+@dataclass
+class _Aggregates:
+    """Acumuladores do merge entre regiões (custo já calibrado por região)."""
 
-        def to_brl(n: Decimal) -> Decimal:
-            return (n * usd_rate).quantize(Decimal("0.01"))
+    by_user: dict[str, dict[str, Any]]
+    by_stmt: dict[str, dict[str, Any]]
+    by_table: dict[str, dict[str, Any]]
+    top_candidates: list[dict[str, Any]]
+    daily: dict[tuple[Any, str], Decimal]
 
-        def to_usd(n: Decimal) -> Decimal:
-            return n
 
-    # Tarifa (moeda nativa) por TiB, por região.
-    region_bytes_by_region = {
-        region: sum(int(r.get("bytes_billed") or 0) for r in region_data[region]["user"])
-        for region in regions
-    }
-    rate_native_by_region = _compute_region_rates(
-        analysis_by_region if calibrated else {},
-        region_bytes_by_region,
-        native_currency,
-        usd_rate,
-        price_per_tib,
-    )
-    price_by_region: dict[str, Decimal] = {
-        region: to_usd(rate).quantize(Decimal("0.0001"))
-        for region, rate in rate_native_by_region.items()
-    }
-
-    def _cost_native(bytes_val: float, region: str) -> Decimal:
-        return (Decimal(str(bytes_val)) / BYTES_PER_TIB) * rate_native_by_region[region]
-
-    # Merge entre regiões, já com custo calibrado por região.
+def _aggregate_regions(
+    region_data: dict[str, dict[str, list[dict[str, Any]]]],
+    regions: tuple[str, ...],
+    cost_native: Callable[[float, str], Decimal],
+) -> _Aggregates:
+    """Mescla as linhas de todas as regiões aplicando a tarifa de cada região."""
     by_user_acc: dict[str, dict[str, Any]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0, "cost": Decimal("0")})
     by_stmt_acc: dict[str, dict[str, Any]] = defaultdict(lambda: {"jobs": 0, "bytes": 0, "slot": 0, "cost": Decimal("0")})
     by_table_acc: dict[str, dict[str, Any]] = defaultdict(lambda: {"jobs": 0, "bytes": 0.0, "cost": Decimal("0")})
@@ -583,37 +615,57 @@ async def build_dashboard(
             acc["jobs"] += int(r.get("jobs") or 0)
             acc["bytes"] += b
             acc["slot"] += int(r.get("slot_ms") or 0)
-            acc["cost"] += _cost_native(b, region)
+            acc["cost"] += cost_native(b, region)
         for r in rd["stmt"]:
             acc = by_stmt_acc[str(r.get("statement_type") or "UNKNOWN")]
             b = int(r.get("bytes_billed") or 0)
             acc["jobs"] += int(r.get("jobs") or 0)
             acc["bytes"] += b
             acc["slot"] += int(r.get("slot_ms") or 0)
-            acc["cost"] += _cost_native(b, region)
+            acc["cost"] += cost_native(b, region)
         for r in rd["table"]:
             acc = by_table_acc[str(r.get("table_fqn") or "")]
             b = float(r.get("bytes_billed") or 0)
             acc["jobs"] += int(r.get("jobs") or 0)
             acc["bytes"] += b
-            acc["cost"] += _cost_native(b, region)
+            acc["cost"] += cost_native(b, region)
         for r in rd["top"]:
             r["region"] = region
             top_candidates.append(r)
         for r in rd["daily"]:
             day = r.get("day")
             user = str(r.get("user_email") or "(sem usuário)")
-            daily_acc[(day, user)] += _cost_native(int(r.get("bytes_billed") or 0), region)
+            daily_acc[(day, user)] += cost_native(int(r.get("bytes_billed") or 0), region)
 
-    total_jobs = sum(v["jobs"] for v in by_user_acc.values())
-    total_bytes = sum(v["bytes"] for v in by_user_acc.values())
-    total_slot = sum(v["slot"] for v in by_user_acc.values())
-    analysis_attributed = sum((v["cost"] for v in by_user_acc.values()), Decimal("0"))
+    return _Aggregates(
+        by_user=by_user_acc,
+        by_stmt=by_stmt_acc,
+        by_table=by_table_acc,
+        top_candidates=top_candidates,
+        daily=daily_acc,
+    )
+
+
+def _build_response(
+    from_d: date,
+    to_d: date,
+    regions: tuple[str, ...],
+    cal: _Calibration,
+    agg: _Aggregates,
+    price_by_region: dict[str, Decimal],
+) -> BqCostDashboardResponse:
+    """Monta a resposta do dashboard a partir dos acumuladores + calibração."""
+    to_usd, to_brl = cal.to_usd, cal.to_brl
+
+    total_jobs = sum(v["jobs"] for v in agg.by_user.values())
+    total_bytes = sum(v["bytes"] for v in agg.by_user.values())
+    total_slot = sum(v["slot"] for v in agg.by_user.values())
+    analysis_attributed = sum((v["cost"] for v in agg.by_user.values()), Decimal("0"))
 
     # Custo de análise/storage/outros do serviço BigQuery (nativo).
-    analysis_native = cat_native.get("analysis", analysis_attributed) if calibrated else analysis_attributed
-    storage_native = cat_native.get("storage", Decimal("0"))
-    other_native = cat_native.get("other", Decimal("0"))
+    analysis_native = cal.cat_native.get("analysis", analysis_attributed) if cal.calibrated else analysis_attributed
+    storage_native = cal.cat_native.get("storage", Decimal("0"))
+    other_native = cal.cat_native.get("other", Decimal("0"))
     total_native = analysis_native + storage_native + other_native
 
     def _row_user(acc_key: str, acc: dict[str, Any]) -> BqCostUserRow:
@@ -627,7 +679,7 @@ async def build_dashboard(
         )
 
     by_user = sorted(
-        (_row_user(k, v) for k, v in by_user_acc.items()),
+        (_row_user(k, v) for k, v in agg.by_user.items()),
         key=lambda r: r.cost_brl,
         reverse=True,
     )
@@ -643,7 +695,7 @@ async def build_dashboard(
         )
 
     by_statement_type = sorted(
-        (_row_stmt(k, v) for k, v in by_stmt_acc.items()),
+        (_row_stmt(k, v) for k, v in agg.by_stmt.items()),
         key=lambda r: r.cost_brl,
         reverse=True,
     )
@@ -658,17 +710,17 @@ async def build_dashboard(
         )
 
     by_table = sorted(
-        (_row_table(k, v) for k, v in by_table_acc.items()),
+        (_row_table(k, v) for k, v in agg.by_table.items()),
         key=lambda r: r.cost_brl,
         reverse=True,
     )[:DEFAULT_TOP_TABLES]
 
     # Top queries: merge dos top-N por região, ordena global por bytes, pega top N.
-    top_candidates.sort(key=lambda r: int(r.get("total_bytes_billed") or 0), reverse=True)
+    agg.top_candidates.sort(key=lambda r: int(r.get("total_bytes_billed") or 0), reverse=True)
     top_queries: list[BqCostQueryRow] = []
-    for row in top_candidates[:DEFAULT_TOP_QUERIES]:
+    for row in agg.top_candidates[:DEFAULT_TOP_QUERIES]:
         bytes_billed = int(row.get("total_bytes_billed") or 0)
-        native = _cost_native(bytes_billed, row["region"])
+        native = cal.cost_native(bytes_billed, row["region"])
         creation_time = row.get("creation_time")
         creation_iso = creation_time.isoformat() if hasattr(creation_time, "isoformat") else str(creation_time)
         preview = (row.get("query") or "").strip()
@@ -697,7 +749,7 @@ async def build_dashboard(
                 cost_usd=to_usd(native).quantize(Decimal("0.01")),
                 cost_brl=to_brl(native).quantize(Decimal("0.01")),
             )
-            for (day, user), native in daily_acc.items()
+            for (day, user), native in agg.daily.items()
         ),
         key=lambda p: (p.day, p.user_email),
     )
@@ -707,14 +759,14 @@ async def build_dashboard(
     analysis_usd_attr = to_usd(analysis_attributed)
     blended_usd_per_tib = (
         (analysis_usd_attr / total_tib).quantize(Decimal("0.0001"))
-        if total_tib > 0 else price_per_tib
+        if total_tib > 0 else cal.price_per_tib
     )
 
-    response = BqCostDashboardResponse(
+    return BqCostDashboardResponse(
         from_date=from_d,
         to_date=to_d,
         regions=list(regions),
-        exchange_rate=usd_rate.quantize(Decimal("0.0001")),
+        exchange_rate=cal.usd_rate.quantize(Decimal("0.0001")),
         price_usd_per_tib=blended_usd_per_tib,
         total_jobs=total_jobs,
         total_bytes_billed=total_bytes,
@@ -728,8 +780,8 @@ async def build_dashboard(
         by_user_daily=by_user_daily,
         cached=False,
         fetched_at=datetime.now(timezone.utc).isoformat(),
-        currency=native_currency,
-        calibrated=calibrated,
+        currency=cal.native_currency,
+        calibrated=cal.calibrated,
         analysis_cost_usd=to_usd(analysis_native).quantize(Decimal("0.01")),
         analysis_cost_brl=to_brl(analysis_native).quantize(Decimal("0.01")),
         storage_cost_usd=to_usd(storage_native).quantize(Decimal("0.01")),
@@ -739,6 +791,47 @@ async def build_dashboard(
         price_by_region=price_by_region,
     )
 
+
+async def build_dashboard(
+    from_str: str | None,
+    to_str: str | None,
+    regions_str: str | None = None,
+    use_cache: bool = True,
+) -> BqCostDashboardResponse:
+    if not is_enabled():
+        raise RuntimeError(
+            "Integração BigQuery desabilitada: configure BQ_PROJECT_ID e GCP_CREDS_JSON_CREDS_BASE64."
+        )
+
+    from_d, to_d, regions = _resolve_window(from_str, to_str, regions_str)
+    cache_key = f"{from_d.isoformat()}|{to_d.isoformat()}|{','.join(regions)}"
+    if use_cache:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached.model_copy(update={"cached": True})
+
+    client = bigquery_store.get_client()
+    project = bigquery_store.project_id()
+    from_ts = datetime.combine(from_d, dtime.min, tzinfo=timezone.utc)
+    to_ts = datetime.combine(to_d, dtime.max, tzinfo=timezone.utc)
+    loop = asyncio.get_running_loop()
+
+    region_data = await _fetch_region_data(client, project, regions, from_ts, to_ts, loop)
+
+    # Tarifa efetiva por região precisa dos bytes do JOBS por região.
+    region_bytes_by_region = {
+        region: sum(int(r.get("bytes_billed") or 0) for r in region_data[region]["user"])
+        for region in regions
+    }
+    cal = await _resolve_calibration(client, from_d, to_d, region_bytes_by_region, loop)
+
+    agg = _aggregate_regions(region_data, regions, cal.cost_native)
+    price_by_region: dict[str, Decimal] = {
+        region: cal.to_usd(rate).quantize(Decimal("0.0001"))
+        for region, rate in cal.rate_native_by_region.items()
+    }
+
+    response = _build_response(from_d, to_d, regions, cal, agg, price_by_region)
     _cache_put(cache_key, response)
     return response
 
@@ -769,8 +862,8 @@ async def build_user_queries(
     no_user = user.lower() == _NO_USER_KEY
     user_norm = None if no_user else user.lower()
 
-    client = bigquery_store._get_client()
-    project = bigquery_store._project_id()
+    client = bigquery_store.get_client()
+    project = bigquery_store.project_id()
     from_ts = datetime.combine(from_d, dtime.min, tzinfo=timezone.utc)
     to_ts = datetime.combine(to_d, dtime.max, tzinfo=timezone.utc)
     loop = asyncio.get_running_loop()
@@ -805,45 +898,7 @@ async def build_user_queries(
             region_bytes_by_region[region] = int(rows[0].get("bytes_billed") or 0) if rows else 0
 
     # Calibração (mesma tarifa por região do dashboard).
-    price_per_tib = _price_per_tib()
-    calibrated = gbs._table_fqn() is not None
-    analysis_by_region: dict[str, Decimal] = {}
-    native_currency = "USD"
-    usd_rate = get_exchange_rate(to_d)
-
-    def to_brl(n: Decimal) -> Decimal:
-        return (n * usd_rate).quantize(Decimal("0.01"))
-
-    def to_usd(n: Decimal) -> Decimal:
-        return n
-
-    if calibrated:
-        bfrom_ts, bto_ts = gbs._tz_bounds(from_d, to_d)
-        try:
-            currency_rows, billing = await asyncio.gather(
-                loop.run_in_executor(
-                    None, gbs._run_query, client,
-                    gbs._query_currency(gbs._table_fqn()), bfrom_ts, bto_ts,
-                ),
-                loop.run_in_executor(
-                    None, _billing_bigquery_by_region_and_category, client, bfrom_ts, bto_ts,
-                ),
-            )
-            analysis_by_region, _cat = billing
-            native_currency, usd_rate, to_brl, to_usd = gbs._resolve_currency_rates(
-                currency_rows, to_d
-            )
-        except Exception as exc:
-            logger.warning("Calibração pelo billing indisponível (user queries): %s", exc)
-            calibrated = False
-
-    rate_native_by_region = _compute_region_rates(
-        analysis_by_region if calibrated else {},
-        region_bytes_by_region,
-        native_currency,
-        usd_rate,
-        price_per_tib,
-    )
+    cal = await _resolve_calibration(client, from_d, to_d, region_bytes_by_region, loop)
 
     # Mescla padrões entre regiões (mesmo padrão pode rodar em regiões distintas).
     def _truncate(s: str) -> str:
@@ -853,7 +908,7 @@ async def build_user_queries(
     acc: dict[str, dict[str, Any]] = {}
     total_native = Decimal("0")
     for region, rows in user_rows_by_region.items():
-        rate = rate_native_by_region[region]
+        rate = cal.rate_native_by_region[region]
         for r in rows:
             pattern = str(r.get("pattern") or "")
             bytes_billed = int(r.get("bytes_billed") or 0)
@@ -884,8 +939,8 @@ async def build_user_queries(
             jobs=g["jobs"],
             bytes_billed=g["bytes"],
             slot_ms=g["slot"],
-            cost_usd=to_usd(g["native"]).quantize(Decimal("0.01")),
-            cost_brl=to_brl(g["native"]).quantize(Decimal("0.01")),
+            cost_usd=cal.to_usd(g["native"]).quantize(Decimal("0.01")),
+            cost_brl=cal.to_brl(g["native"]).quantize(Decimal("0.01")),
         )
         for g in groups
     ]
@@ -894,10 +949,10 @@ async def build_user_queries(
         user_email=user,
         from_date=from_d,
         to_date=to_d,
-        currency=native_currency,
-        exchange_rate=usd_rate.quantize(Decimal("0.0001")),
-        total_cost_usd=to_usd(total_native).quantize(Decimal("0.01")),
-        total_cost_brl=to_brl(total_native).quantize(Decimal("0.01")),
+        currency=cal.native_currency,
+        exchange_rate=cal.usd_rate.quantize(Decimal("0.0001")),
+        total_cost_usd=cal.to_usd(total_native).quantize(Decimal("0.01")),
+        total_cost_brl=cal.to_brl(total_native).quantize(Decimal("0.01")),
         groups=query_groups,
         cached=False,
         fetched_at=datetime.now(timezone.utc).isoformat(),
@@ -1060,8 +1115,8 @@ def build_limit_status(use_cache: bool = True) -> BqCostLimitStatus:
     price_per_tib = _enforce_price_per_tib()
     rate = get_exchange_rate(day)
 
-    client = bigquery_store._get_client()
-    project = bigquery_store._project_id()
+    client = bigquery_store.get_client()
+    project = bigquery_store.project_id()
     spent_bytes = _spent_today_bytes(client, project, regions, start_ts)
 
     spent_usd = _bytes_to_usd(spent_bytes, price_per_tib)

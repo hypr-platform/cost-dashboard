@@ -15,8 +15,9 @@ import type { ComponentType } from "react";
 import BigQueryTab from "../components/BigQueryTab";
 import GoogleCloudTab from "../components/GoogleCloudTab";
 import InvoiceCostTab from "../components/InvoiceCostTab";
+import VercelTab from "../components/VercelTab";
 
-export type ToolTabKey = "BigQuery" | "GoogleCloud" | "InvoiceCost";
+export type ToolTabKey = "BigQuery" | "GoogleCloud" | "InvoiceCost" | "Vercel";
 
 export type ToolTab = {
   key: ToolTabKey;
@@ -88,6 +89,21 @@ function InvoiceIcon() {
   );
 }
 
+function VercelIcon() {
+  return (
+    <span className="brandIcon" aria-hidden="true">
+      <svg
+        className="brandIconSvg"
+        viewBox="0 0 16 16"
+        fill="currentColor"
+        aria-hidden="true"
+      >
+        <path d="M8 1.5 15 14H1L8 1.5Z" />
+      </svg>
+    </span>
+  );
+}
+
 /** Fonte da verdade. Mude `enabled` para ocultar/exibir. */
 export const TOOL_TABS: readonly ToolTab[] = [
   {
@@ -113,6 +129,14 @@ export const TOOL_TABS: readonly ToolTab[] = [
     enabled: true,
     Component: InvoiceCostTab,
     Icon: InvoiceIcon,
+  },
+  {
+    key: "Vercel",
+    label: "Vercel",
+    slug: "vercel",
+    enabled: true,
+    Component: VercelTab,
+    Icon: VercelIcon,
   },
 ];
 

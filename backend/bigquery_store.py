@@ -75,6 +75,13 @@ def _get_client() -> bigquery.Client:
         return _client
 
 
+# ---- API pública cross-service ----
+# Consumido por bigquery_cost_service. Nomes sem underscore = contrato estável;
+# não renomear sem atualizar os consumidores.
+get_client = _get_client
+project_id = _project_id
+
+
 def _dataset_ref() -> bigquery.DatasetReference:
     return bigquery.DatasetReference(_project_id(), _dataset_id())
 

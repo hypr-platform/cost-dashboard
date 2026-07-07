@@ -7,6 +7,7 @@ import { PlatformPageSkeleton } from "./PlatformPageSkeleton";
 import { BigQuerySkeleton } from "./BigQuerySkeleton";
 import { GoogleCloudSkeleton } from "./GoogleCloudSkeleton";
 import { InvoiceCostSkeleton } from "./InvoiceCostSkeleton";
+import { VercelSkeleton } from "./VercelSkeleton";
 
 /**
  * Mirror of the DashboardPage NavKey union. Kept local to avoid a circular
@@ -26,7 +27,8 @@ export type SkeletonPageKey =
   | "Amazon DSP"
   | "BigQuery"
   | "GoogleCloud"
-  | "InvoiceCost";
+  | "InvoiceCost"
+  | "Vercel";
 
 /**
  * Registry of body skeletons per page. Adding a new page = add an entry here
@@ -47,6 +49,7 @@ const BODY_BY_PAGE: Record<SkeletonPageKey, ComponentType> = {
   BigQuery: BigQuerySkeleton,
   GoogleCloud: GoogleCloudSkeleton,
   InvoiceCost: InvoiceCostSkeleton,
+  Vercel: VercelSkeleton,
 };
 
 /**
