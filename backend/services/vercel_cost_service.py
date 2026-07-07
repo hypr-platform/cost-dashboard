@@ -187,6 +187,14 @@ def _aggregate(
     daily_cat: dict[tuple[date, str], Decimal] = defaultdict(lambda: Decimal("0"))
 
     for charge in charges:
+        # A Vercel define o "dia" de cobrança em fuso do Pacífico (período
+        # [dia 07:00Z, dia+1 07:00Z)). Como consultamos a janela em meia-noite
+        # UTC, a Billing API devolve por sobreposição o dia Pacífico anterior a
+        # `from_d`. `charge.day` (data UTC do ChargePeriodStart) já é o dia-
+        # calendário do Pacífico; basta clipar ao intervalo pedido para não
+        # exibir o dia que vazou (nem qualquer borda fora do range).
+        if charge.day < from_d or charge.day > to_d:
+            continue
         billed = charge.billed_cost
         effective = charge.effective_cost
         total_billed += billed
