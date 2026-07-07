@@ -36,6 +36,7 @@ from backend.models.bigquery_cost import (
     BqCostUserDailyPoint,
     BqCostUserRow,
 )
+from backend.services.cost_common import TTLCache, env_int, resolve_window
 from backend.services.exchange_rate import get_exchange_rate
 
 logger = logging.getLogger(__name__)
@@ -71,13 +72,7 @@ def is_enabled() -> bool:
 
 
 def _cache_ttl() -> int:
-    raw = (os.getenv("BQ_COST_CACHE_TTL_SECONDS") or "").strip()
-    if not raw:
-        return DEFAULT_CACHE_TTL
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return DEFAULT_CACHE_TTL
+    return env_int("BQ_COST_CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL)
 
 
 def _price_per_tib() -> Decimal:
@@ -91,13 +86,7 @@ def _price_per_tib() -> Decimal:
 
 
 def _max_range_days() -> int:
-    raw = (os.getenv("BQ_COST_MAX_RANGE_DAYS") or "").strip()
-    if not raw:
-        return DEFAULT_MAX_RANGE_DAYS
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        return DEFAULT_MAX_RANGE_DAYS
+    return env_int("BQ_COST_MAX_RANGE_DAYS", DEFAULT_MAX_RANGE_DAYS, minimum=1)
 
 
 def _strip_region_prefix(token: str) -> str:
@@ -119,44 +108,11 @@ def _configured_regions() -> tuple[str, ...]:
     return items or DEFAULT_REGIONS
 
 
-_cache_lock = threading.Lock()
-_cache: dict[str, tuple[float, BqCostDashboardResponse]] = {}
-
-
-def _cache_get(key: str) -> BqCostDashboardResponse | None:
-    ttl = _cache_ttl()
-    if ttl <= 0:
-        return None
-    with _cache_lock:
-        entry = _cache.get(key)
-        if entry is None:
-            return None
-        ts, payload = entry
-        if time.time() - ts > ttl:
-            _cache.pop(key, None)
-            return None
-        return payload
-
-
-def _cache_put(key: str, payload: BqCostDashboardResponse) -> None:
-    if _cache_ttl() <= 0:
-        return
-    with _cache_lock:
-        _cache[key] = (time.time(), payload)
+_cache: TTLCache[BqCostDashboardResponse] = TTLCache(_cache_ttl)
 
 
 def clear_cache() -> None:
-    with _cache_lock:
-        _cache.clear()
-
-
-def _parse_date(value: str | None, *, field: str) -> date:
-    if not value:
-        raise ValueError(f"`{field}` é obrigatório (YYYY-MM-DD).")
-    try:
-        return date.fromisoformat(value.strip())
-    except ValueError as exc:
-        raise ValueError(f"`{field}` deve estar no formato YYYY-MM-DD.") from exc
+    _cache.clear()
 
 
 def _normalize_regions(raw: str | None) -> tuple[str, ...]:
@@ -175,15 +131,7 @@ def _resolve_window(
     to_str: str | None,
     regions_str: str | None,
 ) -> tuple[date, date, tuple[str, ...]]:
-    from_d = _parse_date(from_str, field="from")
-    to_d = _parse_date(to_str, field="to")
-    if from_d > to_d:
-        raise ValueError("`from` deve ser anterior ou igual a `to`.")
-    span = (to_d - from_d).days + 1
-    if span > _max_range_days():
-        raise ValueError(
-            f"Intervalo máximo é {_max_range_days()} dias (recebido: {span})."
-        )
+    from_d, to_d = resolve_window(from_str, to_str, max_days=_max_range_days())
     regions = _normalize_regions(regions_str)
     return from_d, to_d, regions
 
@@ -806,7 +754,7 @@ async def build_dashboard(
     from_d, to_d, regions = _resolve_window(from_str, to_str, regions_str)
     cache_key = f"{from_d.isoformat()}|{to_d.isoformat()}|{','.join(regions)}"
     if use_cache:
-        cached = _cache_get(cache_key)
+        cached = _cache.get(cache_key)
         if cached is not None:
             return cached.model_copy(update={"cached": True})
 
@@ -832,7 +780,7 @@ async def build_dashboard(
     }
 
     response = _build_response(from_d, to_d, regions, cal, agg, price_by_region)
-    _cache_put(cache_key, response)
+    _cache.put(cache_key, response)
     return response
 
 

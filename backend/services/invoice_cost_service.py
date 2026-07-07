@@ -21,8 +21,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import threading
-import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -34,6 +32,7 @@ from googleapiclient.discovery import build as gapi_build
 
 from backend import bigquery_store
 from backend.models.invoice_cost import InvoiceCostResponse, InvoiceDailyRow
+from backend.services.cost_common import TTLCache, env_int, resolve_window
 
 logger = logging.getLogger(__name__)
 
@@ -81,70 +80,18 @@ def is_enabled() -> bool:
 
 
 def _cache_ttl() -> int:
-    raw = (os.getenv("INVOICE_COST_CACHE_TTL_SECONDS") or "").strip()
-    try:
-        return max(0, int(raw)) if raw else DEFAULT_CACHE_TTL
-    except ValueError:
-        return DEFAULT_CACHE_TTL
+    return env_int("INVOICE_COST_CACHE_TTL_SECONDS", DEFAULT_CACHE_TTL)
 
 
 def _max_range_days() -> int:
-    raw = (os.getenv("INVOICE_COST_MAX_RANGE_DAYS") or "").strip()
-    try:
-        return max(1, int(raw)) if raw else DEFAULT_MAX_RANGE_DAYS
-    except ValueError:
-        return DEFAULT_MAX_RANGE_DAYS
+    return env_int("INVOICE_COST_MAX_RANGE_DAYS", DEFAULT_MAX_RANGE_DAYS, minimum=1)
 
 
-_cache_lock = threading.Lock()
-_cache: dict[str, tuple[float, InvoiceCostResponse]] = {}
-
-
-def _cache_get(key: str) -> InvoiceCostResponse | None:
-    ttl = _cache_ttl()
-    if ttl <= 0:
-        return None
-    with _cache_lock:
-        entry = _cache.get(key)
-        if entry is None:
-            return None
-        ts, payload = entry
-        if time.time() - ts > ttl:
-            _cache.pop(key, None)
-            return None
-        return payload
-
-
-def _cache_put(key: str, payload: InvoiceCostResponse) -> None:
-    if _cache_ttl() <= 0:
-        return
-    with _cache_lock:
-        _cache[key] = (time.time(), payload)
+_cache: TTLCache[InvoiceCostResponse] = TTLCache(_cache_ttl)
 
 
 def clear_cache() -> None:
-    with _cache_lock:
-        _cache.clear()
-
-
-def _parse_date(value: str | None, *, field: str) -> date:
-    if not value:
-        raise ValueError(f"`{field}` é obrigatório (YYYY-MM-DD).")
-    try:
-        return date.fromisoformat(value.strip())
-    except ValueError as exc:
-        raise ValueError(f"`{field}` deve estar no formato YYYY-MM-DD.") from exc
-
-
-def _resolve_window(from_str: str | None, to_str: str | None) -> tuple[date, date]:
-    from_d = _parse_date(from_str, field="from")
-    to_d = _parse_date(to_str, field="to")
-    if from_d > to_d:
-        raise ValueError("`from` deve ser anterior ou igual a `to`.")
-    span = (to_d - from_d).days + 1
-    if span > _max_range_days():
-        raise ValueError(f"Intervalo máximo é {_max_range_days()} dias (recebido: {span}).")
-    return from_d, to_d
+    _cache.clear()
 
 
 def _to_decimal(value: Any) -> Decimal:
@@ -282,10 +229,10 @@ async def build_dashboard(
     billing_table = _billing_table()
     assert billing_table is not None
 
-    from_d, to_d = _resolve_window(from_str, to_str)
+    from_d, to_d = resolve_window(from_str, to_str, max_days=_max_range_days())
     cache_key = f"{from_d.isoformat()}|{to_d.isoformat()}"
     if use_cache:
-        cached = _cache_get(cache_key)
+        cached = _cache.get(cache_key)
         if cached is not None:
             return cached.model_copy(update={"cached": True})
 
@@ -403,5 +350,5 @@ async def build_dashboard(
         cached=False,
         fetched_at=datetime.now(timezone.utc).isoformat(),
     )
-    _cache_put(cache_key, response)
+    _cache.put(cache_key, response)
     return response
