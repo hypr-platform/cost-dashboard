@@ -73,6 +73,7 @@ export type BqCostDashboardResponse = {
   other_cost_usd: string;
   other_cost_brl: string;
   price_by_region: Record<string, string>;
+  filtered_users: string[];
 };
 
 export function fetchBigQueryCostDashboard(

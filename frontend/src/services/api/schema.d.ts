@@ -457,6 +457,11 @@ export interface components {
             price_by_region: {
                 [key: string]: string;
             };
+            /**
+             * Filtered Users
+             * @default []
+             */
+            filtered_users: string[];
         };
         /**
          * BqCostLimitStatus
@@ -1284,6 +1289,8 @@ export interface operations {
                 to?: string | null;
                 /** @description Regiões BigQuery separadas por vírgula (ex: us,southamerica-east1). */
                 regions?: string | null;
+                /** @description Filtra por usuários (emails/SAs separados por vírgula; aceita '(sem usuário)'). */
+                users?: string | null;
                 no_cache?: boolean;
             };
             header?: never;

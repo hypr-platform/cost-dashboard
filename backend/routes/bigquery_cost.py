@@ -42,6 +42,10 @@ async def get_dashboard(
         default=None,
         description="Regiões BigQuery separadas por vírgula (ex: us,southamerica-east1).",
     ),
+    users: str | None = Query(
+        default=None,
+        description="Filtra por usuários (emails/SAs separados por vírgula; aceita '(sem usuário)').",
+    ),
     no_cache: bool = Query(default=False),
 ) -> BqCostDashboardResponse:
     if not bigquery_cost_service.is_enabled():
@@ -55,6 +59,7 @@ async def get_dashboard(
             to_str=to_date,
             regions_str=regions,
             use_cache=not no_cache,
+            users_str=users,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

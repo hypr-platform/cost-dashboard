@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import {
   fetchBigQueryCostDashboard,
@@ -33,11 +33,14 @@ function buildUrl(
   from: string,
   to: string,
   regions: string,
+  users: string,
 ): string {
   const base = apiBase.replace(/\/$/, "");
   const params = new URLSearchParams({ from, to });
-  const trimmed = regions.trim();
-  if (trimmed) params.set("regions", trimmed);
+  const trimmedRegions = regions.trim();
+  if (trimmedRegions) params.set("regions", trimmedRegions);
+  const trimmedUsers = users.trim();
+  if (trimmedUsers) params.set("users", trimmedUsers);
   return `${base}/api/bigquery-cost/dashboard?${params.toString()}`;
 }
 
@@ -47,6 +50,7 @@ export default function BigQueryTab() {
   const [from, setFrom] = useState<string>(daysAgoKey(29));
   const [to, setTo] = useState<string>(todayKey());
   const [regions, setRegions] = useState<string>("");
+  const [users, setUsers] = useState<string>("");
   const [expandedQuery, setExpandedQuery] = useState<string | null>(null);
   const [selectedUser, setSelectedUser] = useState<{
     email: string;
@@ -57,8 +61,15 @@ export default function BigQueryTab() {
   const [committedFrom, setCommittedFrom] = useState<string>(daysAgoKey(29));
   const [committedTo, setCommittedTo] = useState<string>(todayKey());
   const [committedRegions, setCommittedRegions] = useState<string>("");
+  const [committedUsers, setCommittedUsers] = useState<string>("");
 
-  const url = buildUrl(apiBase, committedFrom, committedTo, committedRegions);
+  const url = buildUrl(
+    apiBase,
+    committedFrom,
+    committedTo,
+    committedRegions,
+    committedUsers,
+  );
   const { data, error, isValidating, mutate } =
     useSWR<BqCostDashboardResponse>(url, fetchBigQueryCostDashboard, {
       shouldRetryOnError: false,
@@ -66,10 +77,20 @@ export default function BigQueryTab() {
       revalidateOnFocus: false,
     });
 
+  // Sugestões do autocomplete: usuários vistos na última carga SEM filtro
+  // (com filtro ativo o by_user só traz os filtrados).
+  const [knownUsers, setKnownUsers] = useState<string[]>([]);
+  useEffect(() => {
+    if (data && !data.filtered_users?.length) {
+      setKnownUsers(data.by_user.map((u) => u.user_email));
+    }
+  }, [data]);
+
   function handleRefresh() {
     setCommittedFrom(from);
     setCommittedTo(to);
     setCommittedRegions(regions);
+    setCommittedUsers(users);
     mutate();
   }
 
@@ -77,6 +98,8 @@ export default function BigQueryTab() {
   const totalUsd = Number(data?.total_cost_usd ?? 0);
   const fetchedAt = data?.fetched_at;
   const isCached = Boolean(data?.cached);
+  const filteredUsers = data?.filtered_users ?? [];
+  const isUserFiltered = filteredUsers.length > 0;
 
   const userColumns = useMemo<CostColumn<BqCostDashboardResponse["by_user"][number]>[]>(
     () => [
@@ -206,7 +229,11 @@ export default function BigQueryTab() {
                   fetchedAt
                     ? ` · atualizado ${new Date(fetchedAt).toLocaleString("pt-BR")}`
                     : ""
-                } · regiões: ${data.regions.join(", ") || "—"}`
+                } · regiões: ${data.regions.join(", ") || "—"}${
+                  isUserFiltered
+                    ? ` · filtro: ${filteredUsers.join(", ")}`
+                    : ""
+                }`
               : "Carregando…"}
           </p>
         </div>
@@ -218,16 +245,34 @@ export default function BigQueryTab() {
           onRefresh={handleRefresh}
           isValidating={isValidating}
           extraFields={
-            <label className="bqCostField">
-              <span className="bqCostFieldLabel">Regiões</span>
-              <input
-                type="text"
-                className="claudeDayInput bqCostRegionsInput"
-                placeholder="ex: us,southamerica-east1"
-                value={regions}
-                onChange={(e) => setRegions(e.target.value)}
-              />
-            </label>
+            <>
+              <label className="bqCostField">
+                <span className="bqCostFieldLabel">Regiões</span>
+                <input
+                  type="text"
+                  className="claudeDayInput bqCostRegionsInput"
+                  placeholder="ex: us,southamerica-east1"
+                  value={regions}
+                  onChange={(e) => setRegions(e.target.value)}
+                />
+              </label>
+              <label className="bqCostField">
+                <span className="bqCostFieldLabel">Usuários</span>
+                <input
+                  type="text"
+                  className="claudeDayInput bqCostRegionsInput"
+                  placeholder="ex: fulano@hypr.mobi,sa@…"
+                  value={users}
+                  onChange={(e) => setUsers(e.target.value)}
+                  list="bqCostUserOptions"
+                />
+                <datalist id="bqCostUserOptions">
+                  {knownUsers.map((email) => (
+                    <option key={email} value={email} />
+                  ))}
+                </datalist>
+              </label>
+            </>
           }
         />
       </header>
@@ -242,13 +287,15 @@ export default function BigQueryTab() {
 
       <section className="bqCostKpis">
         <CostKpi
-          label="Custo total"
+          label={isUserFiltered ? "Custo (filtrado)" : "Custo total"}
           value={data ? BRL.format(totalBrl) : null}
           hint={data ? formatUsd(totalUsd) : null}
           tooltip={
-            data?.calibrated
-              ? `Custo total do serviço BigQuery no billing — o mesmo número da aba Google Cloud. Composição: análise (query) ${BRL.format(Number(data.analysis_cost_brl))} + storage ${BRL.format(Number(data.storage_cost_brl))} + outros ${BRL.format(Number(data.other_cost_brl))}. A análise é precificada pela tarifa real de cada região (ex.: São Paulo ≈ 2× a US).`
-              : "Estimativa on-demand a partir dos bytes faturados (billing indisponível para calibrar)."
+            isUserFiltered
+              ? "Custo de análise (query) atribuído aos usuários filtrados. Storage e streaming são do projeto inteiro e não entram quando há filtro de usuário."
+              : data?.calibrated
+                ? `Custo total do serviço BigQuery no billing — o mesmo número da aba Google Cloud. Composição: análise (query) ${BRL.format(Number(data.analysis_cost_brl))} + storage ${BRL.format(Number(data.storage_cost_brl))} + outros ${BRL.format(Number(data.other_cost_brl))}. A análise é precificada pela tarifa real de cada região (ex.: São Paulo ≈ 2× a US).`
+                : "Estimativa on-demand a partir dos bytes faturados (billing indisponível para calibrar)."
           }
         />
         <CostKpi

@@ -229,12 +229,35 @@ _WHERE = """
   AND total_bytes_billed > 0
 """
 
+_NO_USER_KEY = "(sem usuário)"
+
+
+def _normalize_users(raw: str | None) -> tuple[str, ...]:
+    """Emails/SAs separados por vírgula, normalizados (lowercase, sem duplicatas)."""
+    if not raw:
+        return ()
+    return tuple(
+        dict.fromkeys(token.strip().lower() for token in raw.split(",") if token.strip())
+    )
+
+
+def _users_clause(users: tuple[str, ...]) -> str:
+    """Filtro SQL opcional por usuário. Aceita o marcador '(sem usuário)'."""
+    if not users:
+        return ""
+    conds: list[str] = []
+    if any(u != _NO_USER_KEY for u in users):
+        conds.append("LOWER(TRIM(user_email)) IN UNNEST(@users)")
+    if _NO_USER_KEY in users:
+        conds.append("(user_email IS NULL OR TRIM(user_email) = '')")
+    return f"\n  AND ({' OR '.join(conds)})"
+
 
 def _table_ref(project: str, region: str) -> str:
     return f"`{project}`.`region-{region}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT"
 
 
-def _q_by_user(project: str, region: str) -> str:
+def _q_by_user(project: str, region: str, users_clause: str = "") -> str:
     return f"""
 SELECT
   IFNULL(NULLIF(LOWER(TRIM(user_email)), ''), '(sem usuário)') AS user_email,
@@ -242,12 +265,12 @@ SELECT
   SUM(total_bytes_billed) AS bytes_billed,
   SUM(total_slot_ms) AS slot_ms
 FROM {_table_ref(project, region)}
-WHERE {_WHERE}
+WHERE {_WHERE}{users_clause}
 GROUP BY user_email
 """.strip()
 
 
-def _q_by_statement(project: str, region: str) -> str:
+def _q_by_statement(project: str, region: str, users_clause: str = "") -> str:
     return f"""
 SELECT
   IFNULL(statement_type, 'UNKNOWN') AS statement_type,
@@ -255,12 +278,12 @@ SELECT
   SUM(total_bytes_billed) AS bytes_billed,
   SUM(total_slot_ms) AS slot_ms
 FROM {_table_ref(project, region)}
-WHERE {_WHERE}
+WHERE {_WHERE}{users_clause}
 GROUP BY statement_type
 """.strip()
 
 
-def _q_by_table(project: str, region: str, top_n: int) -> str:
+def _q_by_table(project: str, region: str, top_n: int, users_clause: str = "") -> str:
     # Rateia o custo do job entre as tabelas referenciadas válidas (mesma lógica
     # anterior em Python: share = bytes / nº de refs válidas).
     return f"""
@@ -273,7 +296,7 @@ WITH jobs AS (
       WHERE t.project_id IS NOT NULL AND t.dataset_id IS NOT NULL AND t.table_id IS NOT NULL
     ) AS refs
   FROM {_table_ref(project, region)}
-  WHERE {_WHERE}
+  WHERE {_WHERE}{users_clause}
 )
 SELECT
   CONCAT(r.project_id, '.', r.dataset_id, '.', r.table_id) AS table_fqn,
@@ -287,25 +310,25 @@ LIMIT {int(top_n)}
 """.strip()
 
 
-def _q_daily_by_user(project: str, region: str) -> str:
+def _q_daily_by_user(project: str, region: str, users_clause: str = "") -> str:
     return f"""
 SELECT
   DATE(creation_time) AS day,
   IFNULL(NULLIF(LOWER(TRIM(user_email)), ''), '(sem usuário)') AS user_email,
   SUM(total_bytes_billed) AS bytes_billed
 FROM {_table_ref(project, region)}
-WHERE {_WHERE}
+WHERE {_WHERE}{users_clause}
 GROUP BY day, user_email
 """.strip()
 
 
-def _q_top_queries(project: str, region: str, top_n: int) -> str:
+def _q_top_queries(project: str, region: str, top_n: int, users_clause: str = "") -> str:
     return f"""
 SELECT
   job_id, user_email, statement_type, creation_time,
   total_bytes_billed, total_slot_ms, query
 FROM {_table_ref(project, region)}
-WHERE {_WHERE}
+WHERE {_WHERE}{users_clause}
 ORDER BY total_bytes_billed DESC
 LIMIT {int(top_n)}
 """.strip()
@@ -367,13 +390,17 @@ def _run_sql(
     sql: str,
     from_ts: datetime,
     to_ts: datetime,
+    users: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("from_ts", "TIMESTAMP", from_ts),
-            bigquery.ScalarQueryParameter("to_ts", "TIMESTAMP", to_ts),
-        ]
-    )
+    params: list[Any] = [
+        bigquery.ScalarQueryParameter("from_ts", "TIMESTAMP", from_ts),
+        bigquery.ScalarQueryParameter("to_ts", "TIMESTAMP", to_ts),
+    ]
+    # @users só existe no SQL quando há emails concretos (ver _users_clause).
+    emails = [u for u in users if u != _NO_USER_KEY]
+    if emails:
+        params.append(bigquery.ArrayQueryParameter("users", "STRING", emails))
+    job_config = bigquery.QueryJobConfig(query_parameters=params)
     return [
         dict(row)
         for row in client.query(sql, job_config=job_config).result(
@@ -500,23 +527,27 @@ async def _fetch_region_data(
     from_ts: datetime,
     to_ts: datetime,
     loop: asyncio.AbstractEventLoop,
+    users: tuple[str, ...] = (),
 ) -> dict[str, dict[str, list[dict[str, Any]]]]:
     """Agrega no BigQuery (GROUP BY) por região: 5 queries leves por região.
 
     Cada query retorna poucas linhas — muito mais rápido que puxar todos os jobs
-    para Python. Retorna {região: {kind: rows}}.
+    para Python. Retorna {região: {kind: rows}}. `users` restringe todas as
+    agregações aos usuários informados.
     """
+    users_clause = _users_clause(users)
+
     async def _run(sql: str) -> list[dict[str, Any]]:
-        return await loop.run_in_executor(None, _run_sql, client, sql, from_ts, to_ts)
+        return await loop.run_in_executor(None, _run_sql, client, sql, from_ts, to_ts, users)
 
     tasks: list[Any] = []
     task_meta: list[tuple[str, str]] = []  # (kind, region)
     for region in regions:
-        tasks.append(_run(_q_by_user(project, region)));        task_meta.append(("user", region))
-        tasks.append(_run(_q_by_statement(project, region)));   task_meta.append(("stmt", region))
-        tasks.append(_run(_q_by_table(project, region, DEFAULT_TOP_TABLES))); task_meta.append(("table", region))
-        tasks.append(_run(_q_top_queries(project, region, DEFAULT_TOP_QUERIES))); task_meta.append(("top", region))
-        tasks.append(_run(_q_daily_by_user(project, region))); task_meta.append(("daily", region))
+        tasks.append(_run(_q_by_user(project, region, users_clause)));        task_meta.append(("user", region))
+        tasks.append(_run(_q_by_statement(project, region, users_clause)));   task_meta.append(("stmt", region))
+        tasks.append(_run(_q_by_table(project, region, DEFAULT_TOP_TABLES, users_clause))); task_meta.append(("table", region))
+        tasks.append(_run(_q_top_queries(project, region, DEFAULT_TOP_QUERIES, users_clause))); task_meta.append(("top", region))
+        tasks.append(_run(_q_daily_by_user(project, region, users_clause))); task_meta.append(("daily", region))
 
     try:
         results = await asyncio.gather(*tasks)
@@ -601,6 +632,7 @@ def _build_response(
     cal: _Calibration,
     agg: _Aggregates,
     price_by_region: dict[str, Decimal],
+    filtered_users: tuple[str, ...] = (),
 ) -> BqCostDashboardResponse:
     """Monta a resposta do dashboard a partir dos acumuladores + calibração."""
     to_usd, to_brl = cal.to_usd, cal.to_brl
@@ -737,6 +769,7 @@ def _build_response(
         other_cost_usd=to_usd(other_native).quantize(Decimal("0.01")),
         other_cost_brl=to_brl(other_native).quantize(Decimal("0.01")),
         price_by_region=price_by_region,
+        filtered_users=list(filtered_users),
     )
 
 
@@ -745,6 +778,7 @@ async def build_dashboard(
     to_str: str | None,
     regions_str: str | None = None,
     use_cache: bool = True,
+    users_str: str | None = None,
 ) -> BqCostDashboardResponse:
     if not is_enabled():
         raise RuntimeError(
@@ -752,7 +786,8 @@ async def build_dashboard(
         )
 
     from_d, to_d, regions = _resolve_window(from_str, to_str, regions_str)
-    cache_key = f"{from_d.isoformat()}|{to_d.isoformat()}|{','.join(regions)}"
+    users = _normalize_users(users_str)
+    cache_key = f"{from_d.isoformat()}|{to_d.isoformat()}|{','.join(regions)}|{','.join(users)}"
     if use_cache:
         cached = _cache.get(cache_key)
         if cached is not None:
@@ -764,14 +799,38 @@ async def build_dashboard(
     to_ts = datetime.combine(to_d, dtime.max, tzinfo=timezone.utc)
     loop = asyncio.get_running_loop()
 
-    region_data = await _fetch_region_data(client, project, regions, from_ts, to_ts, loop)
+    fetch_task = _fetch_region_data(client, project, regions, from_ts, to_ts, loop, users)
 
-    # Tarifa efetiva por região precisa dos bytes do JOBS por região.
-    region_bytes_by_region = {
-        region: sum(int(r.get("bytes_billed") or 0) for r in region_data[region]["user"])
-        for region in regions
-    }
+    # Tarifa efetiva por região precisa dos bytes TOTAIS do JOBS por região
+    # (billing 'Analysis' / bytes). Com filtro de usuário ativo as agregações
+    # vêm filtradas, então os bytes da região são consultados à parte — senão a
+    # tarifa sairia inflada (fatura inteira dividida pelos bytes de um usuário).
+    if users:
+        region_data, bytes_lists = await asyncio.gather(
+            fetch_task,
+            asyncio.gather(*(
+                loop.run_in_executor(
+                    None, _run_sql, client, _q_region_bytes(project, region), from_ts, to_ts,
+                )
+                for region in regions
+            )),
+        )
+        region_bytes_by_region = {
+            region: (int(rows[0].get("bytes_billed") or 0) if rows else 0)
+            for region, rows in zip(regions, bytes_lists)
+        }
+    else:
+        region_data = await fetch_task
+        region_bytes_by_region = {
+            region: sum(int(r.get("bytes_billed") or 0) for r in region_data[region]["user"])
+            for region in regions
+        }
     cal = await _resolve_calibration(client, from_d, to_d, region_bytes_by_region, loop)
+    if users:
+        # Storage/streaming do billing são do projeto inteiro — não atribuíveis
+        # por usuário. Com filtro ativo, o total exibido vira só a análise
+        # atribuída aos usuários filtrados (cat_native vazio → esse fallback).
+        cal.cat_native = {}
 
     agg = _aggregate_regions(region_data, regions, cal.cost_native)
     price_by_region: dict[str, Decimal] = {
@@ -779,13 +838,12 @@ async def build_dashboard(
         for region, rate in cal.rate_native_by_region.items()
     }
 
-    response = _build_response(from_d, to_d, regions, cal, agg, price_by_region)
+    response = _build_response(from_d, to_d, regions, cal, agg, price_by_region, users)
     _cache.put(cache_key, response)
     return response
 
 
 DEFAULT_TOP_USER_QUERIES = 25
-_NO_USER_KEY = "(sem usuário)"
 
 
 async def build_user_queries(

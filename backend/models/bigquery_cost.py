@@ -161,3 +161,6 @@ class BqCostDashboardResponse(BaseModel):
     other_cost_brl: Decimal = Decimal("0")
     # Tarifa efetiva por região (USD/TiB), derivada do billing.
     price_by_region: dict[str, Decimal] = {}
+    # Usuários aplicados como filtro (vazio = sem filtro). Com filtro ativo, o
+    # total exibido é só a análise atribuída (storage/outros não são por usuário).
+    filtered_users: list[str] = []
