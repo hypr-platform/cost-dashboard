@@ -35,6 +35,7 @@ import {
   PlatformLegend,
 } from "@/shared/charts/homeRecharts";
 import { PLATFORM_COLORS, PLATFORM_LOGOS } from "@/shared/constants/platform";
+import { downloadCsv } from "@/features/dashboard/utils/csv";
 import {
   dv360AdvertiserRootUrl,
   dv360LineItemUrlGuess,
@@ -966,39 +967,6 @@ function nexdNexdSummaryRhythmPresentation(
     paceHint:
       paceVs.expectedPct != null ? nexdPaceCalendarHintPt(paceVs.vs) : null,
   };
-}
-
-function csvEscape(value: string | number | null | undefined): string {
-  const normalized = String(value ?? "");
-  if (
-    !normalized.includes('"') &&
-    !normalized.includes(",") &&
-    !normalized.includes("\n")
-  ) {
-    return normalized;
-  }
-  return `"${normalized.replace(/"/g, '""')}"`;
-}
-
-function downloadCsv(
-  filename: string,
-  headers: string[],
-  rows: Array<Array<string | number | null | undefined>>,
-) {
-  const lines = [
-    headers.map(csvEscape).join(","),
-    ...rows.map((row) => row.map(csvEscape).join(",")),
-  ];
-  const csvContent = `\uFEFF${lines.join("\n")}`;
-  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
 }
 
 async function downloadElementPng(

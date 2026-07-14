@@ -14,6 +14,7 @@ import {
   formatUsd,
 } from "@/features/dashboard/utils/cost-format";
 import { CostMoneyCell } from "@/features/dashboard/components/cost";
+import { downloadCsv } from "@/features/dashboard/utils/csv";
 
 type Props = {
   apiBase: string;
@@ -53,6 +54,33 @@ export default function BqUserQueriesModal({
   );
   const [expanded, setExpanded] = useState<number | null>(null);
 
+  function handleExportCsv() {
+    if (!data || data.groups.length === 0) return;
+    const headers = [
+      "Padrão de query",
+      "Statement type",
+      "Execuções",
+      "Bytes faturados",
+      "Custo (BRL)",
+      "Custo (USD)",
+      "SQL de exemplo",
+    ];
+    const rows = data.groups.map((g) => [
+      g.pattern_preview,
+      g.statement_type ?? "",
+      g.jobs,
+      g.bytes_billed,
+      g.cost_brl,
+      g.cost_usd,
+      g.sample_query,
+    ]);
+    downloadCsv(
+      `bq-queries-${emailLabel(user.email)}-${from}_${to}.csv`,
+      headers,
+      rows,
+    );
+  }
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
@@ -85,25 +113,49 @@ export default function BqUserQueriesModal({
               {formatUsd(user.costUsd)}
             </p>
           </div>
-          <button
-            type="button"
-            className="gcpDayModalClose"
-            onClick={onClose}
-            aria-label="Fechar"
-          >
-            <svg
-              viewBox="0 0 16 16"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              aria-hidden="true"
+          <div className="gcpDayModalActions">
+            <button
+              type="button"
+              className="gcpDayModalClose"
+              onClick={handleExportCsv}
+              disabled={!data || data.groups.length === 0}
+              title="Baixar CSV"
+              aria-label="Baixar CSV"
             >
-              <path d="m4 4 8 8M12 4l-8 8" />
-            </svg>
-          </button>
+              <svg
+                viewBox="0 0 16 16"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M8 2v8m0 0 3-3m-3 3L5 7M3 13h10" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="gcpDayModalClose"
+              onClick={onClose}
+              aria-label="Fechar"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width="16"
+                height="16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                aria-hidden="true"
+              >
+                <path d="m4 4 8 8M12 4l-8 8" />
+              </svg>
+            </button>
+          </div>
         </header>
 
         <div className="gcpDayModalBody">

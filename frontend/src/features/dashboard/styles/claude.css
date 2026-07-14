@@ -719,6 +719,13 @@
   gap: 4px;
 }
 
+.gcpDayModalActions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .gcpDayModalClose {
   flex-shrink: 0;
   display: flex;
@@ -738,6 +745,14 @@
   background: rgba(255, 255, 255, 0.05);
   color: #ededed;
   border-color: #3a3a3a;
+}
+
+.gcpDayModalClose:disabled {
+  opacity: 0.4;
+  cursor: default;
+  background: none;
+  color: #888;
+  border-color: #2a2a2a;
 }
 
 .gcpDayModalBody {
